@@ -74,7 +74,7 @@ class SkillReadResult:
 
 
 @dataclass(frozen=True, slots=True)
-class SkillCatalogPrompt:
+class SkillRuntimeRequestCatalog:
     content: str
     metadata: dict[str, object]
 

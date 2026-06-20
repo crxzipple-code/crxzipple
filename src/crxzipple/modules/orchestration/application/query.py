@@ -34,6 +34,7 @@ from crxzipple.modules.orchestration.domain.value_objects import (
     OrchestrationExecutorLeaseStatus,
     OrchestrationIngressStatus,
     OrchestrationRunStatus,
+    PendingApprovalRequest,
 )
 
 
@@ -47,6 +48,24 @@ class ExecutionStepSnapshot:
 class ExecutionChainSnapshot:
     chain: ExecutionChain
     steps: tuple[ExecutionStepSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionWaitingItemRef:
+    item: ExecutionStepItem
+    step: ExecutionStep
+    chain: ExecutionChain
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionWaitingStatus:
+    run: OrchestrationRun
+    active_chain: ExecutionChain | None
+    waiting_steps: tuple[ExecutionStep, ...]
+    waiting_items: tuple[ExecutionWaitingItemRef, ...]
+    pending_tool_run_ids: tuple[str, ...]
+    pending_approval_request: PendingApprovalRequest | None
+    waiting_reason: str | None
 
 
 @dataclass(slots=True)
@@ -66,9 +85,13 @@ class OrchestrationRunQueryService:
         self,
         *,
         status: OrchestrationRunStatus | None = None,
+        session_key: str | None = None,
     ) -> list[OrchestrationRun]:
         with self.uow_factory() as uow:
-            return uow.orchestration_runs.list(status=status)
+            return uow.orchestration_runs.list(
+                status=status,
+                session_key=session_key,
+            )
 
     def get_active_execution_chain(self, turn_id: str) -> ExecutionChain | None:
         with self.uow_factory() as uow:
@@ -132,6 +155,43 @@ class OrchestrationRunQueryService:
                     ),
                 )
             return snapshots
+
+    def get_execution_waiting_status(self, run_id: str) -> ExecutionWaitingStatus:
+        with self.uow_factory() as uow:
+            run = uow.orchestration_runs.get(run_id)
+            if run is None:
+                raise OrchestrationRunNotFoundError(
+                    f"Orchestration run '{run_id}' was not found.",
+                )
+            active_chain = uow.execution_chains.get_active_for_turn(run.id)
+            waiting_steps: list[ExecutionStep] = []
+            waiting_items: list[ExecutionWaitingItemRef] = []
+            if active_chain is not None:
+                waiting_steps = uow.execution_steps.list_for_chain(
+                    active_chain.id,
+                    status=ExecutionStepStatus.WAITING,
+                )
+                for step in waiting_steps:
+                    for item in uow.execution_step_items.list_for_step(
+                        step.id,
+                        status=ExecutionStepItemStatus.WAITING,
+                    ):
+                        waiting_items.append(
+                            ExecutionWaitingItemRef(
+                                item=item,
+                                step=step,
+                                chain=active_chain,
+                            ),
+                        )
+            return ExecutionWaitingStatus(
+                run=run,
+                active_chain=active_chain,
+                waiting_steps=tuple(waiting_steps),
+                waiting_items=tuple(waiting_items),
+                pending_tool_run_ids=tuple(run.pending_tool_run_ids),
+                pending_approval_request=run.pending_approval_request(),
+                waiting_reason=run.waiting_reason,
+            )
 
     def list_execution_steps(
         self,

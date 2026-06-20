@@ -8,19 +8,20 @@ from crxzipple.app.integration.context_workspace_agent import (
 from crxzipple.modules.agent.domain.exceptions import AgentNotFoundError
 from crxzipple.modules.context_workspace.application import (
     CONTEXT_INSTRUCTIONS_NODE_ID,
+    ContextSliceBuilderService,
     ContextActionInput,
     ContextOwnerRegistry,
-    ContextRenderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
-    RenderContextPromptInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.domain import ContextAction
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
 
@@ -66,7 +67,8 @@ def test_agent_home_provider_mounts_home_files_as_agent_nodes() -> None:
     assert nodes["agent.home.IDENTITY.md"].metadata["role"] == "identity"
     assert not nodes["agent.home.AGENT.md"].state.collapsed
     assert nodes["agent.home.USER.md"].state.collapsed
-    assert nodes["agent.home.USER.md"].content == "Prefers concise updates."
+    assert nodes["agent.home.USER.md"].content == ""
+    assert nodes["agent.home.USER.md"].summary == "Prefers concise updates."
 
 
 def test_agent_home_provider_skips_missing_profile_home() -> None:
@@ -91,7 +93,7 @@ def test_agent_home_provider_skips_missing_files() -> None:
                 files=(
                     _File("AGENT.md", False, ""),
                     _File("SOUL.md", True, "Still available."),
-                    _File("USER.md", False, ""),
+                    _File("USER.md", True, "   "),
                     _File("IDENTITY.md", False, ""),
                 ),
             ),
@@ -129,7 +131,7 @@ def test_agent_home_provider_truncates_oversized_home_file() -> None:
     tree = services["tree"].list_tree("session:oversized-home")
     node = next(item for item in tree.nodes if item.id == "agent.home.AGENT.md")
 
-    assert len(node.content) == 20_000
+    assert node.content == ""
     assert node.metadata["content_chars"] == 20_000
     assert node.metadata["truncated"] is True
 
@@ -152,13 +154,13 @@ def test_agent_home_collapsed_files_show_summary_until_expanded() -> None:
             agent_id="assistant",
         ),
     )
-    prompt = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:render-home"),
-    ).prompt_body
+    prompt = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:render-home"),
+    ).debug_body
 
-    assert "<content>Core role instructions.</content>" in prompt
     assert "<summary>Stable user preference details.</summary>" in prompt
     assert "<content>Stable user preference details.</content>" not in prompt
+    assert "<content>Core role instructions.</content>" not in prompt
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -167,11 +169,51 @@ def test_agent_home_collapsed_files_show_summary_until_expanded() -> None:
             action=ContextAction.EXPAND,
         ),
     )
-    expanded_prompt = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:render-home"),
-    ).prompt_body
+    expanded_prompt = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:render-home"),
+    ).debug_body
 
-    assert "<content>Stable user preference details.</content>" in expanded_prompt
+    assert "<content>Stable user preference details.</content>" not in expanded_prompt
+    assert "<summary>Stable user preference details.</summary>" in expanded_prompt
+
+
+def test_agent_home_slice_is_handle_only_without_file_body() -> None:
+    services = _context_services(
+        _AgentHomeService(
+            _Snapshot(
+                files=(
+                    _File("AGENT.md", True, "Core role instructions."),
+                ),
+            ),
+        ),
+    )
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:slice-home",
+            agent_id="assistant",
+        ),
+    )
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:slice-home",
+            node_id="agent.home.AGENT.md",
+            action=ContextAction.EXPAND,
+        ),
+    )
+    context_slice = services["slice"].build_slice(
+        session_key="session:slice-home",
+        run_id="run-home",
+        audience="trace_timeline",
+    )
+
+    item = next(
+        item for item in context_slice.items if item.item_id == "agent.home.AGENT.md"
+    )
+    assert item.text == ""
+    assert item.content is None
+    assert item.summary == "Core role instructions."
+    assert item.metadata["owner_resolution"] == "handle_only"
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +256,7 @@ def _context_services(agent_service: _AgentHomeService):
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
     operations = InMemoryContextOperationRepository()
-    snapshots = InMemoryContextRenderSnapshotRepository()
+    snapshots = InMemoryContextSnapshotRepository()
     return {
         "workspace": ContextWorkspaceService(
             workspace_repository=workspaces,
@@ -227,9 +269,13 @@ def _context_services(agent_service: _AgentHomeService):
             operation_repository=operations,
             owner_registry=registry,
         ),
-        "render": ContextRenderService(
+        "render": ContextObservationSnapshotService(
             workspace_repository=workspaces,
             node_repository=nodes,
             snapshot_repository=snapshots,
+        ),
+        "slice": ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
         ),
     }

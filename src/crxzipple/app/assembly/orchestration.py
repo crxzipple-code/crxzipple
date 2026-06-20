@@ -10,7 +10,7 @@ from crxzipple.app.assembly.runtime_defaults import (
     RuntimeSettingsBootstrapConfig,
 )
 from crxzipple.app.integration.context_workspace_orchestration.adapter import (
-    ContextWorkspacePromptSnapshotAdapter,
+    ContextWorkspaceRunSnapshotAdapter,
 )
 from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ApplicationFactory, AssemblyTarget
@@ -23,7 +23,7 @@ from crxzipple.modules.orchestration.application import (
     OrchestrationRunQueryService,
     OrchestrationSchedulerService,
     OrchestrationSessionRecorder,
-    RunPromptInputCollector,
+    RuntimeLlmRequestDraftCollector,
     ToolResolver,
 )
 from crxzipple.modules.orchestration.application.cancellation import (
@@ -162,7 +162,10 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
                 AppKey.CONTEXT_TREE_SERVICE,
-                AppKey.CONTEXT_RENDER_SERVICE,
+                AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE,
+                AppKey.CONTEXT_CONTROL_SLICE_BUILDER,
+                AppKey.CONTEXT_SLICE_BUILDER,
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
             ),
             build=_build_orchestration_admin_runtime_factory,
             targets=ORCHESTRATION_ADMIN_RUNTIME_TARGETS,
@@ -198,7 +201,10 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
                 AppKey.CONTEXT_TREE_SERVICE,
-                AppKey.CONTEXT_RENDER_SERVICE,
+                AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE,
+                AppKey.CONTEXT_CONTROL_SLICE_BUILDER,
+                AppKey.CONTEXT_SLICE_BUILDER,
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
             ),
             build=_build_orchestration_test_runtime_factory,
             targets=ORCHESTRATION_TEST_RUNTIME_TARGETS,
@@ -223,7 +229,10 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
                 AppKey.CONTEXT_TREE_SERVICE,
-                AppKey.CONTEXT_RENDER_SERVICE,
+                AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE,
+                AppKey.CONTEXT_CONTROL_SLICE_BUILDER,
+                AppKey.CONTEXT_SLICE_BUILDER,
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
             ),
             build=_build_orchestration_scheduler_factory,
             targets=ORCHESTRATION_SCHEDULER_TARGETS,
@@ -248,7 +257,10 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
                 AppKey.CONTEXT_TREE_SERVICE,
-                AppKey.CONTEXT_RENDER_SERVICE,
+                AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE,
+                AppKey.CONTEXT_CONTROL_SLICE_BUILDER,
+                AppKey.CONTEXT_SLICE_BUILDER,
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
             ),
             build=_build_orchestration_executor_factory,
             targets=ORCHESTRATION_EXECUTOR_TARGETS,
@@ -354,12 +366,20 @@ def _build_orchestration_runtime(ctx) -> OrchestrationRuntimeAssembly:
         session_service=ctx.require(AppKey.SESSION_SERVICE),
         session_resolution_service=ctx.require(AppKey.SESSION_RESOLUTION_SERVICE),
         dispatch_service=ctx.require(AppKey.DISPATCH_SERVICE),
-        skill_manager=ctx.require(AppKey.SKILL_MANAGER),
+        skill_runtime_request_resolver=ctx.require(AppKey.SKILL_MANAGER),
         artifact_service=ctx.require(AppKey.ARTIFACT_SERVICE),
         access_service=ctx.require(AppKey.ACCESS_SERVICE),
         context_workspace_service=ctx.require(AppKey.CONTEXT_WORKSPACE_SERVICE),
         context_tree_service=ctx.require(AppKey.CONTEXT_TREE_SERVICE),
-        context_render_service=ctx.require(AppKey.CONTEXT_RENDER_SERVICE),
+        context_observation_snapshot_service=ctx.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE),
+        request_render_snapshot_service=(
+            ctx.require(AppKey.CONTEXT_REQUEST_RENDER_SNAPSHOT_SERVICE)
+            if ctx.has(AppKey.CONTEXT_REQUEST_RENDER_SNAPSHOT_SERVICE)
+            else None
+        ),
+        context_control_slice_builder=ctx.require(AppKey.CONTEXT_CONTROL_SLICE_BUILDER),
+        context_slice_builder=ctx.require(AppKey.CONTEXT_SLICE_BUILDER),
+        runtime_request_catalog=ctx.require(AppKey.TOOL_SOURCE_QUERY_SERVICE),
         events_service=(
             ctx.require(AppKey.EVENTS_SERVICE) if ctx.has(AppKey.EVENTS_SERVICE) else None
         ),
@@ -393,35 +413,38 @@ def build_orchestration_runtime(
     session_service: Any,
     session_resolution_service: Any,
     dispatch_service: Any,
-    skill_manager: Any,
+    skill_runtime_request_resolver: Any,
     artifact_service: Any,
     access_service: Any,
     context_workspace_service: Any,
     context_tree_service: Any,
-    context_render_service: Any,
+    context_observation_snapshot_service: Any,
+    request_render_snapshot_service: Any | None,
+    context_control_slice_builder: Any,
+    context_slice_builder: Any,
+    runtime_request_catalog: Any,
     events_service: Any | None,
 ) -> OrchestrationRuntimeAssembly:
     authorization_port = AuthorizationServiceAdapter(authorization_service)
-    llm_port = LlmServiceAdapter(llm_service)
+    llm_port = LlmServiceAdapter(
+        llm_service,
+        configured_profiles=tuple(getattr(settings, "llm_profiles", ())),
+    )
     tool_port = ToolServiceAdapter(tool_service)
     run_query_service = OrchestrationRunQueryService(uow_factory)
-    prompt_inputs = RunPromptInputCollector(
+    runtime_request_drafts = RuntimeLlmRequestDraftCollector(
         agent_service=agent_service,
         llm_port=llm_port,
-        skill_catalog_port=skill_manager,
         session_service=session_service,
-        artifact_service=artifact_service,
         access_port=access_service,
         events_service=events_service,
         execution_query=run_query_service,
+        skill_runtime_request_resolver=skill_runtime_request_resolver,
         context_block_max_chars=settings.prompt_system_max_chars,
         context_block_max_tokens=settings.prompt_system_max_tokens,
         context_block_context_window_ratio=(
             settings.prompt_system_context_window_ratio
         ),
-        llm_image_max_bytes=settings.artifact_image_llm_max_bytes,
-        llm_file_max_bytes=settings.artifact_file_llm_max_bytes,
-        llm_text_file_max_chars=settings.artifact_text_file_llm_max_chars,
         runtime_llm_defaults=settings.llm_request_defaults.to_payload(),
     )
     tool_resolver = ToolResolver(
@@ -434,14 +457,18 @@ def build_orchestration_runtime(
             memory_port=memory_port,
         ),
     )
-    context_snapshot_port = ContextWorkspacePromptSnapshotAdapter(
+    request_render_snapshot_port = ContextWorkspaceRunSnapshotAdapter(
         workspace_service=context_workspace_service,
-        render_service=context_render_service,
+        render_service=context_observation_snapshot_service,
         tree_service=context_tree_service,
+        slice_builder=context_slice_builder,
+        control_slice_builder=context_control_slice_builder,
+        request_render_snapshot_service=request_render_snapshot_service,
+        runtime_request_catalog=runtime_request_catalog,
         artifact_service=artifact_service,
     )
     orchestration_engine = OrchestrationEngine(
-        prompt_inputs=prompt_inputs,
+        runtime_request_drafts=runtime_request_drafts,
         session_recorder=OrchestrationSessionRecorder(
             session_service=session_service,
             execution_item_lookup=run_query_service,
@@ -450,7 +477,7 @@ def build_orchestration_runtime(
         tool_resolver=tool_resolver,
         tool_execution_port=tool_port,
         memory_port=memory_port,
-        context_snapshot_port=context_snapshot_port,
+        request_render_snapshot_port=request_render_snapshot_port,
         detailed_phase_metrics_enabled=(
             settings.orchestration_detailed_engine_metrics_enabled
         ),

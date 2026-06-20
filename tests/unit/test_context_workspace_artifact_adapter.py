@@ -8,17 +8,17 @@ from crxzipple.modules.artifacts.domain.exceptions import ArtifactNotFoundError
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     ContextOwnerRegistry,
-    ContextRenderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
-    RenderContextPromptInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.domain import ContextAction
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
 from crxzipple.modules.session.domain import SessionItem, SessionItemKind
@@ -148,8 +148,8 @@ def test_artifact_provider_mirror_includes_pinned_artifacts() -> None:
             action=ContextAction.EXPAND,
         ),
     )
-    before_pin = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:artifacts"),
+    before_pin = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:artifacts"),
     )
 
     assert "artifact_content_candidates" not in before_pin.provider_attachments
@@ -161,8 +161,8 @@ def test_artifact_provider_mirror_includes_pinned_artifacts() -> None:
             action=ContextAction.PIN,
         ),
     )
-    after_pin = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:artifacts"),
+    after_pin = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:artifacts"),
     )
 
     assert after_pin.mirrored_node_ids == ("artifacts.artifact.image-1",)
@@ -192,7 +192,7 @@ def _context_services(
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
     operations = InMemoryContextOperationRepository()
-    snapshots = InMemoryContextRenderSnapshotRepository()
+    snapshots = InMemoryContextSnapshotRepository()
     return {
         "workspace": ContextWorkspaceService(
             workspace_repository=workspaces,
@@ -205,7 +205,7 @@ def _context_services(
             operation_repository=operations,
             owner_registry=registry,
         ),
-        "render": ContextRenderService(
+        "render": ContextObservationSnapshotService(
             workspace_repository=workspaces,
             node_repository=nodes,
             snapshot_repository=snapshots,

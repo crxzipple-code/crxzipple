@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from crxzipple.core.config import LlmProfileSettings, load_settings
 from crxzipple.interfaces.http.app import create_app
 from crxzipple.modules.access.application.repositories import AccessOAuthAccountRecord
 from crxzipple.modules.access.infrastructure.oauth_tokens import OAuthTokenDocument
+from crxzipple.modules.llm.domain import LlmApiFamily
 from crxzipple.modules.settings import CreateSettingsResourceInput
 from tests.unit.http_test_support import (
     AppKey,
@@ -149,6 +151,74 @@ class LlmHttpTestCase(HttpModuleTestCase):
             self.assertEqual(delete_response.status_code, 204)
             self.assertNotIn("writer", {item["id"] for item in list_response.json()})
 
+    def test_llm_profile_warmup_endpoint_does_not_create_invocation(self) -> None:
+            class WarmupAdapter:
+                def __init__(self) -> None:
+                    self.calls: list[tuple[str, object]] = []
+
+                def warmup_websocket(
+                    self,
+                    profile,  # noqa: ANN001
+                    *,
+                    resolved_credential=None,  # noqa: ANN001
+                ):
+                    self.calls.append((profile.id, resolved_credential))
+                    return {
+                        "transport": "websocket",
+                        "endpoint": "wss://example.test/backend-api/codex/responses",
+                        "reused_connection": False,
+                    }
+
+            adapter = WarmupAdapter()
+            container = self.client.app.state.container
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+                LlmApiFamily.OPENAI_RESPONSES,
+                adapter,
+            )
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "warmup-http-token"
+            try:
+                create_response = self.client.post(
+                    "/llms",
+                    json={
+                        "id": "warmup-http",
+                        "provider": "openai",
+                        "api_family": "openai_responses",
+                        "model_name": "gpt-5",
+                        "credential_binding_id": "openai-api-key",
+                    },
+                )
+                warmup_response = self.client.post("/llms/warmup-http/warmup")
+                invocations_response = self.client.get("/llms/warmup-http/invocations")
+            finally:
+                if previous_token is None:
+                    os.environ.pop("OPENAI_API_KEY", None)
+                else:
+                    os.environ["OPENAI_API_KEY"] = previous_token
+
+            self.assertEqual(create_response.status_code, 201)
+            self.assertEqual(warmup_response.status_code, 200)
+            self.assertEqual(warmup_response.json()["llm_id"], "warmup-http")
+            self.assertEqual(warmup_response.json()["status"], "warmed")
+            self.assertEqual(
+                warmup_response.json()["details"]["transport"],
+                "websocket",
+            )
+            self.assertEqual(adapter.calls, [("warmup-http", "warmup-http-token")])
+            self.assertEqual(invocations_response.status_code, 200)
+            self.assertEqual(invocations_response.json(), [])
+
+    def test_llm_invoke_rejects_messages_without_canonical_input_items(self) -> None:
+            response = self.client.post(
+                "/llms/local-chat/invoke",
+                json={
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+            self.assertEqual(response.status_code, 422)
+            self.assertIn("input_items", response.text)
+
     def test_llm_invoke_endpoint_uses_openai_compatible_adapter(self) -> None:
             server = SampleLlmApiServer(tool_calls_on_tools=True)
             previous_token = os.environ.get("OPENAI_API_KEY")
@@ -174,6 +244,12 @@ class LlmHttpTestCase(HttpModuleTestCase):
                     "/llms/local-chat/invoke",
                     json={
                         "messages": [{"role": "user", "content": "hello"}],
+                        "input_items": [
+                            {
+                                "kind": "message",
+                                "payload": {"role": "user", "content": "hello"},
+                            },
+                        ],
                         "tool_schemas": [
                             {
                                 "name": "search_docs",
@@ -185,9 +261,33 @@ class LlmHttpTestCase(HttpModuleTestCase):
                             },
                         ],
                         "request_metadata": {
-                            "prompt_mode": "normal_turn",
-                            "context_render_snapshot_id": "ctxsnap_llm_http",
+                            "runtime_request_mode": "normal_turn",
+                            "request_render_snapshot_id": "ctxsnap_llm_http",
                             "mirrored_tool_schema_count": 1,
+                            "request_render_snapshot": {
+                                "snapshot_id": "ctxsnap_llm_http",
+                                "debug_body": "<context_tree>raw body</context_tree>",
+                                "context_slice": {
+                                    "slice_id": "ctxslice_llm_http",
+                                    "items": [
+                                        {
+                                            "item_id": "item-user-1",
+                                            "node_id": "session.item.user-1",
+                                            "kind": "session_item",
+                                            "text": "raw user text",
+                                        },
+                                    ],
+                                },
+                                "provider_attachment_mirror": {
+                                    "tool_schemas": [
+                                        {
+                                            "name": "search_docs",
+                                            "description": "raw schema",
+                                            "input_schema": {"type": "object"},
+                                        },
+                                    ],
+                                },
+                            },
                         },
                     },
                 )
@@ -198,6 +298,19 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(payload["provider_request_id"], "chatcmpl_sample_1")
                 self.assertEqual(payload["result"]["text"], "hello from sample llm")
                 self.assertEqual(payload["result"]["tool_calls"][0]["name"], "search_docs")
+                self.assertEqual(
+                    payload["provider_render_report"]["renderer_id"],
+                    "openai_chat_compatible",
+                )
+                self.assertEqual(
+                    payload["provider_render_report"]["loss_report"],
+                    {},
+                )
+                self.assertEqual(
+                    payload["provider_wire_preview"]["renderer_id"],
+                    "openai_chat_compatible",
+                )
+                self.assertNotIn("render_report", payload["provider_wire_preview"])
 
                 list_response = self.client.get("/llms/local-chat/invocations")
                 self.assertEqual(list_response.status_code, 200)
@@ -205,7 +318,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(list_response.json()[0]["id"], payload["id"])
 
                 preview_response = self.client.get(
-                    f"/llms/calls/{payload['id']}/prompt-preview",
+                    f"/llms/calls/{payload['id']}/llm-request-preview",
                     params={"run_id": "run_llm_http"},
                 )
                 self.assertEqual(preview_response.status_code, 200)
@@ -215,12 +328,12 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(preview_payload["llm_id"], "local-chat")
                 self.assertEqual(preview_payload["mode"], "normal_turn")
                 self.assertEqual(
-                    preview_payload["context_render_snapshot_id"],
+                    preview_payload["request_render_snapshot_id"],
                     "ctxsnap_llm_http",
                 )
-                self.assertIsNone(preview_payload["prompt_report"])
-                self.assertIsNone(preview_payload["context_render"])
-                self.assertEqual(preview_payload["provider_attachments"], {})
+                self.assertIsNone(preview_payload["runtime_request_report"])
+                self.assertIsNone(preview_payload["request_render_snapshot"])
+                self.assertNotIn("provider_attachments", preview_payload)
                 self.assertEqual(
                     preview_payload["messages"],
                     payload["messages"],
@@ -235,9 +348,23 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 )
                 self.assertEqual(
                     preview_payload["provider_request_options"]["request_metadata"][
-                        "context_render_snapshot_id"
+                        "request_render_snapshot_id"
                     ],
                     "ctxsnap_llm_http",
+                )
+                request_metadata = preview_payload["provider_request_options"][
+                    "request_metadata"
+                ]
+                self.assertNotIn("raw body", json.dumps(request_metadata))
+                self.assertNotIn("raw user text", json.dumps(request_metadata))
+                self.assertNotIn("raw schema", json.dumps(request_metadata))
+                self.assertNotIn(
+                    "context_slice",
+                    request_metadata["request_render_snapshot"],
+                )
+                self.assertNotIn(
+                    "provider_attachment_mirror",
+                    request_metadata["request_render_snapshot"],
                 )
             finally:
                 if previous_token is None:
@@ -265,6 +392,12 @@ class LlmHttpTestCase(HttpModuleTestCase):
                             "credential_binding_id": "openai-api-key",
                         },
                         "messages": [{"role": "user", "content": "hello"}],
+                        "input_items": [
+                            {
+                                "kind": "message",
+                                "payload": {"role": "user", "content": "hello"},
+                            },
+                        ],
                     },
                 )
 
@@ -394,6 +527,15 @@ class LlmHttpTestCase(HttpModuleTestCase):
                         "messages": [
                             {"role": "system", "content": "You are a concise coding assistant."},
                             {"role": "user", "content": "Reply with codex-http-ok."},
+                        ],
+                        "input_items": [
+                            {
+                                "kind": "message",
+                                "payload": {
+                                    "role": "user",
+                                    "content": "Reply with codex-http-ok.",
+                                },
+                            },
                         ],
                     },
                 ) as response:

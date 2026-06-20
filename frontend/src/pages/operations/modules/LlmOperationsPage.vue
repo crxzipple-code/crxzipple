@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Brain, CircleX, Clock3, Database, Gauge, HeartPulse, Radio, RefreshCcw, Search, ShieldAlert, X } from "lucide-vue-next";
+import { Brain, CircleX, Clock3, Database, Gauge, HeartPulse, Radio, RefreshCcw, Search, ShieldAlert, X, Zap } from "lucide-vue-next";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import { useI18n } from "@/shared/i18n";
@@ -20,7 +20,7 @@ import type {
 import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
-import { loadLlmInvocationDetail, loadLlmOperations } from "../api";
+import { loadLlmInvocationDetail, loadLlmOperations, warmupLlmProfileFromOperations } from "../api";
 import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
@@ -204,6 +204,10 @@ const statusFilter = ref("all");
 const streamingFilter = ref("all");
 const invocationOffset = ref(0);
 const refreshTimer = ref<number | null>(null);
+const selectedWarmupProfileId = ref("");
+const warmupLoading = ref(false);
+const warmupNotice = ref<string | null>(null);
+const warmupError = ref<string | null>(null);
 
 const displayMetrics = computed(() => page.value?.metrics ?? []);
 const lastUpdatedLabel = computed(() => page.value?.updated_at ? formatLocalTime(page.value.updated_at) : "-");
@@ -247,10 +251,26 @@ const providerAccessCompactTable = computed<UiTableSection>(() => ({
     { key: "provider", label: "Provider" },
     { key: "model", label: "Model" },
     { key: "status", label: "Status" },
+    { key: "warmup", label: "Warmup" },
     { key: "invocations", label: "Invocations" },
     { key: "last_invocation", label: "Last Invocation" },
   ],
 }));
+const warmupProfileOptions = computed(() =>
+  providerAccessTable.value.rows
+    .map((row) => ({
+      id: row.id,
+      label: cellText(row, "profile") ?? row.id,
+      status: cellText(row, "status") ?? "-",
+      warmup: cellText(row, "warmup") ?? "-",
+      nextAction: cellText(row, "next_action") ?? "-",
+    }))
+    .filter((item) => item.id && item.id !== "-"),
+);
+const selectedWarmupProfile = computed(() =>
+  warmupProfileOptions.value.find((item) => item.id === selectedWarmupProfileId.value) ?? null,
+);
+const canWarmupSelectedProfile = computed(() => Boolean(selectedWarmupProfile.value && !warmupLoading.value));
 const recentInvocationsCompactTable = computed<UiTableSection>(() => ({
   ...recentInvocationsTable.value,
   columns: [
@@ -346,6 +366,16 @@ const selectedEventDetails = computed(() => {
 watch([statusFilter, streamingFilter], () => {
   invocationOffset.value = 0;
   void refreshPage();
+});
+
+watch(warmupProfileOptions, (profiles) => {
+  if (!profiles.length) {
+    selectedWarmupProfileId.value = "";
+    return;
+  }
+  if (!profiles.some((item) => item.id === selectedWarmupProfileId.value)) {
+    selectedWarmupProfileId.value = profiles[0].id;
+  }
 });
 
 let searchTimer: number | null = null;
@@ -630,6 +660,35 @@ async function ensureInvocationDetail(invocationId: string) {
   }
 }
 
+async function runWarmupSelectedProfile() {
+  const profile = selectedWarmupProfile.value;
+  if (!profile) return;
+  warmupLoading.value = true;
+  warmupError.value = null;
+  warmupNotice.value = null;
+  try {
+    const result = await warmupLlmProfileFromOperations(
+      profile.id,
+      "Operations LLM profile warmup",
+    );
+    warmupNotice.value = [
+      `${result.llm_id}: ${result.status}`,
+      warmupDetailsLabel(result.details),
+    ].filter(Boolean).join(" · ");
+    await refreshPage();
+  } catch (error) {
+    warmupError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    warmupLoading.value = false;
+  }
+}
+
+function warmupDetailsLabel(details: Record<string, unknown>): string {
+  const transport = typeof details.transport === "string" ? details.transport : "";
+  const endpoint = typeof details.endpoint === "string" ? details.endpoint : "";
+  return [transport, endpoint].filter(Boolean).join(" / ");
+}
+
 useOperationsProjectionRefresh("llm", refreshPage);
 
 onMounted(() => {
@@ -672,6 +731,29 @@ onUnmounted(() => {
       <StatusDot tone="danger" />
       <span>{{ loadError }}</span>
     </div>
+
+    <section class="llm-action-strip">
+      <span>{{ t("Warmup") }}</span>
+      <select v-model="selectedWarmupProfileId" :disabled="warmupLoading || !warmupProfileOptions.length">
+        <option v-for="profile in warmupProfileOptions" :key="profile.id" :value="profile.id">
+          {{ profile.label }}
+        </option>
+      </select>
+      <small v-if="selectedWarmupProfile">
+        {{ opsText(selectedWarmupProfile.warmup) }} · {{ opsText(selectedWarmupProfile.nextAction) }}
+      </small>
+      <small v-else>{{ opsText("No LLM profiles configured.") }}</small>
+      <UiButton
+        size="sm"
+        variant="secondary"
+        :disabled="!canWarmupSelectedProfile"
+        @click="runWarmupSelectedProfile"
+      >
+        <Zap :size="13" /> {{ warmupLoading ? t("common.loading") : t("Warmup") }}
+      </UiButton>
+      <em v-if="warmupError" class="llm-action-strip__error">{{ warmupError }}</em>
+      <em v-else-if="warmupNotice">{{ warmupNotice }}</em>
+    </section>
 
     <section class="llm-metrics">
       <article v-for="(metric, index) in displayMetrics" :key="metric.id" :class="`metric metric--${metric.tone}`">
@@ -873,7 +955,7 @@ onUnmounted(() => {
           <p v-if="!errorSummaryTable.rows.length" class="table-empty">{{ opsText(errorSummaryTable.empty_state ?? "No failed LLM invocations.") }}</p>
         </article>
 
-        <article class="panel">
+        <article class="panel stream-health-panel">
           <div class="panel-heading">
             <h3>{{ opsText(streamHealthSection.title) }}</h3>
           </div>
@@ -948,6 +1030,16 @@ onUnmounted(() => {
       </section>
 
       <section class="drawer-section">
+        <h4>{{ t("operations.llm.drawer.runtimeObservations") }}</h4>
+        <dl class="detail-grid">
+          <div v-for="item in detailItems(selectedDetail.runtime_observations.items)" :key="item.label">
+            <dt>{{ opsText(item.label) }}</dt>
+            <dd><StatusDot :tone="item.tone ?? 'neutral'" />{{ opsText(item.value) }}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="drawer-section">
         <h4>{{ opsText(selectedDetail.resolver.title) }}</h4>
         <dl class="detail-grid">
           <div v-for="item in selectedDetail.resolver.items" :key="item.label">
@@ -965,6 +1057,26 @@ onUnmounted(() => {
       <section class="drawer-section">
         <h4>{{ t("operations.llm.drawer.requestPayload") }}</h4>
         <pre>{{ detailPayload(selectedDetail.request_payload) }}</pre>
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ t("operations.llm.drawer.runtimeRequestSummary") }}</h4>
+        <pre>{{ detailPayload(selectedDetail.runtime_request_summary) }}</pre>
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ t("operations.llm.drawer.providerRenderReport") }}</h4>
+        <pre>{{ detailPayload(selectedDetail.provider_render_report) }}</pre>
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ opsText(selectedDetail.provider_context_mapping.title) }}</h4>
+        <DataTable :columns="selectedDetail.provider_context_mapping.columns" :rows="selectedDetail.provider_context_mapping.rows" section-id="llm-provider-context-mapping" :page-size="8" />
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ t("operations.llm.drawer.providerWirePreview") }}</h4>
+        <pre>{{ detailPayload(selectedDetail.provider_wire_preview) }}</pre>
       </section>
 
       <section class="drawer-section">
@@ -987,6 +1099,11 @@ onUnmounted(() => {
       <section class="drawer-section">
         <h4>{{ opsText(selectedDetail.response_items.title) }}</h4>
         <DataTable :columns="selectedDetail.response_items.columns" :rows="selectedDetail.response_items.rows" section-id="llm-response-items" :page-size="5" />
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ opsText(selectedDetail.response_runtime_mapping.title) }}</h4>
+        <DataTable :columns="selectedDetail.response_runtime_mapping.columns" :rows="selectedDetail.response_runtime_mapping.rows" section-id="llm-response-runtime-mapping" :page-size="5" />
       </section>
 
       <section class="drawer-section">
@@ -1122,6 +1239,45 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.llm-action-strip {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 260px) minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  margin-bottom: 7px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-panel) 91%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.llm-action-strip select {
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.llm-action-strip small,
+.llm-action-strip em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-action-strip__error {
+  color: var(--color-danger) !important;
 }
 
 .llm-metrics {
@@ -1714,6 +1870,23 @@ dd {
   min-height: 0;
 }
 
+.stream-health-panel .kv-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 8px;
+}
+
+.stream-health-panel .kv-grid div {
+  gap: 6px;
+  min-height: 20px;
+}
+
+.stream-health-panel dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chart-board {
   display: flex;
   flex-direction: column;
@@ -1967,7 +2140,7 @@ pre {
   }
 
   .llm-side {
-    grid-template-rows: minmax(158px, 0.82fr) minmax(126px, 0.58fr) minmax(142px, 0.72fr);
+    grid-template-rows: minmax(158px, 0.86fr) minmax(118px, 0.58fr) auto;
     height: 100%;
   }
 

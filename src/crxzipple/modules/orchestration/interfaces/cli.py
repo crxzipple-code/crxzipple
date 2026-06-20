@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import typer
 
-from crxzipple.interfaces.cli.context import AppKey, ensure_container
+from crxzipple.interfaces.cli.context import (
+    AppKey,
+    ensure_container,
+    ensure_read_only_container,
+)
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationInspectionPort,
     OrchestrationRunQueryPort,
     OrchestrationSubmissionPort,
 )
-from crxzipple.modules.orchestration.application.loop_regression_baseline import (
+from crxzipple.modules.operations.application.read_models.diagnostics import (
     build_loop_regression_baseline,
 )
 from crxzipple.modules.orchestration.domain import (
@@ -19,7 +23,7 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
-    RunPromptInputPreviewDTO,
+    RuntimeLlmRequestPreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.shared import (
     build_reset_policy,
@@ -59,6 +63,14 @@ def _run_query_port(container) -> OrchestrationRunQueryPort:  # noqa: ANN001
 
 def _scheduler_port(container) -> OrchestrationSubmissionPort:  # noqa: ANN001
     return container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE)
+
+
+def _response_item_resolver(container):  # noqa: ANN001, ANN202
+    try:
+        llm_service = container.require(AppKey.LLM_SERVICE)
+    except Exception:
+        return None
+    return getattr(llm_service, "get_response_item", None)
 
 
 def build_cli() -> typer.Typer:
@@ -228,22 +240,22 @@ def build_cli() -> typer.Typer:
             _exit_not_found(exc)
         echo_data(OrchestrationRunDTO.from_entity(run))
 
-    @app.command("prompt-preview")
-    def prompt_preview(
+    @app.command("llm-request-preview")
+    def runtime_request_preview(
         ctx: typer.Context,
         run_id: str = typer.Argument(..., help="Orchestration run identifier."),
     ) -> None:
-        container = ensure_container(ctx)
+        container = ensure_read_only_container(ctx)
         inspection_service = _inspection_port(container)
         try:
-            preview = inspection_service.preview_prompt(run_id)
+            preview = inspection_service.preview_runtime_llm_request(run_id)
         except OrchestrationRunNotFoundError as exc:
             _exit_not_found(exc)
         except OrchestrationValidationError as exc:
             typer.secho(str(exc), err=True, fg=typer.colors.RED)
             raise typer.Exit(code=1) from None
         echo_data(
-            RunPromptInputPreviewDTO.from_value(
+            RuntimeLlmRequestPreviewDTO.from_value(
                 run_id=run_id,
                 preview=preview,
             ),
@@ -265,6 +277,7 @@ def build_cli() -> typer.Typer:
                 run_query,
                 run_id=run_id,
                 task_label=task_label,
+                response_item_resolver=_response_item_resolver(container),
             )
         except OrchestrationRunNotFoundError as exc:
             _exit_not_found(exc)

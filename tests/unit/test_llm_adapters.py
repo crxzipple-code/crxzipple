@@ -8,12 +8,16 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from crxzipple.modules.llm.application import LlmAdapterRequest
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
     LlmContinuationReason,
     LlmDefaults,
+    LlmInputItem,
+    LlmInputItemKind,
     LlmMessage,
     LlmMessagePhase,
     LlmMessageRole,
@@ -31,12 +35,126 @@ from crxzipple.modules.llm.infrastructure import (
     OpenAICodexResponsesAdapter,
     OpenAIResponsesAdapter,
 )
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+    openai_response_projected_input_items,
+    projected_input_items_from_messages,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_response_projection import (
+    build_openai_response_items,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_protocol import (
+    ProviderWireRequest,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_request_preview import (
+    openai_provider_payload_fingerprint,
+    openai_response_input_fingerprints,
+)
+from crxzipple.modules.llm.infrastructure.adapters.tool_schemas import openai_tool_schema
 
 
 def _adapter_request(**kwargs) -> LlmAdapterRequest:  # noqa: ANN003
+    codex_input = bool(kwargs.pop("codex_input", False))
     kwargs.setdefault("invocation_id", "adapter-test-invocation")
     kwargs.setdefault("resolved_credential", "adapter-test-token")
+    if "input_items" not in kwargs and kwargs.get("messages"):
+        messages = tuple(kwargs["messages"])
+        if codex_input:
+            messages = tuple(
+                message
+                for message in messages
+                if message.role != LlmMessageRole.SYSTEM
+            )
+        kwargs["input_items"] = tuple(
+            projected_input_items_from_messages(messages),
+        )
     return LlmAdapterRequest(**kwargs)
+
+
+class OpenAIResponseItemMappingTests(unittest.TestCase):
+    def test_openai_message_response_items_preserve_provider_phase(self) -> None:
+        items = build_openai_response_items(
+            invocation_id="phase-invocation",
+            response_payload={
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg-commentary",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {"type": "output_text", "text": "still working"},
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "id": "msg-final",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": "done"},
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "id": "msg-unknown",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "untagged"},
+                        ],
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(
+            [item.phase for item in items],
+            [
+                LlmMessagePhase.COMMENTARY,
+                LlmMessagePhase.FINAL_ANSWER,
+                LlmMessagePhase.UNKNOWN,
+            ],
+        )
+        self.assertEqual(items[0].provider_payload["phase"], "commentary")
+        self.assertEqual(items[0].content_payload["text"], "still working")
+
+
+def _openai_input_fingerprints_for_messages(
+    messages: tuple[LlmMessage, ...],
+    *,
+    take: int | None = None,
+) -> tuple[str, ...]:
+    items = openai_response_projected_input_items(
+        projected_input_items_from_messages(
+            tuple(message for message in messages if message.role != LlmMessageRole.SYSTEM),
+        ),
+    )
+    if take is not None:
+        items = items[:take]
+    return openai_response_input_fingerprints(items)
+
+
+def _codex_surface_fingerprints(
+    messages: tuple[LlmMessage, ...],
+    *,
+    tool_schemas: tuple[ToolSchema, ...] = (),
+) -> dict[str, object]:
+    system_messages = [
+        str(message.content)
+        for message in messages
+        if message.role == LlmMessageRole.SYSTEM
+    ]
+    instructions = (
+        "\n\n".join(system_messages)
+        if system_messages
+        else OpenAICodexResponsesAdapter.DEFAULT_INSTRUCTIONS
+    )
+    return {
+        "instructions_fingerprint": openai_provider_payload_fingerprint(instructions),
+        "tool_fingerprints": tuple(
+            openai_provider_payload_fingerprint(openai_tool_schema(schema))
+            for schema in tool_schemas
+        ),
+    }
 
 
 class _FakeResponse:
@@ -80,6 +198,30 @@ class _FakeStreamResponse:
                 yield f"event: {event_name}".encode("utf-8")
             yield f"data: {json.dumps(payload)}".encode("utf-8")
             yield b""
+
+
+class _FakeWebSocket:
+    def __init__(self, messages: tuple[dict[str, object], ...]) -> None:
+        self._messages = [json.dumps(message) for message in messages]
+        self.sent: list[str] = []
+        self.closed = False
+
+    def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    def recv(self) -> str | None:
+        if not self._messages:
+            return None
+        return self._messages.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _BrokenPipeOnSendWebSocket(_FakeWebSocket):
+    def send(self, payload: str) -> None:
+        self.sent.append(payload)
+        raise BrokenPipeError(32, "Broken pipe")
 
 
 class _FakeAsyncResponse:
@@ -262,6 +404,190 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertTrue(kwargs["json"]["stream"])
         self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
 
+    def test_openai_responses_preview_includes_surface_fingerprints(self) -> None:
+        profile = LlmProfile(
+            id="writer-surface-preview",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding_id="inline-openai-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Check the runtime."),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="command.exec",
+                    description="Run a command",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            request_metadata={
+                "request_render_snapshot_id": "ctxsnap_provider_1",
+                "request_render_snapshot": {
+                    "snapshot_id": "ctxsnap_provider_1",
+                    "tree_schema_version": "2026-06-11",
+                    "included_node_ids": ["runtime.contract", "tools.exec"],
+                },
+                "tool_surface_snapshot_id": "toolsnap_provider_1",
+                "tool_surface": {
+                    "id": "tool_surface:ctxsnap_provider_1",
+                    "functions": [
+                        {"name": "command.exec", "tool_id": "command.exec"},
+                    ],
+                    "mirrored_schema_names": ["command.exec"],
+                },
+                "runtime_input_filter": {
+                    "mode": "request_render_session_refs",
+                    "input_before_filter_count": 2,
+                    "input_after_filter_count": 1,
+                    "allowed_session_item_count": 1,
+                    "dropped_input_item_count": 1,
+                    "dropped_orphan_function_call_count": 1,
+                    "dropped_orphan_function_call_ids": ["call-orphan"],
+                },
+            },
+        )
+
+        preview = OpenAIResponsesAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["renderer_id"], "openai_responses")
+        self.assertEqual(preview["render_strategy"], "full_wire_payload")
+        self.assertEqual(preview["render_report"]["renderer_id"], "openai_responses")
+        self.assertEqual(
+            preview["render_report"]["tool_surface"],
+            {
+                "source_tool_schema_count": 1,
+                "provider_visible_tool_count": 1,
+                "provider_visible_tool_names": ("command_exec",),
+                "dropped_tool_schema_count": 0,
+                "provider_tool_mapping": [
+                    {
+                        "provider_name": "command_exec",
+                        "runtime_tool_name": "command.exec",
+                        "tool_id": "command.exec",
+                        "trace_status": "runtime_tool_surface",
+                    },
+                ],
+            },
+        )
+        self.assertEqual(
+            preview["render_report"]["tool_protocol"],
+            {
+                "schema_version": "2026-06-19.runtime_input_filter.v1",
+                "source_had_protocol_breaks": False,
+                "replay_has_protocol_breaks": False,
+                "replay_orphan_tool_output_count": 0,
+                "replay_missing_tool_output_count": 0,
+                "replay_duplicate_tool_call_id_count": 0,
+                "replay_duplicate_tool_output_id_count": 0,
+                "dropped_orphan_tool_output_count": 0,
+                "dropped_missing_tool_output_count": 1,
+                "dropped_duplicate_tool_call_id_count": 0,
+                "dropped_duplicate_tool_output_id_count": 0,
+            },
+        )
+        self.assertEqual(
+            preview["request_render_snapshot_id"],
+            "ctxsnap_provider_1",
+        )
+        self.assertEqual(preview["request_render_snapshot_schema_version"], "2026-06-11")
+        self.assertEqual(preview["request_render_snapshot_included_node_count"], 2)
+        self.assertTrue(str(preview["request_render_snapshot_fingerprint"]).startswith("sha256:"))
+        self.assertEqual(
+            preview["tool_surface_id"],
+            "tool_surface:ctxsnap_provider_1",
+        )
+        self.assertEqual(preview["tool_surface_function_count"], 1)
+        self.assertEqual(preview["tool_surface_mirrored_schema_count"], 1)
+
+    def test_openai_responses_adapter_builds_provider_wire_request(self) -> None:
+        profile = LlmProfile(
+            id="writer-wire-request",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding_id="inline-openai-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Explain boundaries."),
+            ),
+        )
+
+        wire_request = OpenAIResponsesAdapter()._wire_request(profile, request)
+
+        self.assertIsInstance(wire_request, ProviderWireRequest)
+        self.assertEqual(wire_request.renderer_id, "openai_responses")
+        self.assertEqual(wire_request.transport, "http")
+        self.assertEqual(wire_request.endpoint, "https://api.openai.com/v1/responses")
+        self.assertEqual(wire_request.payload["model"], "gpt-5")
+        self.assertEqual(wire_request.render_report["renderer_id"], "openai_responses")
+
+    def test_openai_responses_adapter_prefers_projected_input_items(self) -> None:
+        profile = LlmProfile(
+            id="writer-projected-input",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding_id="inline-openai-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="stale message"),
+            ),
+            input_items=(
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={"role": "user", "content": "fresh projected input"},
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL,
+                    payload={
+                        "call_id": "call_projected_1",
+                        "name": "unsafe.tool name",
+                        "arguments": {"query": "flight"},
+                    },
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL_OUTPUT,
+                    payload={"call_id": "call_projected_1", "output": {"ok": True}},
+                ),
+            ),
+        )
+
+        preview = OpenAIResponsesAdapter().preview_request(profile, request)
+
+        self.assertEqual(
+            preview["input_item_types"],
+            ("user", "function_call", "function_call_output"),
+        )
+        payload_preview = preview["payload_preview"]
+        assert isinstance(payload_preview, dict)
+        self.assertEqual(
+            payload_preview["input"],
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "fresh projected input"},
+                    ],
+                },
+                {
+                    "call_id": "call_projected_1",
+                    "name": "unsafe_tool_name",
+                    "arguments": '{"query": "flight"}',
+                    "type": "function_call",
+                },
+                {
+                    "call_id": "call_projected_1",
+                    "output": '{"ok": true}',
+                    "type": "function_call_output",
+                },
+            ],
+        )
+
     def test_openai_responses_adapter_sanitizes_tool_names_and_restores_tool_calls(self) -> None:
         profile = LlmProfile(
             id="writer-tool-alias",
@@ -376,10 +702,12 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         self.assertEqual(response.response_items[0].kind, LlmResponseItemKind.REASONING)
         self.assertEqual(response.response_items[0].content_payload["text"], "Need current facts.")
+        self.assertFalse(response.response_items[0].user_timeline_candidate)
         self.assertEqual(
             response.response_items[1].kind,
             LlmResponseItemKind.PROVIDER_EXTERNAL_ITEM,
         )
+        self.assertFalse(response.response_items[1].user_timeline_candidate)
         self.assertIsNone(response.response_items[1].tool_name)
         self.assertEqual(
             response.continuation.reason,
@@ -1285,7 +1613,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.response_items[0].content_payload["text"], "hello")
         self.assertEqual(response.response_items[1].call_id, "call_chat_1")
         self.assertEqual(response.response_items[1].tool_name, "echo_tool")
-        self.assertFalse(response.response_items[1].user_visible)
+        self.assertFalse(response.response_items[1].user_timeline_candidate)
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
@@ -1301,6 +1629,175 @@ class LlmAdapterTestCase(unittest.TestCase):
             kwargs["json"]["tools"][0]["function"]["parameters"],
             {"type": "object"},
         )
+
+    def test_openai_chat_compatible_preview_uses_renderer_payload(self) -> None:
+        profile = LlmProfile(
+            id="local-chat-preview",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5",
+            base_url="http://localhost:8010/v1",
+            credential_binding_id="inline-chat-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="command.exec",
+                    description="Run a command",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            request_metadata={
+                "request_render_snapshot": {
+                    "snapshot_id": "ctxsnap_chat_1",
+                    "included_node_ids": ["runtime.contract"],
+                },
+            },
+        )
+
+        preview = OpenAIChatCompatibleAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["preview_source"], "provider_adapter")
+        self.assertEqual(preview["renderer_id"], "openai_chat_compatible")
+        self.assertEqual(preview["transport"], "http")
+        self.assertEqual(preview["message_count"], 2)
+        self.assertEqual(preview["tool_count"], 1)
+        self.assertEqual(preview["request_render_snapshot_id"], "ctxsnap_chat_1")
+        payload_preview = preview["payload_preview"]
+        assert isinstance(payload_preview, dict)
+        self.assertEqual(payload_preview["messages"][0]["role"], "system")
+        self.assertEqual(
+            payload_preview["tools"][0]["function"]["name"],
+            "command_exec",
+        )
+
+    def test_openai_chat_compatible_adapter_builds_provider_wire_request(self) -> None:
+        profile = LlmProfile(
+            id="local-chat-wire-request",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5",
+            base_url="http://localhost:8010/v1",
+            credential_binding_id="inline-chat-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="command.exec",
+                    description="Run a command",
+                    input_schema={"type": "object"},
+                ),
+            ),
+        )
+
+        wire_request = OpenAIChatCompatibleAdapter()._wire_request(profile, request)
+        stream_wire_request = OpenAIChatCompatibleAdapter()._wire_request(
+            profile,
+            request,
+            stream=True,
+        )
+
+        self.assertIsInstance(wire_request, ProviderWireRequest)
+        self.assertEqual(wire_request.renderer_id, "openai_chat_compatible")
+        self.assertEqual(wire_request.transport, "http")
+        self.assertEqual(wire_request.endpoint, "http://localhost:8010/v1/chat/completions")
+        self.assertEqual(wire_request.payload["messages"][0]["role"], "system")
+        self.assertEqual(wire_request.payload["tools"][0]["function"]["name"], "command_exec")
+        self.assertEqual(stream_wire_request.transport, "sse")
+        self.assertTrue(stream_wire_request.payload["stream"])
+
+    def test_openai_chat_compatible_adapter_converts_projected_input_items(self) -> None:
+        profile = LlmProfile(
+            id="local-chat-input-items",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="llama3.2",
+            base_url="http://localhost:11434/v1",
+            credential_binding_id="ollama-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="legacy message should not be used",
+                ),
+            ),
+            input_items=(
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={"role": "user", "content": "Use replay input"},
+                    source="session_item",
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL,
+                    payload={
+                        "call_id": "call_replay_1",
+                        "name": "echo_tool",
+                        "arguments": {"message": "hello"},
+                    },
+                    source="session_item",
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL_OUTPUT,
+                    payload={"call_id": "call_replay_1", "output": "hello"},
+                    source="session_item",
+                ),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="echo_tool",
+                    description="Echo text",
+                    input_schema={"type": "object"},
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "chatcmpl_replay_1",
+                    "model": "llama3.2",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": "done"},
+                        },
+                    ],
+                },
+            ),
+        ) as post:
+            OpenAIChatCompatibleAdapter().invoke(profile, request)
+
+        _, kwargs = post.call_args
+        messages = kwargs["json"]["messages"]
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertEqual(
+            messages[0]["content"],
+            [{"type": "text", "text": "Use replay input"}],
+        )
+        self.assertEqual(messages[1]["role"], "assistant")
+        self.assertIsNone(messages[1]["content"])
+        self.assertEqual(
+            messages[1]["tool_calls"][0]["id"],
+            "call_replay_1",
+        )
+        self.assertEqual(
+            json.loads(messages[1]["tool_calls"][0]["function"]["arguments"]),
+            {"message": "hello"},
+        )
+        self.assertEqual(messages[2]["role"], "tool")
+        self.assertEqual(messages[2]["tool_call_id"], "call_replay_1")
+        self.assertEqual(messages[2]["content"], "hello")
+        self.assertNotIn("legacy message should not be used", json.dumps(messages))
 
     def test_openai_chat_compatible_adapter_stream_invoke_emits_text_delta_and_completed(
         self,
@@ -1928,17 +2425,20 @@ class LlmAdapterTestCase(unittest.TestCase):
                 credential_binding_id="codex-auth-json",
                 default_params=LlmDefaults(reasoning_effort="medium"),
             )
-            request = _adapter_request(
-                messages=(
-                    LlmMessage(
-                        role=LlmMessageRole.SYSTEM,
-                        content="You are a concise coding assistant.",
-                    ),
-                    LlmMessage(
-                        role=LlmMessageRole.USER,
-                        content="Reply with codex-ok.",
-                    ),
+            codex_messages = (
+                LlmMessage(
+                    role=LlmMessageRole.SYSTEM,
+                    content="You are a concise coding assistant.",
                 ),
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Reply with codex-ok.",
+                ),
+            )
+            request = _adapter_request(
+                codex_input=True,
+                messages=codex_messages,
+                input_items=tuple(projected_input_items_from_messages(codex_messages)),
                 overrides={"reasoning": {"summary": "auto"}},
             )
 
@@ -2005,7 +2505,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.usage.reasoning_tokens, 2)
         self.assertEqual(response.result.metadata["transport"], "sse")
         self.assertEqual(response.response_items[0].kind, LlmResponseItemKind.ASSISTANT_MESSAGE)
-        self.assertEqual(response.response_items[0].phase, LlmMessagePhase.FINAL_ANSWER)
+        self.assertEqual(response.response_items[0].phase, LlmMessagePhase.UNKNOWN)
         self.assertEqual(response.response_items[1].kind, LlmResponseItemKind.TOOL_CALL)
         self.assertEqual(response.response_items[1].tool_name, "search_docs")
         self.assertEqual(response.continuation.reason, LlmContinuationReason.TOOL_CALL)
@@ -2039,6 +2539,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             default_params=LlmDefaults(reasoning_effort="medium"),
         )
         request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.SYSTEM,
@@ -2076,17 +2577,27 @@ class LlmAdapterTestCase(unittest.TestCase):
         preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
 
         self.assertEqual(preview["preview_source"], "provider_adapter")
+        self.assertEqual(preview["renderer_id"], "openai_codex_responses")
+        self.assertEqual(
+            preview["render_report"]["renderer_id"],
+            "openai_codex_responses",
+        )
         self.assertEqual(
             preview["endpoint"],
             "https://chatgpt.com/backend-api/codex/responses",
         )
+        self.assertEqual(preview["transport"], "http")
+        self.assertIsNone(preview["message_type"])
         self.assertEqual(preview["input_item_count"], 1)
         self.assertEqual(preview["tool_count"], 1)
-        self.assertTrue(preview["has_previous_response_id"])
-        self.assertEqual(preview["previous_response_id"], "resp_previous")
+        self.assertFalse(preview["has_previous_response_id"])
+        self.assertFalse(preview["input_delta_mode"])
+        self.assertEqual(preview["input_delta_count"], 0)
+        self.assertIsNone(preview["previous_response_id"])
         self.assertIn("instructions", preview["payload_keys"])
-        self.assertIn("previous_response_id", preview["payload_keys"])
-        self.assertIn("type", preview["payload_keys"])
+        self.assertNotIn("previous_response_id", preview["payload_keys"])
+        self.assertNotIn("provider_transport", preview["payload_keys"])
+        self.assertNotIn("type", preview["payload_keys"])
         self.assertIn("tools", preview["payload_keys"])
         self.assertEqual(
             preview["option_summary"]["parallel_tool_calls"],
@@ -2101,7 +2612,93 @@ class LlmAdapterTestCase(unittest.TestCase):
             {"verbosity": "low"},
         )
 
-    def test_openai_codex_responses_continuation_sends_tool_output_delta(self) -> None:
+    def test_openai_codex_responses_adapter_builds_http_provider_wire_request(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent-wire-http",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Use HTTP replay."),
+            ),
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+            ),
+        )
+
+        wire_request = OpenAICodexResponsesAdapter()._wire_request(profile, request)
+
+        self.assertIsInstance(wire_request, ProviderWireRequest)
+        self.assertEqual(wire_request.renderer_id, "openai_codex_responses")
+        self.assertEqual(wire_request.transport, "http")
+        self.assertEqual(
+            wire_request.endpoint,
+            "https://chatgpt.com/backend-api/codex/responses",
+        )
+        self.assertNotIn("previous_response_id", wire_request.payload)
+        self.assertEqual(wire_request.render_report["renderer_id"], "openai_codex_responses")
+
+    def test_openai_codex_responses_adapter_builds_websocket_provider_wire_request(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent-wire-websocket",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        messages = (
+            LlmMessage(role=LlmMessageRole.SYSTEM, content="Runtime contract."),
+            LlmMessage(role=LlmMessageRole.USER, content="Use websocket continuation."),
+            LlmMessage(
+                role=LlmMessageRole.ASSISTANT,
+                content={
+                    "type": "function_call",
+                    "call_id": "call_ws_1",
+                    "name": "exec",
+                    "arguments": {"cmd": "echo ws"},
+                },
+            ),
+            LlmMessage(
+                role=LlmMessageRole.TOOL,
+                tool_call_id="call_ws_1",
+                content="ws output",
+            ),
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=messages,
+            input_items=tuple(projected_input_items_from_messages(messages)),
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                input_item_fingerprints=_openai_input_fingerprints_for_messages(
+                    messages,
+                    take=2,
+                ),
+                **_codex_surface_fingerprints(messages),
+            ),
+        )
+
+        wire_request = OpenAICodexResponsesAdapter()._websocket_wire_request(
+            profile,
+            request,
+            endpoint="wss://chatgpt.com/backend-api/codex/responses",
+        )
+
+        self.assertIsInstance(wire_request, ProviderWireRequest)
+        self.assertEqual(wire_request.renderer_id, "openai_codex_responses")
+        self.assertEqual(wire_request.transport, "websocket")
+        self.assertEqual(wire_request.payload["type"], "response.create")
+        self.assertEqual(wire_request.payload["previous_response_id"], "resp_previous")
+        self.assertEqual(wire_request.render_report["renderer_id"], "openai_codex_responses")
+
+    def test_openai_codex_responses_adapter_projects_replay_text_blocks(self) -> None:
         profile = LlmProfile(
             id="codex-agent",
             provider=LlmProviderKind.OPENAI_CODEX,
@@ -2110,6 +2707,1266 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_family=LlmModelFamily.CODEX,
         )
         request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="legacy message should not be used",
+                ),
+            ),
+            input_items=(
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Use replay input"}],
+                    },
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Planning next step."}],
+                    },
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "response.completed",
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_codex_replay",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "content": [
+                                            {"type": "output_text", "text": "done"},
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ) as post:
+            OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        _, kwargs = post.call_args
+        self.assertEqual(
+            kwargs["json"]["input"],
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Use replay input"}],
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Planning next step."}],
+                },
+            ],
+        )
+        self.assertNotIn("legacy message should not be used", json.dumps(kwargs["json"]))
+
+    def test_openai_codex_responses_adapter_projects_replay_reasoning_summary(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(LlmMessage(role=LlmMessageRole.USER, content="unused"),),
+            input_items=(
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Find flights"}],
+                    },
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.REASONING,
+                    payload={
+                        "type": "reasoning",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Need to ask for exact Sunday.",
+                            },
+                        ],
+                    },
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.REASONING,
+                    payload={"type": "reasoning", "summary": [], "text": None},
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "response.completed",
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_codex_reasoning_replay",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "content": [
+                                            {"type": "output_text", "text": "done"},
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ) as post:
+            OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        _, kwargs = post.call_args
+        self.assertEqual(
+            kwargs["json"]["input"],
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Find flights"}],
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Need to ask for exact Sunday.",
+                        },
+                    ],
+                },
+            ],
+        )
+
+    def test_openai_codex_websocket_transport_streams_response_create(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        messages = (
+                LlmMessage(
+                    role=LlmMessageRole.SYSTEM,
+                    content="Runtime contract.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use websocket continuation.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.ASSISTANT,
+                    content="",
+                    metadata={
+                        "provider_item": {
+                            "type": "function_call",
+                            "call_id": "call_ws_1",
+                            "name": "exec",
+                            "arguments": '{"cmd":"echo ws"}',
+                        },
+                    },
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.TOOL,
+                    tool_call_id="call_ws_1",
+                    content="ws output",
+                ),
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=messages,
+            input_items=tuple(projected_input_items_from_messages(messages)),
+            overrides={"provider_transport": "websocket"},
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                input_item_fingerprints=_openai_input_fingerprints_for_messages(
+                    messages,
+                    take=2,
+                ),
+                **_codex_surface_fingerprints(messages),
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["transport"], "websocket")
+        self.assertEqual(preview["message_type"], "response.create")
+        self.assertEqual(
+            preview["endpoint"],
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        self.assertIn("type", preview["payload_keys"])
+        self.assertNotIn("provider_transport", preview["payload_keys"])
+        self.assertIn("previous_response_id", preview["payload_keys"])
+        self.assertEqual(preview["previous_response_id"], "resp_previous")
+        self.assertTrue(preview["input_delta_mode"])
+        self.assertEqual(preview["input_baseline_count"], 3)
+        self.assertEqual(preview["input_delta_count"], 1)
+
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_next",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "websocket done",
+                                    },
+                                ],
+                            },
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 3,
+                            "total_tokens": 10,
+                        },
+                    },
+                },
+            ),
+        )
+        adapter = OpenAICodexResponsesAdapter()
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ) as create_connection:
+            response = adapter.invoke(profile, request)
+
+        create_connection.assert_called_once()
+        _, kwargs = create_connection.call_args
+        self.assertEqual(
+            create_connection.call_args.args[0],
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        self.assertIn(
+            "OpenAI-Beta: responses_websockets=2026-02-06",
+            kwargs["header"],
+        )
+        self.assertIn("Authorization: Bearer adapter-test-token", kwargs["header"])
+        self.assertFalse(fake_ws.closed)
+        sent = json.loads(fake_ws.sent[0])
+        self.assertEqual(sent["type"], "response.create")
+        self.assertEqual(sent["previous_response_id"], "resp_previous")
+        self.assertEqual(
+            sent["input"],
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ws_1",
+                    "output": "ws output",
+                },
+            ],
+        )
+        self.assertNotIn("provider_transport", sent)
+        self.assertEqual(response.provider_request_id, "resp_next")
+        self.assertEqual(response.result.text, "websocket done")
+        self.assertEqual(response.result.metadata["transport"], "websocket")
+        adapter.close_websocket_pool()
+        self.assertTrue(fake_ws.closed)
+
+    def test_openai_codex_context_snapshot_metadata_does_not_create_input_item(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.SYSTEM,
+                    content="Runtime contract.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Continue the run.",
+                ),
+            ),
+            input_items=tuple(
+                projected_input_items_from_messages(
+                    (
+                        LlmMessage(
+                            role=LlmMessageRole.SYSTEM,
+                            content="Runtime contract.",
+                        ),
+                        LlmMessage(
+                            role=LlmMessageRole.USER,
+                            content="Continue the run.",
+                        ),
+                    ),
+                ),
+            ),
+            request_metadata={
+                "request_render_snapshot": {
+                    "snapshot_id": "ctx-1",
+                    "included_node_ids": ["runtime.contract"],
+                    "provider_attachment_mirror": {
+                        "runtime_request_draft": {"session_item_count": 1},
+                    },
+                },
+            },
+        )
+
+        payload = OpenAICodexResponsesAdapter()._build_payload(  # noqa: SLF001
+            profile,
+            request,
+        )
+
+        self.assertEqual(payload["instructions"], "Runtime contract.")
+        self.assertEqual(
+            payload["input"],
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Continue the run."},
+                    ],
+                },
+            ],
+        )
+
+    def test_openai_codex_websocket_reuses_completed_connection(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use websocket connection reuse.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_reuse_1",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "output_text", "text": "first"},
+                                ],
+                            },
+                        ],
+                    },
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_reuse_2",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-2",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "output_text", "text": "second"},
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+        adapter = OpenAICodexResponsesAdapter()
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ) as create_connection:
+            first = adapter.invoke(profile, request)
+            second = adapter.invoke(profile, request)
+
+        create_connection.assert_called_once()
+        self.assertEqual(len(fake_ws.sent), 2)
+        self.assertEqual(first.provider_request_id, "resp_reuse_1")
+        self.assertEqual(first.result.text, "first")
+        self.assertEqual(second.provider_request_id, "resp_reuse_2")
+        self.assertEqual(second.result.text, "second")
+        self.assertFalse(fake_ws.closed)
+        adapter.close_websocket_pool()
+        self.assertTrue(fake_ws.closed)
+
+    def test_openai_codex_websocket_warmup_reuses_connection_without_request(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use warmed websocket connection.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_warm",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-warm",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "output_text", "text": "warm done"},
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+        adapter = OpenAICodexResponsesAdapter()
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ) as create_connection:
+            warmup = adapter.warmup_websocket(
+                profile,
+                resolved_credential="adapter-test-token",
+            )
+            self.assertEqual(fake_ws.sent, [])
+            response = adapter.invoke(profile, request)
+
+        create_connection.assert_called_once()
+        self.assertEqual(warmup["transport"], "websocket")
+        self.assertFalse(warmup["reused_connection"])
+        self.assertEqual(len(fake_ws.sent), 1)
+        self.assertEqual(response.provider_request_id, "resp_warm")
+        self.assertEqual(response.result.text, "warm done")
+        self.assertFalse(fake_ws.closed)
+        adapter.close_websocket_pool()
+        self.assertTrue(fake_ws.closed)
+
+    def test_openai_codex_websocket_requires_input_fingerprints_for_previous_response(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use websocket full request.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.TOOL,
+                    tool_call_id="call_ws_1",
+                    content="ws output",
+                ),
+            ),
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertFalse(preview["input_delta_mode"])
+        self.assertNotIn("previous_response_id", preview["payload_keys"])
+        self.assertIsNone(preview["previous_response_id"])
+        self.assertEqual(preview["input_baseline_count"], 2)
+        self.assertEqual(preview["input_item_count"], 2)
+
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_full",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "full websocket done",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ):
+            response = OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        sent = json.loads(fake_ws.sent[0])
+        self.assertNotIn("previous_response_id", sent)
+        self.assertEqual(len(sent["input"]), 2)
+        self.assertEqual(response.provider_request_id, "resp_full")
+        self.assertEqual(response.result.text, "full websocket done")
+
+    def test_openai_codex_websocket_prefix_mismatch_uses_full_request(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        messages = (
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="This prompt does not match previous input.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.TOOL,
+                    tool_call_id="call_ws_1",
+                    content="ws output",
+                ),
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=messages,
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                input_item_fingerprints=("mismatched-previous-fingerprint",),
+                **_codex_surface_fingerprints(messages),
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertFalse(preview["input_delta_mode"])
+        self.assertNotIn("previous_response_id", preview["payload_keys"])
+        self.assertIsNone(preview["previous_response_id"])
+        self.assertEqual(preview["input_baseline_count"], 2)
+        self.assertEqual(preview["input_item_count"], 2)
+
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_mismatch_full",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "prefix mismatch full request",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ):
+            response = OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        sent = json.loads(fake_ws.sent[0])
+        self.assertNotIn("previous_response_id", sent)
+        self.assertEqual(len(sent["input"]), 2)
+        self.assertEqual(response.provider_request_id, "resp_mismatch_full")
+        self.assertEqual(response.result.text, "prefix mismatch full request")
+
+    def test_openai_codex_websocket_instruction_mismatch_uses_full_request(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        messages = (
+            LlmMessage(role=LlmMessageRole.SYSTEM, content="New instructions."),
+            LlmMessage(role=LlmMessageRole.USER, content="Continue safely."),
+            LlmMessage(
+                role=LlmMessageRole.TOOL,
+                tool_call_id="call_ws_1",
+                content="ws output",
+            ),
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=messages,
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                input_item_fingerprints=_openai_input_fingerprints_for_messages(
+                    messages,
+                    take=1,
+                ),
+                instructions_fingerprint=openai_provider_payload_fingerprint(
+                    "Old instructions.",
+                ),
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertFalse(preview["input_delta_mode"])
+        self.assertNotIn("previous_response_id", preview["payload_keys"])
+        self.assertIsNone(preview["previous_response_id"])
+        self.assertEqual(preview["input_item_count"], 2)
+
+    def test_openai_codex_websocket_tool_schema_mismatch_uses_full_request(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        messages = (
+            LlmMessage(role=LlmMessageRole.USER, content="Continue safely."),
+            LlmMessage(
+                role=LlmMessageRole.TOOL,
+                tool_call_id="call_ws_1",
+                content="ws output",
+            ),
+        )
+        previous_tool_schema = ToolSchema(
+            name="exec",
+            description="Old exec tool.",
+            input_schema={"type": "object"},
+        )
+        current_tool_schema = ToolSchema(
+            name="exec",
+            description="Changed exec tool.",
+            input_schema={"type": "object"},
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=messages,
+            tool_schemas=(current_tool_schema,),
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                input_item_fingerprints=_openai_input_fingerprints_for_messages(
+                    messages,
+                    take=1,
+                ),
+                **_codex_surface_fingerprints(
+                    messages,
+                    tool_schemas=(previous_tool_schema,),
+                ),
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertFalse(preview["input_delta_mode"])
+        self.assertNotIn("previous_response_id", preview["payload_keys"])
+        self.assertIsNone(preview["previous_response_id"])
+        self.assertEqual(preview["input_item_count"], 2)
+        self.assertEqual(preview["tool_count"], 1)
+
+    def test_openai_codex_websocket_uses_completed_output_item_cache(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Call a tool.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": "fc-1",
+                        "type": "function_call",
+                        "call_id": "call_ws_1",
+                        "name": "exec",
+                        "arguments": '{"cmd":"echo websocket"}',
+                    },
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_tool",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 2,
+                            "total_tokens": 11,
+                        },
+                    },
+                },
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ):
+            response = OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        self.assertEqual(response.provider_request_id, "resp_tool")
+        self.assertEqual(len(response.result.tool_calls), 1)
+        self.assertEqual(response.result.tool_calls[0].id, "call_ws_1")
+        self.assertEqual(response.result.tool_calls[0].name, "exec")
+        self.assertEqual(
+            response.result.tool_calls[0].arguments,
+            {"cmd": "echo websocket"},
+        )
+
+    def test_openai_codex_websocket_continuation_falls_back_to_full_request_before_output(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        messages = (
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Summarize current state.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.ASSISTANT,
+                    content="I will call a tool.",
+                    metadata={
+                        "provider_item": {
+                            "type": "function_call",
+                            "call_id": "call_ws_1",
+                            "name": "exec",
+                            "arguments": '{"cmd":"pwd"}',
+                        },
+                    },
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.TOOL,
+                    content="tool completed with evidence",
+                    tool_call_id="call_ws_1",
+                ),
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=messages,
+            provider_transport="websocket",
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                input_item_fingerprints=_openai_input_fingerprints_for_messages(
+                    messages,
+                    take=2,
+                ),
+                **_codex_surface_fingerprints(messages),
+            ),
+        )
+        rejected_delta_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "invalid_request_error",
+                        "message": "delta did not match previous response",
+                    },
+                },
+            ),
+        )
+        full_request_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_full_retry",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "full request worked",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+
+        adapter = OpenAICodexResponsesAdapter()
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            side_effect=[rejected_delta_ws, full_request_ws],
+        ) as create_connection:
+            response = adapter.invoke(profile, request)
+
+        self.assertEqual(create_connection.call_count, 2)
+        self.assertTrue(rejected_delta_ws.closed)
+        self.assertFalse(full_request_ws.closed)
+        delta_payload = json.loads(rejected_delta_ws.sent[0])
+        self.assertEqual(delta_payload["previous_response_id"], "resp_previous")
+        self.assertEqual(
+            delta_payload["input"],
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ws_1",
+                    "output": "tool completed with evidence",
+                },
+            ],
+        )
+        fallback_payload = json.loads(full_request_ws.sent[0])
+        self.assertNotIn("previous_response_id", fallback_payload)
+        self.assertEqual(len(fallback_payload["input"]), 3)
+        self.assertEqual(response.provider_request_id, "resp_full_retry")
+        self.assertEqual(response.result.text, "full request worked")
+        self.assertEqual(response.result.metadata["transport"], "websocket")
+        self.assertTrue(response.result.metadata["provider_continuation_fallback"])
+        self.assertEqual(
+            response.result.metadata["provider_continuation_fallback_reason"],
+            "websocket_continuation_failed_before_output",
+        )
+        adapter.close_websocket_pool()
+        self.assertTrue(full_request_ws.closed)
+
+    def test_openai_codex_websocket_async_invoke_uses_thread_bridge(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use websocket async bridge.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_async_ws",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "async websocket done",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+
+        async def _invoke():
+            return await OpenAICodexResponsesAdapter().invoke_async(profile, request)
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ):
+            response = asyncio.run(_invoke())
+
+        self.assertEqual(response.provider_request_id, "resp_async_ws")
+        self.assertEqual(response.result.text, "async websocket done")
+        self.assertEqual(response.result.metadata["transport"], "websocket")
+
+    def test_openai_codex_websocket_async_stream_yields_bridge_events(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use websocket async stream bridge.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {"type": "response.output_text.delta", "delta": "async "},
+                {"type": "response.output_text.delta", "delta": "bridge"},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_async_ws_stream",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "async bridge",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+
+        async def _collect_events():
+            return [
+                event
+                async for event in OpenAICodexResponsesAdapter().stream_invoke_async(
+                    profile,
+                    request,
+                )
+            ]
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ):
+            events = asyncio.run(_collect_events())
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["text_delta", "text_delta", "completed"],
+        )
+        self.assertEqual(events[0].data["text"], "async ")
+        self.assertEqual(events[1].data["text"], "bridge")
+        self.assertEqual(events[2].data["provider_request_id"], "resp_async_ws_stream")
+        self.assertEqual(events[2].data["result"]["text"], "async bridge")
+
+    def test_openai_codex_websocket_streams_reasoning_summary_events(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Reason briefly.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": "rs-1",
+                    "delta": "Checking approach.",
+                },
+                {
+                    "type": "response.reasoning.delta",
+                    "item_id": "rs-1",
+                    "delta": "hidden raw reasoning",
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_reasoning_ws",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "done",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            return_value=fake_ws,
+        ):
+            events = list(OpenAICodexResponsesAdapter().stream_invoke(profile, request))
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["reasoning_summary_delta", "reasoning_raw_delta", "completed"],
+        )
+        self.assertEqual(events[0].data["item_id"], "rs-1")
+        self.assertEqual(events[0].data["text"], "Checking approach.")
+        self.assertEqual(events[1].data["item_id"], "rs-1")
+        self.assertEqual(events[1].data["text"], "hidden raw reasoning")
+        self.assertEqual(events[2].data["provider_request_id"], "resp_reasoning_ws")
+
+    def test_openai_codex_websocket_retries_transient_connection_before_output(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Retry websocket connect.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        fake_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_retry_ws",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "retry websocket done",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+        with (
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+                side_effect=[requests.Timeout("temporary websocket timeout"), fake_ws],
+            ) as create_connection,
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.sleep_before_openai_stream_retry",
+            ) as sleep,
+        ):
+            response = OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        self.assertEqual(create_connection.call_count, 2)
+        sleep.assert_called_once_with(1)
+        self.assertEqual(response.provider_request_id, "resp_retry_ws")
+        self.assertEqual(response.result.text, "retry websocket done")
+
+    def test_openai_codex_websocket_retries_broken_pipe_on_send_before_output(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Retry websocket broken pipe.",
+                ),
+            ),
+            provider_transport="websocket",
+        )
+        broken_ws = _BrokenPipeOnSendWebSocket(())
+        healthy_ws = _FakeWebSocket(
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_retry_broken_pipe_ws",
+                        "status": "completed",
+                        "model": "gpt-5.5",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "retry after broken pipe",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            ),
+        )
+        adapter = OpenAICodexResponsesAdapter()
+        with (
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+                side_effect=[broken_ws, healthy_ws],
+            ) as create_connection,
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.sleep_before_openai_stream_retry",
+            ) as sleep,
+        ):
+            response = adapter.invoke(profile, request)
+
+        self.assertEqual(create_connection.call_count, 2)
+        sleep.assert_called_once_with(1)
+        self.assertTrue(broken_ws.closed)
+        self.assertFalse(healthy_ws.closed)
+        self.assertEqual(len(broken_ws.sent), 1)
+        self.assertEqual(len(healthy_ws.sent), 1)
+        self.assertEqual(
+            response.provider_request_id,
+            "resp_retry_broken_pipe_ws",
+        )
+        self.assertEqual(response.result.text, "retry after broken pipe")
+        adapter.close_websocket_pool()
+        self.assertTrue(healthy_ws.closed)
+
+    def test_openai_codex_http_replays_tool_output_without_previous_response_id(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.SYSTEM,
@@ -2133,21 +3990,19 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
 
-        self.assertEqual(preview["previous_response_id"], "resp_previous")
-        self.assertEqual(preview["input_item_count"], 1)
+        self.assertIsNone(preview["previous_response_id"])
+        self.assertEqual(preview["input_item_count"], 2)
+        self.assertEqual(preview["input_item_types"], ("user", "function_call_output"))
+        self.assertEqual(preview["transport"], "http")
+        self.assertFalse(preview["input_delta_mode"])
+        self.assertNotIn("previous_response_id", preview["payload_keys"])
         self.assertEqual(
-            preview["input_item_types"],
-            ("function_call_output",),
-        )
-        self.assertEqual(
-            preview["payload_preview"]["input"],
-            [
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_123",
-                    "output": "tool completed with evidence",
-                },
-            ],
+            preview["payload_preview"]["input"][-1],
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "tool completed with evidence",
+            },
         )
 
     def test_openai_codex_responses_adapter_sanitizes_tool_names_and_restores_tool_calls(self) -> None:
@@ -2160,6 +4015,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2220,6 +4076,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2293,6 +4150,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2370,6 +4228,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2453,6 +4312,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
+            codex_input=True,
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Retry codex."),
             ),
@@ -2523,6 +4383,90 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         self.assertEqual(response.result.text, "codex-recovered")
         self.assertEqual(post.call_count, 2)
+
+    def test_anthropic_messages_preview_uses_renderer_payload(self) -> None:
+        profile = LlmProfile(
+            id="claude-preview",
+            provider=LlmProviderKind.ANTHROPIC,
+            api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
+            model_name="claude-sonnet-4-5",
+            credential_binding_id="anthropic-api-key",
+            default_params=LlmDefaults(max_output_tokens=512),
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="search_docs",
+                    description="Search docs",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            request_metadata={
+                "tool_surface": {
+                    "id": "tool_surface:anthropic",
+                    "functions": [{"name": "search_docs"}],
+                },
+            },
+        )
+
+        preview = AnthropicMessagesAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["preview_source"], "provider_adapter")
+        self.assertEqual(preview["renderer_id"], "anthropic_messages")
+        self.assertEqual(preview["message_count"], 1)
+        self.assertEqual(preview["tool_count"], 1)
+        self.assertTrue(preview["has_system"])
+        self.assertEqual(preview["tool_surface_id"], "tool_surface:anthropic")
+        self.assertEqual(
+            preview["render_report"]["tool_surface"],
+            {
+                "source_tool_schema_count": 1,
+                "provider_visible_tool_count": 1,
+                "provider_visible_tool_names": ("search_docs",),
+                "dropped_tool_schema_count": 0,
+                "provider_tool_mapping": [
+                    {
+                        "provider_name": "search_docs",
+                        "runtime_tool_name": "search_docs",
+                        "trace_status": "runtime_tool_surface",
+                    },
+                ],
+            },
+        )
+        payload_preview = preview["payload_preview"]
+        assert isinstance(payload_preview, dict)
+        self.assertEqual(payload_preview["system"], "system")
+        self.assertEqual(payload_preview["messages"][0]["role"], "user")
+
+    def test_anthropic_messages_adapter_builds_provider_wire_request(self) -> None:
+        profile = LlmProfile(
+            id="claude-wire-request",
+            provider=LlmProviderKind.ANTHROPIC,
+            api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
+            model_name="claude-sonnet-4-5",
+            credential_binding_id="anthropic-api-key",
+            default_params=LlmDefaults(max_output_tokens=512),
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+        )
+
+        wire_request = AnthropicMessagesAdapter()._wire_request(profile, request)
+
+        self.assertIsInstance(wire_request, ProviderWireRequest)
+        self.assertEqual(wire_request.renderer_id, "anthropic_messages")
+        self.assertEqual(wire_request.transport, "http")
+        self.assertEqual(wire_request.endpoint, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(wire_request.payload["system"], "system")
+        self.assertEqual(wire_request.payload["messages"][0]["role"], "user")
+        self.assertEqual(wire_request.render_report["renderer_id"], "anthropic_messages")
 
     def test_anthropic_messages_adapter_shapes_request_and_result(self) -> None:
         profile = LlmProfile(
@@ -2603,6 +4547,67 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(kwargs["json"]["system"], "Return concise answers.")
         self.assertEqual(kwargs["json"]["tools"][0]["name"], "search_docs")
         self.assertEqual(kwargs["json"]["max_tokens"], 1024)
+
+    def test_anthropic_messages_adapter_converts_projected_input_items(self) -> None:
+        profile = LlmProfile(
+            id="claude-input-items",
+            provider=LlmProviderKind.ANTHROPIC,
+            api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
+            model_name="claude-sonnet-4-5",
+            credential_binding_id="anthropic-api-key",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="legacy"),
+            ),
+            input_items=(
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={"role": "user", "content": "Use replay input"},
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL,
+                    payload={
+                        "call_id": "call_anthropic_replay",
+                        "name": "search_docs",
+                        "arguments": {"query": "ddd"},
+                    },
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL_OUTPUT,
+                    payload={
+                        "call_id": "call_anthropic_replay",
+                        "output": '{"hits":1}',
+                    },
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.anthropic_messages.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "msg_replay",
+                    "model": "claude-sonnet-4-5",
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "done"}],
+                },
+            ),
+        ) as post:
+            AnthropicMessagesAdapter().invoke(profile, request)
+
+        _, kwargs = post.call_args
+        messages = kwargs["json"]["messages"]
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertEqual(messages[0]["content"][0]["text"], "Use replay input")
+        self.assertEqual(messages[1]["role"], "assistant")
+        self.assertEqual(messages[1]["content"][0]["type"], "tool_use")
+        self.assertEqual(messages[1]["content"][0]["id"], "call_anthropic_replay")
+        self.assertEqual(messages[1]["content"][0]["input"], {"query": "ddd"})
+        self.assertEqual(messages[2]["role"], "user")
+        self.assertEqual(messages[2]["content"][0]["type"], "tool_result")
+        self.assertEqual(messages[2]["content"][0]["tool_use_id"], "call_anthropic_replay")
+        self.assertNotIn("legacy", json.dumps(messages))
 
     def test_anthropic_messages_adapter_invoke_async_uses_async_http(self) -> None:
         profile = LlmProfile(
@@ -2896,6 +4901,81 @@ class LlmAdapterTestCase(unittest.TestCase):
             ],
         )
 
+    def test_gemini_generate_content_preview_uses_renderer_payload(self) -> None:
+        profile = LlmProfile(
+            id="gemini-preview",
+            provider=LlmProviderKind.GOOGLE,
+            api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
+            model_name="gemini-2.5-pro",
+            credential_binding_id="gemini-api-key",
+            default_params=LlmDefaults(max_output_tokens=300),
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="search_docs",
+                    description="Search docs",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            overrides={"toolConfig": {"functionCallingConfig": {"mode": "AUTO"}}},
+            request_metadata={
+                "request_render_snapshot": {
+                    "snapshot_id": "ctxsnap_gemini_1",
+                    "included_node_ids": ["runtime.contract"],
+                },
+            },
+        )
+
+        preview = GeminiGenerateContentAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["preview_source"], "provider_adapter")
+        self.assertEqual(preview["renderer_id"], "gemini_generate_content")
+        self.assertEqual(preview["content_count"], 1)
+        self.assertEqual(preview["tool_count"], 1)
+        self.assertTrue(preview["has_system"])
+        self.assertEqual(preview["request_render_snapshot_id"], "ctxsnap_gemini_1")
+        payload_preview = preview["payload_preview"]
+        assert isinstance(payload_preview, dict)
+        self.assertIn("system_instruction", payload_preview)
+        self.assertEqual(
+            payload_preview["toolConfig"],
+            {"functionCallingConfig": {"mode": "AUTO"}},
+        )
+
+    def test_gemini_generate_content_adapter_builds_provider_wire_request(self) -> None:
+        profile = LlmProfile(
+            id="gemini-wire-request",
+            provider=LlmProviderKind.GOOGLE,
+            api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
+            model_name="gemini-2.5-pro",
+            credential_binding_id="gemini-api-key",
+            default_params=LlmDefaults(max_output_tokens=300),
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+        )
+
+        wire_request = GeminiGenerateContentAdapter()._wire_request(profile, request)
+
+        self.assertIsInstance(wire_request, ProviderWireRequest)
+        self.assertEqual(wire_request.renderer_id, "gemini_generate_content")
+        self.assertEqual(wire_request.transport, "http")
+        self.assertEqual(
+            wire_request.endpoint,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+        )
+        self.assertIn("system_instruction", wire_request.payload)
+        self.assertEqual(wire_request.payload["contents"][0]["role"], "user")
+        self.assertEqual(wire_request.render_report["renderer_id"], "gemini_generate_content")
+
     def test_gemini_generate_content_adapter_shapes_request_and_result(self) -> None:
         profile = LlmProfile(
             id="gemini",
@@ -3145,6 +5225,78 @@ class LlmAdapterTestCase(unittest.TestCase):
                 },
             ],
         )
+
+    def test_gemini_generate_content_adapter_converts_projected_input_items(self) -> None:
+        profile = LlmProfile(
+            id="gemini-input-items",
+            provider=LlmProviderKind.GOOGLE,
+            api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
+            model_name="gemini-2.5-pro",
+            credential_binding_id="gemini-inline-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="legacy"),
+            ),
+            input_items=(
+                LlmInputItem(
+                    kind=LlmInputItemKind.MESSAGE,
+                    payload={"role": "user", "content": "Use replay input"},
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL,
+                    payload={
+                        "call_id": "call_gemini_replay",
+                        "name": "search_docs",
+                        "arguments": {"query": "ddd"},
+                    },
+                ),
+                LlmInputItem(
+                    kind=LlmInputItemKind.FUNCTION_CALL_OUTPUT,
+                    payload={
+                        "call_id": "call_gemini_replay",
+                        "output": '{"hits":1}',
+                    },
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.gemini_generate_content.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "responseId": "gemini-replay-1",
+                    "modelVersion": "gemini-2.5-pro",
+                    "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {"parts": [{"text": "done"}]},
+                        },
+                    ],
+                },
+            ),
+        ) as post:
+            GeminiGenerateContentAdapter().invoke(profile, request)
+
+        _, kwargs = post.call_args
+        contents = kwargs["json"]["contents"]
+        self.assertEqual(contents[0]["role"], "user")
+        self.assertEqual(contents[0]["parts"][0]["text"], "Use replay input")
+        self.assertEqual(contents[1]["role"], "model")
+        self.assertEqual(
+            contents[1]["parts"][0]["functionCall"]["id"],
+            "call_gemini_replay",
+        )
+        self.assertEqual(
+            contents[1]["parts"][0]["functionCall"]["args"],
+            {"query": "ddd"},
+        )
+        self.assertEqual(contents[2]["role"], "user")
+        self.assertEqual(
+            contents[2]["parts"][0]["functionResponse"]["id"],
+            "call_gemini_replay",
+        )
+        self.assertNotIn("legacy", json.dumps(contents))
 
     def test_gemini_generate_content_adapter_encodes_user_file_blocks(self) -> None:
         profile = LlmProfile(

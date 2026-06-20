@@ -6,11 +6,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from crxzipple.app.assembly.tool_packages import (
-    activate_tool_packages_from_context as _activate_tool_packages,
-    validate_tool_package_plans as _validate_tool_package_plans,
-)
-from crxzipple.app.assembly.tool_runtime import ToolCleanupCallbacks
 from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ActivationTask, ApplicationFactory, AssemblyTarget
 from crxzipple.modules.tool.application import (
@@ -32,7 +27,6 @@ from crxzipple.modules.tool.infrastructure import (
     ToolRuntimeRegistry,
     ToolRuntimeRouter,
     build_sandbox_backend,
-    discover_tool_package_plans,
 )
 from crxzipple.modules.tool.infrastructure.adapters import (
     AccessServiceToolReadinessAdapter,
@@ -40,13 +34,54 @@ from crxzipple.modules.tool.infrastructure.adapters import (
     ToolRunDispatchAdapter,
 )
 from crxzipple.shared.runtime_metrics import get_runtime_metrics_registry
-from crxzipple.app.assembly.tool_sources.configured_providers import (
-    activate_configured_tool_provider_runtimes as _activate_configured_tool_provider_runtimes,
-    build_tool_configured_runtime_activator as _build_tool_configured_runtime_activator,
-    build_tool_source_discovery_service as _build_tool_source_discovery_service,
-    sync_bundled_tool_source_catalog as _sync_bundled_tool_source_catalog,
-    sync_configured_tool_provider_source_catalog as _sync_configured_tool_provider_source_catalog,
-)
+
+
+def _activate_tool_packages(ctx) -> None:
+    from crxzipple.app.assembly.tool_packages import (
+        activate_tool_packages_from_context,
+    )
+
+    activate_tool_packages_from_context(ctx)
+
+
+def _activate_configured_tool_provider_runtimes(ctx) -> None:
+    from crxzipple.app.assembly.tool_sources.configured_providers import (
+        activate_configured_tool_provider_runtimes,
+    )
+
+    activate_configured_tool_provider_runtimes(ctx)
+
+
+def _build_tool_configured_runtime_activator(ctx):
+    from crxzipple.app.assembly.tool_sources.configured_providers import (
+        build_tool_configured_runtime_activator,
+    )
+
+    return build_tool_configured_runtime_activator(ctx)
+
+
+def _build_tool_source_discovery_service(ctx):
+    from crxzipple.app.assembly.tool_sources.configured_providers import (
+        build_tool_source_discovery_service,
+    )
+
+    return build_tool_source_discovery_service(ctx)
+
+
+def _sync_bundled_tool_source_catalog(ctx) -> None:
+    from crxzipple.app.assembly.tool_sources.configured_providers import (
+        sync_bundled_tool_source_catalog,
+    )
+
+    sync_bundled_tool_source_catalog(ctx)
+
+
+def _sync_configured_tool_provider_source_catalog(ctx) -> None:
+    from crxzipple.app.assembly.tool_sources.configured_providers import (
+        sync_configured_tool_provider_source_catalog,
+    )
+
+    sync_configured_tool_provider_source_catalog(ctx)
 
 
 @dataclass(slots=True)
@@ -76,6 +111,9 @@ class ToolQueryServiceAdapter:
 
     def list_tool_runs(self, *, tool_id: str | None = None):
         return self.service.list_tool_runs(tool_id=tool_id)
+
+    def list_tool_runs_for_orchestration_runs(self, run_ids: tuple[str, ...]):
+        return self.service.list_tool_runs_for_orchestration_runs(run_ids)
 
     def get_tool_run(self, run_id: str):
         return self.service.get_tool_run(run_id)
@@ -242,6 +280,79 @@ def tool_factories() -> tuple[ApplicationFactory, ...]:
 
     return tool_core_factories() + tool_queue_factories(
         provide_application_service=True,
+    )
+
+
+def tool_request_preview_factories() -> tuple[ApplicationFactory, ...]:
+    """Build Tool services needed to render provider request schemas.
+
+    The request-preview assembly is read-only. It can resolve enabled tool
+    functions from the owner catalog and expose Tool's orchestration port for
+    schema rendering, but it does not configure executable runtimes or run tool
+    activation tasks.
+    """
+
+    return (
+        ApplicationFactory(
+            key="tool.bootstrap_config",
+            provides=(AppKey.TOOL_BOOTSTRAP_CONFIG,),
+            requires=(AppKey.SETTINGS_MATERIALIZER,),
+            build=_build_tool_bootstrap_config,
+        ),
+        ApplicationFactory(
+            key="tool.capability_catalog",
+            provides=(AppKey.TOOL_CAPABILITY_CATALOG,),
+            build=lambda _ctx: DEFAULT_TOOL_CAPABILITY_CATALOG,
+        ),
+        ApplicationFactory(
+            key="tool.source_services",
+            provides=(
+                AppKey.TOOL_FUNCTION_COMMAND_SERVICE,
+                AppKey.TOOL_SOURCE_COMMAND_SERVICE,
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
+            ),
+            requires=(AppKey.UNIT_OF_WORK_FACTORY,),
+            build=lambda ctx: {
+                AppKey.TOOL_FUNCTION_COMMAND_SERVICE: ToolFunctionCommandService(
+                    ctx.require(AppKey.UNIT_OF_WORK_FACTORY),
+                ),
+                AppKey.TOOL_SOURCE_COMMAND_SERVICE: ToolSourceCommandService(
+                    ctx.require(AppKey.UNIT_OF_WORK_FACTORY),
+                ),
+                AppKey.TOOL_SOURCE_QUERY_SERVICE: ToolSourceQueryService(
+                    ctx.require(AppKey.UNIT_OF_WORK_FACTORY),
+                ),
+            },
+        ),
+        ApplicationFactory(
+            key="tool.runtime_infrastructure",
+            provides=(
+                AppKey.TOOL_PACKAGE_PLANS,
+                AppKey.TOOL_LOCAL_RUNTIME_REGISTRY,
+                AppKey.TOOL_DISCOVERY_REGISTRY,
+                AppKey.TOOL_REMOTE_RUNTIME_REGISTRY,
+                AppKey.TOOL_SANDBOX_RUNTIME_REGISTRY,
+                AppKey.TOOL_RUNTIME_GATEWAY,
+                AppKey.TOOL_CLEANUP_CALLBACKS,
+            ),
+            requires=(
+                AppKey.CORE_SETTINGS,
+                AppKey.TOOL_BOOTSTRAP_CONFIG,
+            ),
+            build=_build_tool_request_preview_runtime_infrastructure,
+        ),
+        ApplicationFactory(
+            key="tool.capability_bindings",
+            provides=(AppKey.TOOL_CAPABILITY_BINDINGS,),
+            requires=(
+                AppKey.CORE_SETTINGS,
+                AppKey.ACCESS_SERVICE,
+            ),
+            build=_build_tool_capability_bindings,
+        ),
+    ) + tool_queue_factories(
+        provide_application_service=True,
+        provide_orchestration_port=True,
     )
 
 
@@ -494,6 +605,10 @@ def _build_tool_bootstrap_config(ctx):
 
 
 def _build_tool_runtime_infrastructure(ctx) -> dict[str, Any]:
+    from crxzipple.app.assembly.tool_packages import validate_tool_package_plans
+    from crxzipple.modules.tool.infrastructure import discover_tool_package_plans
+    from crxzipple.app.assembly.tool_runtime import ToolCleanupCallbacks
+
     settings = ctx.require(AppKey.CORE_SETTINGS)
 
     local_runtime_registry = LocalToolRuntimeRegistry()
@@ -502,7 +617,7 @@ def _build_tool_runtime_infrastructure(ctx) -> dict[str, Any]:
     remote_runtime_registry = ToolRuntimeRegistry()
     package_plans = discover_tool_package_plans()
 
-    _validate_tool_package_plans(package_plans)
+    validate_tool_package_plans(package_plans)
 
     cleanup_callbacks = ToolCleanupCallbacks()
 
@@ -522,6 +637,32 @@ def _build_tool_runtime_infrastructure(ctx) -> dict[str, Any]:
         AppKey.TOOL_SANDBOX_RUNTIME_REGISTRY: sandbox_runtime_registry,
         AppKey.TOOL_RUNTIME_GATEWAY: runtime_gateway,
         AppKey.TOOL_CLEANUP_CALLBACKS: (cleanup_callbacks,),
+    }
+
+
+def _build_tool_request_preview_runtime_infrastructure(ctx) -> dict[str, Any]:
+    settings = ctx.require(AppKey.CORE_SETTINGS)
+
+    local_runtime_registry = LocalToolRuntimeRegistry()
+    discovery_registry = ToolDiscoveryRegistry()
+    sandbox_runtime_registry = ToolRuntimeRegistry()
+    remote_runtime_registry = ToolRuntimeRegistry()
+    runtime_gateway = ToolRuntimeRouter(
+        LocalAsyncToolExecutor(local_runtime_registry),
+        SandboxAsyncToolExecutor(
+            sandbox_runtime_registry,
+            build_sandbox_backend(settings),
+        ),
+        RemoteAsyncToolExecutor(remote_runtime_registry),
+    )
+    return {
+        AppKey.TOOL_PACKAGE_PLANS: (),
+        AppKey.TOOL_LOCAL_RUNTIME_REGISTRY: local_runtime_registry,
+        AppKey.TOOL_DISCOVERY_REGISTRY: discovery_registry,
+        AppKey.TOOL_REMOTE_RUNTIME_REGISTRY: remote_runtime_registry,
+        AppKey.TOOL_SANDBOX_RUNTIME_REGISTRY: sandbox_runtime_registry,
+        AppKey.TOOL_RUNTIME_GATEWAY: runtime_gateway,
+        AppKey.TOOL_CLEANUP_CALLBACKS: (),
     }
 
 
@@ -705,4 +846,5 @@ __all__ = [
     "tool_execution_factories",
     "tool_factories",
     "tool_queue_factories",
+    "tool_request_preview_factories",
 ]

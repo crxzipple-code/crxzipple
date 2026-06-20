@@ -110,6 +110,17 @@ class InMemorySettingsResourceVersionRepository:
             key=lambda version: (version.published_at or version.created_at, version.version_number),
         )[-1]
 
+    def latest_published_for_resources(
+        self,
+        resource_ids: tuple[str, ...],
+    ) -> dict[str, SettingsResourceVersion]:
+        return {
+            resource_id: version
+            for resource_id in resource_ids
+            for version in (self.latest_published_for_resource(resource_id),)
+            if version is not None
+        }
+
 
 @dataclass(slots=True)
 class InMemorySettingsOverrideRepository:
@@ -150,6 +161,22 @@ class InMemorySettingsOverrideRepository:
         if enabled_only:
             overrides = [override for override in overrides if override.enabled]
         return tuple(sorted(overrides, key=lambda override: (override.priority, override.id)))
+
+    def list_for_resources(
+        self,
+        resource_ids: tuple[str, ...],
+        *,
+        environment: str | None = None,
+        enabled_only: bool = False,
+    ) -> dict[str, tuple[SettingsOverride, ...]]:
+        return {
+            resource_id: self.list_for_resource(
+                resource_id,
+                environment=environment,
+                enabled_only=enabled_only,
+            )
+            for resource_id in resource_ids
+        }
 
 
 @dataclass(slots=True)

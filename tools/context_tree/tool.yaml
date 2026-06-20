@@ -1,8 +1,34 @@
 kind: local_package
 namespace: context_tree
-prompt:
-  title: Context Tree Controls
-  summary: "Operate the prompt tree itself: list, expand, collapse, pin, estimate, and mirror selected schemas. Inspect relevant capability, session, skill, memory, artifact, and workspace handles before declaring context or tools unavailable. Do not expand many historical tool_interaction nodes as a substitute for the next owner-tool action."
+runtime_request:
+  title: Capability Discovery
+  summary: "Search and enable runtime capabilities without exposing the internal context control plane. Use capability.search to find available tool groups, provider-callable functions, and resource handles before declaring a capability unavailable."
+  default_tool_schema_policy:
+    priority: 5
+  default_tool_schema_group_refs:
+    - source_id: bundled.local_package.context_tree
+      group_key: capability_discovery
+  groups:
+    capability_discovery:
+      order: 10
+      title: Capability Discovery
+      summary: Search available runtime capabilities and optionally enable matching provider-callable tool functions. Prefer this over inspecting the internal context state directly.
+      function_ids:
+        - capability.search
+      default_tool_schema_ids:
+        - capability.search
+      default_tool_schema_max_count: 1
+      default_tool_schema_source: bundled.local_package.context_tree.runtime_request_group.capability_discovery
+    surface_read:
+      order: 90
+      title: Internal Context Surface Read
+      summary: Internal/debug controls for reading the current context control state. Do not expose by default to the model.
+      function_ids:
+        - context_tree.list
+        - context_tree.estimate
+        - context_tree.render_current
+        - context_tree.read_snapshot
+        - context_tree.diff_since
 capabilities:
   - context_workspace.read
   - context_workspace.write
@@ -12,11 +38,51 @@ dependencies:
     kind: service_dependency
     description: Context Workspace tree application service used to list and mutate prompt tree nodes.
     required: false
-  - id: context_render_service
+  - id: context_observation_snapshot_service
     kind: service_dependency
-    description: Context Workspace render service used to estimate visible prompt payloads and provider mirrors.
+    description: Context Workspace observation snapshot service used for debug rendering, snapshot reads, and tree diffs.
     required: false
 local_tools:
+  - id: capability.search
+    name: Capability Search
+    description: Search available runtime capabilities, tool groups, and provider-callable functions. Set enable=true to enable clearly matching tool functions for the next model step. Use this before declaring a tool or capability unavailable.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:capability_search
+    tool_kind: function
+    parameters:
+      - name: query
+        data_type: string
+        description: Capability, tool, source, or action to search for, such as weather, browser network, workspace read, image generation, or shell.
+        required: false
+      - name: enable
+        data_type: boolean
+        description: When true, enable clearly matching provider-callable tool functions for the next model step.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Maximum number of matching capability records to return. Defaults to 12.
+        required: false
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - capability
+      - tool-discovery
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: capability.search
   - id: context_tree.list
     name: Context Tree List
     description: List the current prompt context tree nodes, their state, supported actions, and estimates.
@@ -195,7 +261,7 @@ local_tools:
     runtime_key: context_tree.estimate
   - id: context_tree.render_current
     name: Context Tree Render Current
-    description: Render the current visible Context Tree prompt body. Use when provider-native continuation needs to re-check current tree state instead of relying on stale memory.
+    description: Render the current visible Context Tree debug body. Use when provider-native continuation needs to re-check current tree state instead of relying on stale memory.
     provider_name: local_system
     entrypoint: tools.context_tree.local:context_tree_render_current
     tool_kind: function
@@ -206,7 +272,7 @@ local_tools:
         required: false
       - name: max_chars
         data_type: integer
-        description: Maximum characters of prompt body to return in the tool text. Defaults to 16000.
+        description: Maximum characters of Context Tree debug body to return in the tool text. Defaults to 16000.
         required: false
     tags:
       - context_tree
@@ -225,18 +291,18 @@ local_tools:
     runtime_key: context_tree.render_current
   - id: context_tree.read_snapshot
     name: Context Tree Read Snapshot
-    description: Read a recorded Context Tree render snapshot by id, including the rendered prompt body and included node handles.
+    description: Read a recorded Context Tree snapshot by id, including the rendered debug body and included node handles.
     provider_name: local_system
     entrypoint: tools.context_tree.local:context_tree_read_snapshot
     tool_kind: function
     parameters:
       - name: snapshot_id
         data_type: string
-        description: Context render snapshot id.
+        description: Context snapshot id.
         required: true
       - name: max_chars
         data_type: integer
-        description: Maximum characters of prompt body to return in the tool text. Defaults to 16000.
+        description: Maximum characters of Context Tree debug body to return in the tool text. Defaults to 16000.
         required: false
     tags:
       - context_tree
@@ -253,14 +319,14 @@ local_tools:
     runtime_key: context_tree.read_snapshot
   - id: context_tree.diff_since
     name: Context Tree Diff Since
-    description: Compare the current Context Tree render against a previous render snapshot or tree revision. Use to decide whether current tree state must be re-read.
+    description: Compare the current Context Tree render against a previous snapshot or tree revision. Use to decide whether current tree state must be re-read.
     provider_name: local_system
     entrypoint: tools.context_tree.local:context_tree_diff_since
     tool_kind: function
     parameters:
       - name: snapshot_id
         data_type: string
-        description: Optional render snapshot id used as the baseline.
+        description: Optional snapshot id used as the baseline.
         required: false
       - name: revision
         data_type: integer
@@ -287,7 +353,7 @@ local_tools:
     runtime_key: context_tree.diff_since
   - id: context_tree.update_plan
     name: Context Tree Update Plan
-    description: Update the visible public working plan node only when the task phase, objective, verified facts, blocker, or next-step strategy materially changes. Do not use this as a per-tool-call progress log or private reasoning scratchpad. Repeating phase_update/phase_change inside the same phase is treated as no-op; use verified_fact, blocker, recovery, or final_summary to record meaningful state inside the same phase.
+    description: Update the visible public working plan node only when the task phase, objective, observed facts, uncertainty, blocker, or next-step strategy materially changes. Do not use this as a per-tool-call progress log or private reasoning scratchpad. Repeating phase_update/phase_change inside the same phase is treated as no-op; use observed_fact, uncertainty, blocker, recovery, or final_summary to record meaningful state inside the same phase.
     provider_name: local_system
     entrypoint: tools.context_tree.local:context_tree_update_plan
     tool_kind: function
@@ -308,9 +374,9 @@ local_tools:
         data_type: array
         description: Public list of completed steps.
         required: false
-      - name: verified_facts
+      - name: observed_facts
         data_type: array
-        description: Public list of verified facts or evidence.
+        description: Public list of observed facts or evidence.
         required: false
       - name: assumptions
         data_type: array
@@ -326,7 +392,7 @@ local_tools:
         required: false
       - name: update_reason
         data_type: string
-        description: Why the public plan needs an update, such as phase_change, verified_fact, blocker, objective_change, recovery, or final_summary. Repeating the same plan is treated as no-op; repeating phase_change/phase_update for the same objective/status/current_step is also no-op.
+        description: Why the public plan needs an update, such as phase_change, observed_fact, uncertainty, blocker, objective_change, recovery, or final_summary. Repeating the same plan is treated as no-op; repeating phase_change/phase_update for the same objective/status/current_step is also no-op.
         required: false
       - name: session_key
         data_type: string

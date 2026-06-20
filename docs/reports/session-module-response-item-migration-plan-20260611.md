@@ -430,7 +430,7 @@ session.tool_interactions.*
 - Session HTTP/CLI 已提供 `SessionItem` append/list 入口，支持 model/user/chat/trace visibility 过滤；外部调试和运维不再必须通过旧 message history。
 - `tools/sessions` agent-facing 工具包已切换为 SessionItem 读写：`session_status` / `sessions_history` 读取 item，`sessions_send` 写入 `SessionItem(kind=user_message)` 并在 follow-up metadata 中记录 `session_item_id`。
 - Conversation `/messages` endpoint 已改为返回 chat-visible `SessionItem` stream，summary/title preview 也改为读取 chat-visible items。
-- Conversation `/messages` endpoint 已为 compacted SessionItem metadata 投影 `visibility_state=archived|active`；默认历史隐藏 archived items，`include_archived=true` 返回 active+archived 的 chat-visible item stream，不再依赖旧 `SessionMessage.visibility=archived`。
+- Conversation `/messages` endpoint 已为 compacted SessionItem metadata 投影 `lifecycle_state=archived|active`；默认历史隐藏 archived items，`include_archived=true` 返回 active+archived 的 chat-visible item stream，不再依赖旧 `SessionMessage.visibility=archived`。
 - Workbench agent progress 已改为从 `SessionItem` 读取内容并把 `session_item_id` 写入 TraceContext；Workbench linked entity detail 已移除 `session_message` 分支，UI/runtime TraceContext 不再暴露 `session_message_id`。
 - Context Workspace artifact owner adapter 已改为从 `SessionItem` content blocks 发现 artifact refs；session current segment/current range/evidence ledger/browser warning/consumed tool history/historical range adapter 已优先读取 model-visible SessionItem。
 - `context_workspace_session.py` 已删除旧 `list_messages` fallback；测试 fake 通过 message-to-item mirror 支撑旧测试数据，生产 adapter 不再双读。

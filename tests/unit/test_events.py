@@ -25,6 +25,7 @@ from crxzipple.modules.events import (
     RedisEventsBackend,
 )
 from crxzipple.modules.events.application.read_models.trace import (
+    EventTraceReadModelProvider,
     _summary_from_payload,
 )
 from crxzipple.modules.dispatch.application import (
@@ -387,10 +388,14 @@ class EventsModuleTestCase(unittest.TestCase):
             "tool.function.policy_updated",
             "tool.cli.output_observed",
             "llm.invocation_started",
+            "llm.invocation_provider_request_prepared",
             "llm.invocation_succeeded",
             "llm.invocation_failed",
             "llm.profile_registered",
             "llm.profile_updated",
+            "llm.profile_warmup_succeeded",
+            "llm.profile_warmup_skipped",
+            "llm.profile_warmup_failed",
             "llm.stream_delta_observed",
         )
 
@@ -447,6 +452,76 @@ class EventsModuleTestCase(unittest.TestCase):
                     self.assertEqual(definition.owner, "llm")
                     self.assertIn("invocation_id", field_paths)
                     self.assertIn("text_delta_length", field_paths)
+
+    def test_trace_read_model_reads_source_events_not_relay_or_channel_topics(self) -> None:
+        backend = InMemoryEventsBackend()
+        events_service = EventsApplicationService(backend)
+        registry = EventDefinitionRegistry(
+            definitions=(
+                EventDefinition(
+                    definition_id="demo.trace.source",
+                    owner="demo",
+                    event_name="demo.trace.source",
+                    description="Demo trace source event.",
+                    topics=(named_event_topic("demo.trace.source"),),
+                    fields=(
+                        EventDefinitionField(
+                            "run_id",
+                            "Owning run identifier.",
+                            "string",
+                            True,
+                        ),
+                    ),
+                ),
+            ),
+            include_builtin_definitions=False,
+        )
+        events_service.publish(
+            Event(
+                name="demo.trace.source",
+                payload={
+                    "event_name": "demo.trace.source",
+                    "run_id": "run-1",
+                    "summary": "source event",
+                },
+                trace={"run_id": "run-1"},
+            ),
+        )
+        events_service.publish(
+            Event(
+                topic="event_relay.workbench.run.run-1",
+                kind="broadcast",
+                payload={
+                    "event_name": "event_relay.workbench.updated",
+                    "run_id": "run-1",
+                    "summary": "relay event",
+                },
+            ),
+        )
+        events_service.publish(
+            Event(
+                topic="channel.observe.web.connection.demo",
+                kind="observe",
+                payload={
+                    "event_name": "channel.connection.observed",
+                    "run_id": "run-1",
+                    "summary": "channel event",
+                },
+            ),
+        )
+
+        provider = EventTraceReadModelProvider(
+            events_service=events_service,
+            definition_registry=registry,
+        )
+
+        events = provider.list_trace_events("run-1", limit=20)
+
+        self.assertEqual([event.name for event in events], ["demo.trace.source"])
+        self.assertEqual(
+            [event.topic for event in events],
+            [named_event_topic("demo.trace.source")],
+        )
 
     def test_event_definition_registry_covers_operations_observer_subscriptions(self) -> None:
         from crxzipple.app.assembly.events import build_event_definition_registry

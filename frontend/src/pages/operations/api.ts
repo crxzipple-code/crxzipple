@@ -67,6 +67,12 @@ export interface OperationsRuntimeStatusData {
   source: "fixture" | "api";
 }
 
+export interface LlmProfileWarmupResponse {
+  llm_id: string;
+  status: string;
+  details: RawRecord;
+}
+
 export interface OperationsRefreshEvent {
   event_type: "connected" | "snapshot" | "projection_updated" | "timeout" | string;
   event_id?: string;
@@ -542,6 +548,22 @@ export async function loadLlmInvocationDetail(
   }
   return requestJson<OperationsLlmInvocationDetail>(
     `/operations/llm/invocations/${encodeURIComponent(invocationId)}/detail`,
+  );
+}
+
+export async function warmupLlmProfileFromOperations(
+  llmId: string,
+  reason?: string | null,
+): Promise<LlmProfileWarmupResponse> {
+  return requestJson<LlmProfileWarmupResponse>(
+    `/operations/llm/profiles/${encodeURIComponent(llmId)}/warmup`,
+    {
+      method: "POST",
+      body: JSON.stringify(operationsActionPayload({
+        reason,
+        defaultReason: "Operations LLM profile warmup",
+      })),
+    },
   );
 }
 

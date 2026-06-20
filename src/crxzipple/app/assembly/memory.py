@@ -98,7 +98,10 @@ def memory_factories(
     )
 
 
-def memory_context_factories() -> tuple[ApplicationFactory, ...]:
+def memory_context_factories(
+    *,
+    create_missing_spaces: bool = True,
+) -> tuple[ApplicationFactory, ...]:
     """Build Agent + Memory integration ports used by runtime composition."""
 
     return (
@@ -117,7 +120,10 @@ def memory_context_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.FILE_MEMORY_SERVICE,
                 AppKey.MEMORY_BOOTSTRAP_CONFIG,
             ),
-            build=_build_memory_context_ports,
+            build=lambda ctx: _build_memory_context_ports(
+                ctx,
+                create_missing_spaces=create_missing_spaces,
+            ),
         ),
     )
 
@@ -212,7 +218,11 @@ def _memory_engine_readiness_payload(
     return payload
 
 
-def _build_memory_context_ports(ctx) -> dict[str, Any]:
+def _build_memory_context_ports(
+    ctx,
+    *,
+    create_missing_spaces: bool,
+) -> dict[str, Any]:
     bootstrap_config = ctx.require(AppKey.MEMORY_BOOTSTRAP_CONFIG)
     file_memory_service = ctx.require(AppKey.FILE_MEMORY_SERVICE)
     memory_watch_registry = (
@@ -233,6 +243,7 @@ def _build_memory_context_ports(ctx) -> dict[str, Any]:
             else None
         ),
         event_emitter=build_memory_event_emitter(events_service),
+        create_missing_spaces=create_missing_spaces,
     )
     runtime_service = MemoryRuntimeService(
         scope_resolver=context_resolver,

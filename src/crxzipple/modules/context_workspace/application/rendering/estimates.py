@@ -30,7 +30,7 @@ def estimate_breakdown(nodes: tuple[ContextNode, ...]) -> dict[str, object]:
         "by_owner": estimate_breakdown_by(nodes, key=lambda node: node.owner),
         "by_kind": estimate_breakdown_by(nodes, key=lambda node: node.kind),
         "session": session_budget_breakdown(nodes),
-        "evidence": evidence_path_breakdown(nodes),
+        "evidence": evidence_observation_breakdown(nodes),
         "plan": working_plan_breakdown(nodes),
         "top_rendered_nodes": top_rendered_node_estimates(nodes),
     }
@@ -150,143 +150,40 @@ def working_plan_breakdown(nodes: tuple[ContextNode, ...]) -> dict[str, object]:
     }
 
 
-def evidence_path_breakdown(nodes: tuple[ContextNode, ...]) -> dict[str, object]:
+def evidence_observation_breakdown(nodes: tuple[ContextNode, ...]) -> dict[str, object]:
     evidence_nodes = tuple(node for node in nodes if node.kind == "session_evidence")
-    browser_tool_interactions = tuple(
-        node
-        for node in nodes
-        if node.kind == "tool_interaction"
-        and (
-            (_metadata_text(node.metadata.get("tool_name")) or "").startswith("browser.")
-            or (_metadata_text(node.owner_ref.get("tool_name")) or "").startswith("browser.")
-        )
-    )
-    investigation_warnings = browser_investigation_warning_refs(nodes)
-    verified_paths: list[str] = []
-    browser_verified_paths: list[str] = []
-    unverified_paths: list[str] = []
+    observed_refs: list[str] = []
+    uncertain_refs: list[str] = []
     for node in evidence_nodes:
         facts = node.metadata.get("facts")
         if not isinstance(facts, dict):
             facts = {}
-        path = _metadata_text(
-            facts.get("evidence_path")
-            or node.metadata.get("evidence_path")
-            or node.owner_ref.get("evidence_path"),
+        evidence_ref = _metadata_text(
+            facts.get("evidence_ref")
+            or node.metadata.get("evidence_ref")
+            or node.owner_ref.get("evidence_ref"),
         )
-        if path is None:
+        if evidence_ref is None:
             continue
-        verified = (
+        observed = (
             node.metadata.get("verified") is True
             or node.owner_ref.get("verified") is True
             or _metadata_text(node.metadata.get("evidence_lifecycle_status")) == "verified"
             or _metadata_text(node.owner_ref.get("evidence_lifecycle_status")) == "verified"
         )
-        if verified:
-            verified_paths.append(path)
-            tool_name = _metadata_text(
-                node.metadata.get("tool_name") or node.owner_ref.get("tool_name"),
-            )
-            if tool_name is not None and tool_name.startswith("browser."):
-                browser_verified_paths.append(path)
+        if observed:
+            observed_refs.append(evidence_ref)
         else:
-            unverified_paths.append(path)
-    verified_paths = list(dict.fromkeys(verified_paths))
-    browser_verified_paths = list(dict.fromkeys(browser_verified_paths))
-    unverified_paths = list(dict.fromkeys(unverified_paths))
-    warning_types = list(
-        dict.fromkeys(
-            warning_type
-            for item in investigation_warnings
-            for warning_type in _metadata_text_list(item.get("warning_types"))
-        ),
-    )
-    no_terminal_fact = bool(browser_tool_interactions) and not browser_verified_paths
-    if no_terminal_fact and "evidence_path_no_terminal_fact" not in warning_types:
-        warning_types.append("evidence_path_no_terminal_fact")
+            uncertain_refs.append(evidence_ref)
+    observed_refs = list(dict.fromkeys(observed_refs))
+    uncertain_refs = list(dict.fromkeys(uncertain_refs))
     return {
         "session_evidence_count": len(evidence_nodes),
-        "verified_evidence_path_count": len(verified_paths),
-        "verified_evidence_paths": verified_paths,
-        "browser_verified_evidence_path_count": len(browser_verified_paths),
-        "browser_verified_evidence_paths": browser_verified_paths,
-        "unverified_evidence_paths": unverified_paths,
-        "browser_tool_interaction_count": len(browser_tool_interactions),
-        "browser_evidence_path_no_terminal_fact": no_terminal_fact,
-        "browser_investigation_warning_count": len(investigation_warnings),
-        "browser_investigation_warnings": investigation_warnings,
-        "browser_investigation_warning_types": warning_types,
-        "final_response_requires_evidence_path": bool(browser_verified_paths),
+        "observed_evidence_count": len(observed_refs),
+        "observed_evidence_refs": observed_refs,
+        "uncertain_evidence_count": len(uncertain_refs),
+        "uncertain_evidence_refs": uncertain_refs,
     }
-
-
-def browser_investigation_warning_refs(
-    nodes: tuple[ContextNode, ...],
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for node in nodes:
-        if node.kind != "investigation_warning":
-            continue
-        code = _metadata_text(node.metadata.get("code") or node.owner_ref.get("code"))
-        latest_tool = _metadata_text(
-            node.metadata.get("latest_tool") or node.owner_ref.get("latest_tool"),
-        )
-        warning_types = _metadata_text_list(
-            node.metadata.get("warning_types") or node.owner_ref.get("warning_types"),
-        )
-        if not warning_types:
-            warning_types = list(
-                _browser_investigation_warning_types(
-                    code=code or "",
-                    latest_tool=latest_tool or "",
-                ),
-            )
-        rows.append(
-            {
-                "node_id": node.id,
-                "code": code or "browser_investigation_warning",
-                "warning_types": warning_types,
-                "severity": (
-                    _metadata_text(node.metadata.get("severity") or node.owner_ref.get("severity"))
-                    or "warning"
-                ),
-                "latest_tool": latest_tool or "",
-                "latest_sequence_no": _metadata_int(
-                    node.metadata.get("latest_sequence_no")
-                    or node.owner_ref.get("latest_sequence_no"),
-                ),
-                "summary": node.summary,
-            },
-        )
-    return rows
-
-
-def _browser_investigation_warning_types(
-    *,
-    code: str,
-    latest_tool: str,
-) -> tuple[str, ...]:
-    if code == "browser.endpoint_candidate_not_escalated":
-        return ("candidate_not_escalated",)
-    if code == "browser.network_capture_no_requests":
-        return ("evidence_path_no_terminal_fact",)
-    if code == "browser.same_probe_repeated":
-        if latest_tool in {
-            "browser.script.extract_request",
-            "browser.script.find_request",
-            "browser.code.search",
-        }:
-            return ("same_script_candidate_repetition", "same_tool_repetition")
-        return ("same_tool_repetition",)
-    return ("browser_investigation",)
-
-
-def _metadata_text_list(value: object) -> list[str]:
-    if not isinstance(value, (list, tuple)):
-        text = _metadata_text(value)
-        return [text] if text else []
-    values = [_metadata_text(item) for item in value]
-    return list(dict.fromkeys(item for item in values if item is not None))
 
 
 def _metadata_text(value: object) -> str | None:
@@ -311,10 +208,9 @@ def _metadata_int(value: object) -> int:
 
 __all__ = [
     "aggregate_estimate",
-    "browser_investigation_warning_refs",
     "estimate_breakdown",
     "estimate_breakdown_by",
-    "evidence_path_breakdown",
+    "evidence_observation_breakdown",
     "session_budget_breakdown",
     "text_estimate",
     "top_rendered_node_estimates",

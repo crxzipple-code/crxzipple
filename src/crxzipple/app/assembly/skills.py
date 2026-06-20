@@ -7,7 +7,7 @@ from typing import Any
 
 from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ActivationTask, ApplicationFactory
-from crxzipple.app.integration.skill_prompt_resolution import (
+from crxzipple.app.integration.skill_runtime_request_resolution import (
     SkillAccessServiceAdapter,
     SkillAuthorizationServiceAdapter,
     SkillToolSourceQueryAdapter,
@@ -15,7 +15,7 @@ from crxzipple.app.integration.skill_prompt_resolution import (
 from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.skills import FilesystemSkillRepository, SkillManager
 from crxzipple.modules.skills.application import (
-    SkillPromptResolver,
+    SkillRuntimeRequestResolver,
     skill_event_from_payload,
 )
 from crxzipple.modules.skills.domain import SkillSourceStatus, SkillSourceType
@@ -30,6 +30,7 @@ SkillRepositoryFactory = Callable[[], Any]
 def skills_factories(
     *,
     repository_factory: SkillRepositoryFactory | None = None,
+    persist_runtime_request_readiness: bool = True,
 ) -> tuple[ApplicationFactory, ...]:
     """Build Skills module-local catalog/read/installation service."""
 
@@ -38,7 +39,11 @@ def skills_factories(
         ApplicationFactory(
             key="skills.manager",
             provides=(AppKey.SKILL_MANAGER,),
-            build=lambda ctx: _build_skill_manager(ctx, factory),
+            build=lambda ctx: _build_skill_manager(
+                ctx,
+                factory,
+                persist_runtime_request_readiness=persist_runtime_request_readiness,
+            ),
         ),
     )
 
@@ -59,6 +64,8 @@ def skills_activation_tasks() -> tuple[ActivationTask, ...]:
 def _build_skill_manager(
     ctx,
     repository_factory: SkillRepositoryFactory,
+    *,
+    persist_runtime_request_readiness: bool,
 ):
     events_service = (
         ctx.require(AppKey.EVENTS_SERVICE) if ctx.has(AppKey.EVENTS_SERVICE) else None
@@ -77,12 +84,13 @@ def _build_skill_manager(
         ),
         owner_catalog_repository=owner_catalog_repository,
         event_emitter=build_skill_event_emitter(events_service),
-        prompt_resolver=_build_skill_prompt_resolver(ctx),
+        runtime_request_resolver=_build_skill_runtime_request_resolver(ctx),
+        persist_runtime_request_readiness=persist_runtime_request_readiness,
     )
 
 
-def _build_skill_prompt_resolver(ctx) -> SkillPromptResolver:
-    return SkillPromptResolver(
+def _build_skill_runtime_request_resolver(ctx) -> SkillRuntimeRequestResolver:
+    return SkillRuntimeRequestResolver(
         access_port=(
             SkillAccessServiceAdapter(ctx.require(AppKey.ACCESS_SERVICE))
             if ctx.has(AppKey.ACCESS_SERVICE)

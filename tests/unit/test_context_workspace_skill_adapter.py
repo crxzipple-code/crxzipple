@@ -31,7 +31,7 @@ def test_skill_adapter_expands_available_ready_skill_nodes() -> None:
             agent_id="assistant",
             metadata={
                 "workspace_dir": "/workspace",
-                "prompt_input": "interactive",
+                "runtime_request_surface": "interactive",
                 "available_skill_names": ["skill-a"],
             },
         ),

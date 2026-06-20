@@ -6,6 +6,12 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from crxzipple.core.db import Base
+from crxzipple.modules.llm.domain import (
+    LlmMessagePhase,
+    LlmMessageRole,
+    LlmResponseItem,
+    LlmResponseItemKind,
+)
 from crxzipple.modules.orchestration.domain import (
     ExecutionChain,
     ExecutionChainStatus,
@@ -90,7 +96,6 @@ from crxzipple.modules.session.domain import (
     DirectSessionScope,
     SessionItem,
     SessionItemKind,
-    SessionItemVisibility,
     SessionRouteContext,
 )
 from crxzipple.modules.tool.domain import (
@@ -169,10 +174,13 @@ class _FakeSessionRecorderPort:
                 session_id=getattr(item_input, "session_id"),
                 role=getattr(item_input, "role"),
                 kind=getattr(item_input, "kind"),
+                phase=getattr(item_input, "phase"),
                 content_payload=getattr(item_input, "content_payload"),
                 source_module=getattr(item_input, "source_module"),
                 source_kind=getattr(item_input, "source_kind"),
                 source_id=getattr(item_input, "source_id"),
+                provider_item_id=getattr(item_input, "provider_item_id", None),
+                provider_item_type=getattr(item_input, "provider_item_type", None),
                 call_id=getattr(item_input, "call_id"),
                 tool_name=getattr(item_input, "tool_name"),
                 metadata=dict(getattr(item_input, "metadata", {}) or {}),
@@ -188,7 +196,7 @@ class _FakeSessionItemLookupPort:
         self.item_inputs: list[ListSessionItemsInput] = []
         self.message_reads = 0
 
-    def list_model_visible_items(
+    def list_items(
         self,
         data: ListSessionItemsInput,
     ) -> list[SessionItem]:
@@ -534,7 +542,7 @@ def test_sqlalchemy_uow_exposes_execution_chain_repositories() -> None:
                 chain_id="chain-uow",
                 turn_id="run-uow",
                 step_index=0,
-                kind=ExecutionStepKind.PROMPT_RENDER,
+                kind=ExecutionStepKind.CONTEXT_SNAPSHOT,
             ),
         )
         uow.execution_step_items.add(
@@ -566,6 +574,18 @@ def test_run_query_service_exposes_execution_chain_read_surface() -> None:
 
     uow = SqlAlchemyUnitOfWork(session_factory)
     with uow:
+        run = OrchestrationRun.accept(
+            run_id="run-query",
+            inbound_instruction=InboundInstruction(source="unit", content="query"),
+        )
+        run.enqueue(lane_key="lane-query")
+        run.claim(worker_id="worker-query")
+        run.wait_on_tool(
+            worker_id="worker-query",
+            pending_tool_run_ids=("tool-run-query",),
+            reason="tool_background_wait",
+        )
+        uow.orchestration_runs.add(run)
         chain = ExecutionChain.create(chain_id="chain-query", turn_id="run-query")
         chain.start(active_step_id="step-query")
         chain.increment_step_count()
@@ -631,6 +651,96 @@ def test_run_query_service_exposes_execution_chain_read_surface() -> None:
             status=ExecutionStepItemStatus.WAITING,
         )
     ] == ["item-query"]
+    waiting_status = query.get_execution_waiting_status("run-query")
+    assert waiting_status.run.id == "run-query"
+    assert waiting_status.run.stage is OrchestrationRunStage.WAITING_ON_TOOL
+    assert waiting_status.active_chain is not None
+    assert waiting_status.active_chain.id == "chain-query"
+    assert [step.id for step in waiting_status.waiting_steps] == ["step-query"]
+    assert [ref.item.id for ref in waiting_status.waiting_items] == ["item-query"]
+    assert [ref.step.id for ref in waiting_status.waiting_items] == ["step-query"]
+    assert [ref.chain.id for ref in waiting_status.waiting_items] == ["chain-query"]
+    assert waiting_status.pending_tool_run_ids == ("tool-run-query",)
+    assert waiting_status.pending_approval_request is None
+    assert waiting_status.waiting_reason == "tool_background_wait"
+
+
+def test_run_query_service_exposes_waiting_approval_status() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    with uow:
+        run = OrchestrationRun.accept(
+            run_id="run-query-approval",
+            inbound_instruction=InboundInstruction(source="unit", content="approval"),
+        )
+        run.enqueue(lane_key="lane-query-approval")
+        run.claim(worker_id="worker-query")
+        run.wait_for_confirmation(
+            worker_id="worker-query",
+            request=PendingApprovalRequest(
+                request_id="approval-query",
+                effect_id="effect-query",
+                label="Allow tool",
+                reason="needs confirmation",
+                tool_ids=("tool-needs-approval",),
+                tool_name="command.exec",
+            ),
+            reason="waiting_for_confirmation",
+        )
+        uow.orchestration_runs.add(run)
+        chain = ExecutionChain.create(
+            chain_id="chain-query-approval",
+            turn_id=run.id,
+        )
+        chain.start(active_step_id="step-query-approval")
+        chain.increment_step_count()
+        uow.execution_chains.add(chain)
+        step = ExecutionStep.create(
+            step_id="step-query-approval",
+            chain_id=chain.id,
+            turn_id=chain.turn_id,
+            step_index=0,
+            kind=ExecutionStepKind.APPROVAL,
+            correlation_key="run-query-approval:approval:0",
+        )
+        step.wait()
+        uow.execution_steps.add(step)
+        item = ExecutionStepItem.create(
+            item_id="item-query-approval",
+            step_id=step.id,
+            chain_id=chain.id,
+            turn_id=chain.turn_id,
+            item_index=0,
+            kind=ExecutionStepItemKind.APPROVAL_REQUEST,
+            owner=ExecutionOwnerReference(
+                owner_kind="approval_request",
+                owner_id="approval-query",
+            ),
+        )
+        item.wait()
+        uow.execution_step_items.add(item)
+        uow.commit()
+
+    query = OrchestrationRunQueryService(lambda: uow)
+    waiting_status = query.get_execution_waiting_status("run-query-approval")
+
+    assert waiting_status.run.stage is OrchestrationRunStage.WAITING_FOR_CONFIRMATION
+    assert waiting_status.pending_tool_run_ids == ()
+    assert waiting_status.pending_approval_request is not None
+    assert waiting_status.pending_approval_request.request_id == "approval-query"
+    assert waiting_status.pending_approval_request.effect_id == "effect-query"
+    assert waiting_status.pending_approval_request.tool_ids == (
+        "tool-needs-approval",
+    )
+    assert [step.id for step in waiting_status.waiting_steps] == [
+        "step-query-approval",
+    ]
+    assert [ref.item.owner.owner_id for ref in waiting_status.waiting_items] == [
+        "approval-query",
+    ]
 
 
 def test_intake_accept_and_enqueue_materializes_execution_chain_steps() -> None:
@@ -1011,7 +1121,7 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
             execution_payload={
                 "llm_id": "llm-primary",
                 "llm_invocation_id": "invocation-tool-batch-1",
-                "context_render_snapshot_id": "ctxsnap-tool-batch-1",
+                "request_render_snapshot_id": "ctxsnap-tool-batch-1",
                 "llm_response_item_ids": [
                     "invocation-tool-batch-1:item:assistant",
                     "invocation-tool-batch-1:item:tool-call",
@@ -1115,7 +1225,7 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
     assert progress_items[0].summary_payload == {
         "llm_invocation_id": "invocation-tool-batch-1",
         "assistant_progress_item_ids": ["item-progress-1"],
-        "context_render_snapshot_id": "ctxsnap-tool-batch-1",
+        "request_render_snapshot_id": "ctxsnap-tool-batch-1",
         "llm_id": "llm-primary",
         "llm_response_item_ids": [
             "invocation-tool-batch-1:item:assistant",
@@ -1131,7 +1241,7 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
         "llm_invocation_id": "invocation-tool-batch-1",
         "message_kind": "assistant_progress",
         "assistant_progress_item_ids": ["item-progress-1"],
-        "context_render_snapshot_id": "ctxsnap-tool-batch-1",
+        "request_render_snapshot_id": "ctxsnap-tool-batch-1",
         "assistant_progress_text": "我看到 echo 和 image 工具可用，先验证工具调用链。",
         "assistant_progress_text_chars": 31,
         "llm_id": "llm-primary",
@@ -1613,6 +1723,51 @@ def test_assistant_response_fallback_records_session_item_without_message() -> N
     }
 
 
+def test_llm_reasoning_summary_records_agent_progress_item_id() -> None:
+    session_service = _FakeSessionRecorderPort()
+    recorder = OrchestrationSessionRecorder(session_service=session_service)
+
+    record = recorder.append_llm_response_items(
+        session_key="agent:assistant:main",
+        active_session_id="session-1",
+        invocation_id="llm-invocation-reasoning",
+        response_items=(
+            LlmResponseItem(
+                id="response-reasoning-1",
+                invocation_id="llm-invocation-reasoning",
+                sequence_no=1,
+                kind=LlmResponseItemKind.REASONING,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.COMMENTARY,
+                content_payload={
+                    "summary": [
+                        {"text": "我已经定位官网接口，下一步验证请求体。"},
+                    ],
+                },
+                provider_payload={"type": "reasoning"},
+                provider_item_id="provider-reasoning-1",
+                provider_item_type="reasoning",
+                provider_replay_candidate=True,
+                user_timeline_candidate=False,
+            ),
+        ),
+    )
+
+    assert record.item_ids == ("item-1", "item-2")
+    assert record.assistant_progress_item_ids == ("item-2",)
+    reasoning_item, progress_item = session_service.items
+
+    assert reasoning_item.kind is SessionItemKind.REASONING
+    assert reasoning_item.source_kind == "llm_response_item"
+
+    assert progress_item.kind is SessionItemKind.AGENT_PROGRESS
+    assert progress_item.content_payload["text"] == "我已经定位官网接口，下一步验证请求体。"
+    assert progress_item.content_payload["projection_source"] == "reasoning_summary"
+    assert progress_item.source_id == "response-reasoning-1"
+    assert progress_item.provider_item_id == "provider-reasoning-1"
+    assert progress_item.source_kind == "llm_response_item"
+
+
 def test_late_tool_run_terminal_marks_item_without_advancing_chain() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -1917,7 +2072,6 @@ def test_wait_coordinator_finds_existing_tool_results_from_session_items_without
                 sequence_no=3,
                 kind=SessionItemKind.TOOL_RESULT,
                 role="tool",
-                visibility=SessionItemVisibility(model_visible=True),
                 content_payload={
                     "content": [{"type": "text", "text": "done"}],
                 },
@@ -1958,7 +2112,6 @@ def test_wait_coordinator_finds_existing_tool_results_from_session_items_without
     assert item_ids == ("session-item-tool-result",)
     assert session_service.message_reads == 0
     assert len(session_service.item_inputs) == 1
-    assert session_service.item_inputs[0].model_visible is True
 
 
 def test_approval_replay_and_resume_steps_are_materialized() -> None:

@@ -31,6 +31,7 @@ from crxzipple.modules.session.interfaces.http import router as session_router
 from crxzipple.modules.settings.interfaces.http import router as settings_router
 from crxzipple.modules.skills.interfaces.http import router as skills_router
 from crxzipple.modules.tool.interfaces.http import router as tool_router
+from crxzipple.modules.workbench.interfaces.http import router as workbench_router
 
 
 api_router = APIRouter()
@@ -80,6 +81,11 @@ api_router.include_router(skills_router, prefix="/skills", tags=["skills"])
 api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
 api_router.include_router(access_router, prefix="/access", tags=["access"])
 api_router.include_router(ui_access_router, prefix="/ui/access", tags=["ui", "access"])
+api_router.include_router(
+    workbench_router,
+    prefix="/ui",
+    tags=["ui", "workbench"],
+)
 api_router.include_router(
     settings_router,
     prefix="/ui/settings",

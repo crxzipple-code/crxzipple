@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from crxzipple.modules.skills.application.events import (
     SKILL_READINESS_CHANGED_EVENT,
+    SKILL_RESOLUTION_COMPLETED_EVENT,
     SkillEventEmitter,
     emit_skill_event,
 )
@@ -19,10 +20,10 @@ from crxzipple.modules.skills.application.models import (
 from crxzipple.modules.skills.application.ports import (
     SkillOwnerCatalogRepositoryPort,
 )
-from crxzipple.modules.skills.application.prompt_resolver import (
+from crxzipple.modules.skills.application.runtime_request_resolver import (
     ResolvedSkillReadiness,
-    SkillPromptResolution,
-    SkillPromptResolutionContext,
+    SkillRuntimeRequestResolution,
+    SkillRuntimeRequestResolutionContext,
 )
 from crxzipple.modules.skills.domain import (
     SkillInstallation,
@@ -217,12 +218,12 @@ class SkillOwnerStateService:
                 ),
             )
 
-    def persist_prompt_readiness_snapshots(
+    def persist_runtime_request_readiness_snapshots(
         self,
         *,
         packages: tuple[SkillPackage, ...],
-        resolution: SkillPromptResolution,
-        context: SkillPromptResolutionContext,
+        resolution: SkillRuntimeRequestResolution,
+        context: SkillRuntimeRequestResolutionContext,
     ) -> None:
         if self.owner_catalog_repository is None:
             return
@@ -257,6 +258,46 @@ class SkillOwnerStateService:
                     else "warning"
                 ),
             )
+
+    def record_runtime_request_resolution_completed(
+        self,
+        *,
+        resolution: SkillRuntimeRequestResolution,
+        context: SkillRuntimeRequestResolutionContext,
+    ) -> None:
+        statuses = [resolved.readiness.status for resolved in resolution.skills]
+        emit_skill_event(
+            self.event_emitter,
+            SKILL_RESOLUTION_COMPLETED_EVENT,
+            payload={
+                **context.attrs(),
+                "total_count": len(resolution.skills),
+                "ready_count": sum(1 for status in statuses if status == "ready"),
+                "setup_needed_count": sum(
+                    1 for status in statuses if status == "setup_needed"
+                ),
+                "unsupported_count": sum(
+                    1 for status in statuses if status == "unsupported"
+                ),
+                "skills": [
+                    {
+                        "skill": resolved.package.name,
+                        "status": resolved.readiness.status,
+                        "missing_tools": list(resolved.readiness.missing_tools),
+                        "missing_access": list(resolved.readiness.missing_access),
+                        "missing_effects": list(resolved.readiness.missing_effects),
+                        "unsupported_surfaces": list(
+                            resolved.readiness.unsupported_surfaces,
+                        ),
+                        "unsupported_platforms": list(
+                            resolved.readiness.unsupported_platforms,
+                        ),
+                    }
+                    for resolved in resolution.skills
+                ],
+            },
+            status="completed",
+        )
 
     def readiness_for_package(self, package: SkillPackage) -> SkillReadiness:
         if not self.package_enabled(package):
@@ -482,7 +523,7 @@ def prompt_readiness_snapshot(
     package: SkillPackage,
     readiness: ResolvedSkillReadiness,
     *,
-    context: SkillPromptResolutionContext,
+    context: SkillRuntimeRequestResolutionContext,
     updated_at: datetime,
 ) -> SkillReadinessSnapshot:
     checks = prompt_readiness_checks(package, readiness)
@@ -602,7 +643,7 @@ def readiness_changed_payload(
     package: SkillPackage,
     previous: SkillReadinessSnapshot | None,
     current: SkillReadinessSnapshot,
-    context: SkillPromptResolutionContext,
+    context: SkillRuntimeRequestResolutionContext,
     readiness: ResolvedSkillReadiness,
 ) -> dict[str, object]:
     return {

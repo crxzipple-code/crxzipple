@@ -18,12 +18,6 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
             json={
                 "kind": "user_message",
                 "role": "user",
-                "visibility": {
-                    "model_visible": True,
-                    "user_visible": True,
-                    "chat_visible": True,
-                    "trace_visible": True,
-                },
                 "content_payload": {
                     "blocks": [{"type": "text", "text": "hello from session"}],
                 },
@@ -42,7 +36,9 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         self.assertEqual(tree_response.status_code, 200)
         nodes = tree_response.json()["nodes"]
 
-        self.assertTrue(any(node["id"] == "session.segment.current" for node in nodes))
+        self.assertTrue(any(node["id"] == "session.instance.active" for node in nodes))
+        self.assertTrue(any(node["id"] == "session.segments.active" for node in nodes))
+        self.assertTrue(any(node["id"] == "session.segment.active" for node in nodes))
         self.assertTrue(any(node["id"] == "session.items.current" for node in nodes))
         expand_response = self.client.post(
             "/context-workspaces/by-session/session:adapter/nodes/session.items.current/actions/expand",
@@ -66,7 +62,7 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
             append_response.json()["id"],
         )
 
-    def test_context_workspace_evidence_uses_session_items(self) -> None:
+    def test_context_workspace_does_not_promote_tool_evidence_to_tree_nodes(self) -> None:
         self.client.post(
             "/sessions",
             json={
@@ -142,15 +138,15 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(tree_response.status_code, 200)
         nodes = tree_response.json()["nodes"]
-        ledger = next(node for node in nodes if node["id"] == "session.evidence.current")
-        evidence = next(node for node in nodes if node["kind"] == "session_evidence")
 
-        self.assertEqual(ledger["metadata"]["evidence_count"], 1)
-        self.assertEqual(evidence["owner_ref"]["result_session_item_id"], result_response.json()["id"])
-        self.assertEqual(evidence["metadata"]["facts"]["url"], "/api/flights")
-        self.assertTrue(evidence["metadata"]["verified"])
+        self.assertFalse(
+            any(node["id"] == "session.evidence.current" for node in nodes),
+        )
+        self.assertFalse(
+            any(node["kind"] == "session_evidence" for node in nodes),
+        )
 
-    def test_context_workspace_browser_warning_uses_session_items(self) -> None:
+    def test_context_workspace_does_not_generate_browser_warning_nodes(self) -> None:
         self.client.post(
             "/sessions",
             json={
@@ -179,10 +175,10 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
                     "Network capture started:\n- Capture: cap-flight",
                 ),
                 (
-                    "browser.runtime.probe_client",
+                    "browser.evaluate",
                     "call-probe",
-                    {"object_path": "$nuxt", "target_id": "tab-1"},
-                    "Browser runtime client probe:\n- Status: resolved",
+                    {"fn": "() => window.location.href", "target_id": "tab-1"},
+                    "Evaluate result: https://example.com",
                 ),
                 (
                     "browser.network.list_requests",
@@ -246,11 +242,7 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
             if node["kind"] == "investigation_warning"
         ]
 
-        self.assertTrue(warnings)
-        self.assertIn(
-            "browser.network_capture_no_requests",
-            {node["metadata"]["code"] for node in warnings},
-        )
+        self.assertEqual(warnings, [])
 
     def test_context_workspace_historical_range_uses_session_items(self) -> None:
         self.client.post(
@@ -334,7 +326,7 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
             old_item.json()["id"],
         )
 
-    def test_context_workspace_tree_action_and_render_snapshot(self) -> None:
+    def test_context_workspace_tree_action_and_snapshot(self) -> None:
         ensure_response = self.client.post(
             "/context-workspaces/by-session/session:http/ensure",
             json={"agent_id": "assistant"},
@@ -364,9 +356,9 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(render_response.status_code, 200)
         render_payload = render_response.json()
-        prompt_body = render_payload["prompt_body"]
-        self.assertIn("<context_tree", prompt_body)
-        self.assertIn("rendered_prompt", render_payload["estimate_breakdown"])
+        debug_body = render_payload["debug_body"]
+        self.assertIn("<context_tree", debug_body)
+        self.assertIn("debug_body", render_payload["estimate_breakdown"])
         self.assertIn("node_visible", render_payload["estimate_breakdown"])
         self.assertTrue(render_payload["estimate_breakdown"]["top_rendered_nodes"])
         self.assertIn(
@@ -378,10 +370,10 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         self.assertIsInstance(render_payload["provider_attachments"], dict)
 
         snapshot_response = self.client.post(
-            "/context-workspaces/by-session/session:http/render-snapshots",
+            "/context-workspaces/by-session/session:http/snapshots",
             json={
                 "run_id": "run-http",
-                "prompt_body": prompt_body,
+                "debug_body": debug_body,
                 "estimate": render_payload["estimate"],
                 "included_node_ids": render_payload["included_node_ids"],
                 "included_refs": [
@@ -405,6 +397,7 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(snapshot_response.status_code, 200)
         self.assertEqual(snapshot_response.json()["snapshot"]["run_id"], "run-http")
+        self.assertNotIn("debug_body", snapshot_response.json()["snapshot"])
         self.assertEqual(
             snapshot_response.json()["snapshot"]["included_refs"][0]["item_id"],
             "item-http-1",
@@ -418,12 +411,17 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         snapshot_id = snapshot_response.json()["snapshot"]["id"]
 
         get_snapshot_response = self.client.get(
-            "/context-workspaces/runs/run-http/render-snapshot",
+            "/context-workspaces/runs/run-http/snapshot",
         )
         self.assertEqual(get_snapshot_response.status_code, 200)
+        self.assertNotIn("debug_body", get_snapshot_response.json()["snapshot"])
+        get_snapshot_with_debug_response = self.client.get(
+            "/context-workspaces/runs/run-http/snapshot?include_debug_body=true",
+        )
+        self.assertEqual(get_snapshot_with_debug_response.status_code, 200)
         self.assertEqual(
-            get_snapshot_response.json()["snapshot"]["prompt_body"],
-            prompt_body,
+            get_snapshot_with_debug_response.json()["snapshot"]["debug_body"],
+            debug_body,
         )
         self.assertEqual(
             get_snapshot_response.json()["snapshot"]["included_refs"][0]["item_id"],
@@ -431,10 +429,19 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         )
 
         get_snapshot_by_id_response = self.client.get(
-            f"/context-workspaces/render-snapshots/{snapshot_id}",
+            f"/context-workspaces/snapshots/{snapshot_id}",
         )
         self.assertEqual(get_snapshot_by_id_response.status_code, 200)
+        self.assertNotIn("debug_body", get_snapshot_by_id_response.json()["snapshot"])
         self.assertEqual(
             get_snapshot_by_id_response.json()["snapshot"]["id"],
             snapshot_id,
+        )
+        get_snapshot_by_id_with_debug_response = self.client.get(
+            f"/context-workspaces/snapshots/{snapshot_id}?include_debug_body=true",
+        )
+        self.assertEqual(get_snapshot_by_id_with_debug_response.status_code, 200)
+        self.assertEqual(
+            get_snapshot_by_id_with_debug_response.json()["snapshot"]["debug_body"],
+            debug_body,
         )

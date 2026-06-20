@@ -529,7 +529,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="events",
             kind="navigation",
             method="GET",
-            endpoint="/ui/trace/{trace_id}",
+            endpoint="/workbench/traces/{trace_id}",
         ),
         RuntimeActionModel(
             id="inspect_topic",
@@ -2370,7 +2370,7 @@ def _trace_route(item: dict[str, Any]) -> str:
     trace_id = _display(item.get("trace_id"))
     if trace_id == "-":
         return "-"
-    return f"/trace?trace_id={trace_id}"
+    return f"/workbench/traces/{trace_id}"
 
 
 def _event_row_id(item: dict[str, Any]) -> str:

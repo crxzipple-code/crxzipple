@@ -529,7 +529,7 @@ def _workspace_exec_result_envelope(
         key_facts=key_facts,
         warnings=tuple(warnings),
         read_handles=read_handles,
-        model_visible_payload={
+        provider_replay_payload={
             "summary": _workspace_exec_result_summary(result),
             "tool": WORKSPACE_EXEC_TOOL_ID,
             "workspace_dir": result.workspace_root,
@@ -545,7 +545,7 @@ def _workspace_exec_result_envelope(
             "stderr_truncated": result.stderr_truncated,
             "read_handles": list(read_handles),
         },
-        user_visible_payload={
+        user_summary_payload={
             "summary": _workspace_exec_result_summary(result),
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
@@ -605,12 +605,12 @@ def _process_session_envelope(
         output_payload=dict(metadata),
         key_facts=dict(metadata),
         read_handles=(read_handle,),
-        model_visible_payload={
+        provider_replay_payload={
             "summary": summary,
             **metadata,
             "read_handles": [read_handle],
         },
-        user_visible_payload={
+        user_summary_payload={
             "summary": summary,
             "process_id": session.id,
             "status": session.status.value,
@@ -653,12 +653,12 @@ def _process_output_envelope(
             if key not in {"stdout", "stderr"}
         },
         read_handles=(read_handle,),
-        model_visible_payload={
+        provider_replay_payload={
             "summary": _process_output_summary(session, output, action=action),
             **metadata,
             "read_handles": [read_handle],
         },
-        user_visible_payload={
+        user_summary_payload={
             "summary": _process_output_summary(session, output, action=action),
             "process_id": session.id,
             "status": session.status.value,

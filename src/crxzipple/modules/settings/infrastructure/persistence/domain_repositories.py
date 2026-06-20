@@ -243,6 +243,39 @@ class SqlAlchemySettingsResourceVersionRepository:
                 return None
             return _version_from_record(_version_record(model))
 
+    def latest_published_for_resources(
+        self,
+        resource_ids: tuple[str, ...],
+    ) -> dict[str, SettingsResourceVersion]:
+        normalized_ids = tuple(
+            _required_text(resource_id, "resource id")
+            for resource_id in resource_ids
+            if str(resource_id or "").strip()
+        )
+        if not normalized_ids:
+            return {}
+        with self._session_factory() as session:
+            models = session.scalars(
+                select(SettingsResourceVersionModel)
+                .where(
+                    SettingsResourceVersionModel.resource_id.in_(normalized_ids),
+                    SettingsResourceVersionModel.status == "published",
+                )
+                .order_by(
+                    SettingsResourceVersionModel.resource_id.asc(),
+                    SettingsResourceVersionModel.version_number.desc(),
+                    SettingsResourceVersionModel.created_at.desc(),
+                ),
+            ).all()
+            latest: dict[str, SettingsResourceVersion] = {}
+            for model in models:
+                if model.resource_id in latest:
+                    continue
+                latest[model.resource_id] = _version_from_record(
+                    _version_record(model),
+                )
+            return latest
+
 
 class SqlAlchemySettingsOverrideRepository:
     def __init__(self, session_factory: SessionFactory) -> None:
@@ -307,6 +340,49 @@ class SqlAlchemySettingsOverrideRepository:
                 _override_from_record(_override_record(model))
                 for model in session.scalars(statement)
             )
+
+    def list_for_resources(
+        self,
+        resource_ids: tuple[str, ...],
+        *,
+        environment: str | None = None,
+        enabled_only: bool = False,
+    ) -> dict[str, tuple[SettingsOverride, ...]]:
+        normalized_ids = tuple(
+            _required_text(resource_id, "resource id")
+            for resource_id in resource_ids
+            if str(resource_id or "").strip()
+        )
+        if not normalized_ids:
+            return {}
+        with self._session_factory() as session:
+            statement = (
+                select(SettingsOverrideModel)
+                .where(SettingsOverrideModel.resource_id.in_(normalized_ids))
+                .order_by(
+                    SettingsOverrideModel.resource_id.asc(),
+                    SettingsOverrideModel.priority.asc(),
+                    SettingsOverrideModel.override_id.asc(),
+                )
+            )
+            if environment is not None:
+                statement = statement.where(
+                    SettingsOverrideModel.scope_key
+                    == _required_text(environment, "environment"),
+                )
+            if enabled_only:
+                statement = statement.where(SettingsOverrideModel.status == "active")
+            grouped: dict[str, list[SettingsOverride]] = {
+                resource_id: [] for resource_id in normalized_ids
+            }
+            for model in session.scalars(statement):
+                grouped.setdefault(model.resource_id, []).append(
+                    _override_from_record(_override_record(model)),
+                )
+            return {
+                resource_id: tuple(items)
+                for resource_id, items in grouped.items()
+            }
 
 
 class SqlAlchemySettingsEffectiveSnapshotRepository:

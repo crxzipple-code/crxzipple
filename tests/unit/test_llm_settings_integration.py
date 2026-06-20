@@ -37,6 +37,7 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
                 "temperature": 0.2,
                 "max_output_tokens": 1024,
                 "reasoning_effort": "medium",
+                "provider_transport": "websocket",
                 "extra_body": {
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
@@ -63,6 +64,7 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
         )
         self.assertEqual(register_input.default_params.temperature, 0.2)
         self.assertEqual(register_input.default_params.reasoning_effort, "medium")
+        self.assertEqual(register_input.default_params.provider_transport, "websocket")
         self.assertEqual(
             register_input.default_params.extra_body,
             {"chat_template_kwargs": {"enable_thinking": False}},
@@ -90,6 +92,31 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
         self.assertNotIn(
             LlmCapability.PROVIDER_NATIVE_CONTINUATION,
             register_input.capabilities,
+        )
+
+    def test_codex_websocket_capabilities_enable_provider_native_continuation(
+        self,
+    ) -> None:
+        register_input = register_llm_profile_input_from_config(
+            {
+                "id": "codex-websocket",
+                "provider": "openai_codex",
+                "api_family": "openai_codex_responses",
+                "model_name": "gpt-5.5",
+                "capabilities": (
+                    "provider_websocket_transport",
+                    "provider_incremental_input",
+                ),
+            },
+        )
+
+        self.assertEqual(
+            register_input.capabilities,
+            (
+                LlmCapability.PROVIDER_WEBSOCKET_TRANSPORT,
+                LlmCapability.PROVIDER_INCREMENTAL_INPUT,
+                LlmCapability.PROVIDER_NATIVE_CONTINUATION,
+            ),
         )
 
     def test_legacy_credential_source_keys_are_rejected(self) -> None:

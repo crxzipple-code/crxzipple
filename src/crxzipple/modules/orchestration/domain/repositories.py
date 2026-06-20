@@ -95,6 +95,7 @@ class OrchestrationRunRepository(Protocol):
         self,
         *,
         status: OrchestrationRunStatus | None = None,
+        session_key: str | None = None,
     ) -> list[OrchestrationRun]:
         ...
 

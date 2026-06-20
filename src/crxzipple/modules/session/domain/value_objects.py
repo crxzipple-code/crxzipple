@@ -30,13 +30,15 @@ class DirectSessionScope(StrEnum):
 
 class SessionItemKind(StrEnum):
     USER_MESSAGE = "user_message"
+    AGENT_PROGRESS = "agent_progress"
     ASSISTANT_MESSAGE = "assistant_message"
     REASONING = "reasoning"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    PROVIDER_EXTERNAL_ITEM = "provider_external_item"
-    COMPACTION = "compaction"
-    SYSTEM_NOTE = "system_note"
+    PROVIDER_EXTERNAL_ACTIVITY = "provider_external_activity"
+    CONTEXT_COMPACTION = "context_compaction"
+    RUNTIME_NOTICE = "runtime_notice"
+    RUNTIME_ERROR = "runtime_error"
     UNKNOWN = "unknown"
 
 
@@ -44,35 +46,6 @@ class SessionItemPhase(StrEnum):
     COMMENTARY = "commentary"
     FINAL_ANSWER = "final_answer"
     UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class SessionItemVisibility(ValueObject):
-    model_visible: bool = True
-    user_visible: bool = False
-    chat_visible: bool = False
-    trace_visible: bool = True
-
-    def to_payload(self) -> dict[str, bool]:
-        return {
-            "model_visible": self.model_visible,
-            "user_visible": self.user_visible,
-            "chat_visible": self.chat_visible,
-            "trace_visible": self.trace_visible,
-        }
-
-    @classmethod
-    def from_payload(
-        cls,
-        payload: dict[str, Any] | None,
-    ) -> "SessionItemVisibility":
-        payload = payload or {}
-        return cls(
-            model_visible=bool(payload.get("model_visible", True)),
-            user_visible=bool(payload.get("user_visible", False)),
-            chat_visible=bool(payload.get("chat_visible", False)),
-            trace_visible=bool(payload.get("trace_visible", True)),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +58,6 @@ class SessionItem(ValueObject):
     content_payload: dict[str, Any] = field(default_factory=dict)
     role: str | None = None
     phase: SessionItemPhase = SessionItemPhase.UNKNOWN
-    visibility: SessionItemVisibility = field(default_factory=SessionItemVisibility)
     source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
@@ -93,6 +65,10 @@ class SessionItem(ValueObject):
     provider_item_type: str | None = None
     call_id: str | None = None
     tool_name: str | None = None
+    model_visible: bool = True
+    user_visible: bool = True
+    chat_visible: bool = True
+    trace_visible: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utcnow)
 
@@ -118,8 +94,11 @@ class SessionItem(ValueObject):
             "sequence_no": self.sequence_no,
             "kind": self.kind.value,
             "phase": self.phase.value,
-            "visibility": self.visibility.to_payload(),
             "content_payload": dict(self.content_payload),
+            "model_visible": self.model_visible,
+            "user_visible": self.user_visible,
+            "chat_visible": self.chat_visible,
+            "trace_visible": self.trace_visible,
             "metadata": dict(self.metadata),
             "created_at": self.created_at.isoformat(),
         }

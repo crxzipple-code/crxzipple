@@ -81,7 +81,7 @@ class WaitCoordinatorUnitOfWork(Protocol):
 
 
 class SessionItemListPort(Protocol):
-    def list_model_visible_items(
+    def list_items(
         self,
         data: ListSessionItemsInput,
     ) -> list[object]:
@@ -313,7 +313,7 @@ class RunWaitCoordinator:
     ) -> OrchestrationRun:
         resume_metadata = {
             **dict(metadata or {}),
-            "prompt_flow_hint": {
+            "runtime_request_flow_hint": {
                 "mode": "recovery_resume",
                 "reason": reason,
             },
@@ -625,19 +625,10 @@ class RunWaitCoordinator:
             tool_runs=pending_tool_runs,
             item_ids=item_ids,
         )
-        evidence_frontier = self.engine.evidence_frontier_for_tool_runs(
-            run,
-            tool_runs=pending_tool_runs,
-        )
         resumed = self.resume_after_tool_completion(
             run.id,
             OrchestrationQueuePolicy.RESUME_FIRST,
             self._resume_reason_from_tool_runs(pending_tool_runs),
-            metadata=(
-                {"evidence_frontier": [dict(item) for item in evidence_frontier]}
-                if evidence_frontier
-                else None
-            ),
         )
         self._store_recovery_contract(
             resumed.id,
@@ -705,7 +696,7 @@ class RunWaitCoordinator:
                 run_id=run_id,
                 reason=f"approval_{decision.value}",
                 metadata={
-                    "prompt_flow_hint": {
+                    "runtime_request_flow_hint": {
                         "mode": (
                             "approval_denied"
                             if decision is ApprovalDecision.DENY
@@ -833,14 +824,13 @@ class RunWaitCoordinator:
             or not run.active_session_id.strip()
         ):
             return ()
-        list_items = getattr(self.session_service, "list_model_visible_items", None)
+        list_items = getattr(self.session_service, "list_items", None)
         if not callable(list_items):
             return ()
         items = list_items(
             ListSessionItemsInput(
                 session_key=session_key,
                 active_session_only=True,
-                model_visible=True,
             ),
         )
         return tuple(
@@ -921,13 +911,14 @@ def _llm_step_summary(payload: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for key in (
         "assistant_progress_item_ids",
-        "context_render_snapshot_id",
         "llm_id",
         "llm_invocation_id",
+        "llm_request_input",
         "llm_response_item_ids",
         "llm_loop_diagnostic",
         "llm_transcript_consumption",
-        "prompt_mode",
+        "request_render_snapshot_id",
+        "runtime_request_mode",
         "session_item_ids",
         "tool_call_session_item_ids",
         "tool_call_names",

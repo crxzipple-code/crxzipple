@@ -71,7 +71,7 @@ class ExecutionChainStatus(StrEnum):
 
 class ExecutionStepKind(StrEnum):
     INTAKE = "intake"
-    PROMPT_RENDER = "prompt_render"
+    CONTEXT_SNAPSHOT = "context_snapshot"
     LLM = "llm"
     TOOL_BATCH = "tool_batch"
     APPROVAL = "approval"

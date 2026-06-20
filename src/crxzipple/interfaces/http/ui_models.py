@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from crxzipple.modules.orchestration.application.read_models.workbench import (
+from crxzipple.modules.workbench.application import (
     ApprovalRequestDetail,
     ArtifactPreview,
     RunMetrics,
@@ -21,6 +21,7 @@ from crxzipple.modules.orchestration.application.read_models.workbench import (
     WorkbenchKeyValueItem,
     WorkbenchKeyValueSection,
     WorkbenchLinkedEntity,
+    WorkbenchLinkedEntityDetail,
     WorkbenchRunView,
     WorkbenchTimelineItem,
     WorkbenchThreadSummary,
@@ -51,7 +52,7 @@ class TraceContextResponse(BaseModel):
     tool_call_id: str | None = None
     llm_invocation_id: str | None = None
     llm_response_item_id: str | None = None
-    context_render_snapshot_id: str | None = None
+    request_render_snapshot_id: str | None = None
     session_item_id: str | None = None
     continuation_decision_id: str | None = None
     artifact_id: str | None = None
@@ -235,6 +236,20 @@ class WorkbenchLinkedEntityDetailResponse(BaseModel):
     label: str
     summary: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_view(
+        cls,
+        value: WorkbenchLinkedEntityDetail,
+    ) -> "WorkbenchLinkedEntityDetailResponse":
+        return cls(
+            type=value.type,
+            id=value.id,
+            owner=value.owner,
+            label=value.label,
+            summary=value.summary,
+            payload=dict(value.payload),
+        )
 
 
 class WorkbenchActionResponse(BaseModel):

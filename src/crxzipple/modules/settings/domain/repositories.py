@@ -42,6 +42,11 @@ class SettingsResourceVersionRepository(Protocol):
         resource_id: str,
     ) -> SettingsResourceVersion | None: ...
 
+    def latest_published_for_resources(
+        self,
+        resource_ids: tuple[str, ...],
+    ) -> dict[str, SettingsResourceVersion]: ...
+
 
 class SettingsOverrideRepository(Protocol):
     def add(self, override: SettingsOverride) -> None: ...
@@ -57,6 +62,14 @@ class SettingsOverrideRepository(Protocol):
         environment: str | None = None,
         enabled_only: bool = False,
     ) -> tuple[SettingsOverride, ...]: ...
+
+    def list_for_resources(
+        self,
+        resource_ids: tuple[str, ...],
+        *,
+        environment: str | None = None,
+        enabled_only: bool = False,
+    ) -> dict[str, tuple[SettingsOverride, ...]]: ...
 
 
 class SettingsEffectiveSnapshotRepository(Protocol):

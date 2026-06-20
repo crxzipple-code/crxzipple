@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from crxzipple.modules.context_workspace.domain import (
     ContextNode,
-    ContextRenderSnapshot,
+    ContextRequestRenderSnapshot,
+    ContextSnapshot,
     ContextTreeOperation,
     ContextWorkspace,
 )
@@ -96,6 +97,46 @@ class InMemoryContextNodeRepository:
             ),
         )
 
+    def list_enabled_tool_schema_nodes(
+        self,
+        workspace_id: str,
+    ) -> tuple[ContextNode, ...]:
+        return tuple(
+            sorted(
+                (
+                    item
+                    for key, item in self._items.items()
+                    if key[0] == workspace_id
+                    and item.owner == "tool"
+                    and item.kind == "tool_function"
+                    and item.state.schema_enabled
+                ),
+                key=lambda item: (item.display_order, item.id),
+            ),
+        )
+
+    def list_tool_nodes_by_kind(
+        self,
+        workspace_id: str,
+        *,
+        kinds: tuple[str, ...],
+    ) -> tuple[ContextNode, ...]:
+        wanted = frozenset(kind for kind in kinds if kind)
+        if not wanted:
+            return ()
+        return tuple(
+            sorted(
+                (
+                    item
+                    for key, item in self._items.items()
+                    if key[0] == workspace_id
+                    and item.owner == "tool"
+                    and item.kind in wanted
+                ),
+                key=lambda item: (item.display_order, item.id),
+            ),
+        )
+
 
 class InMemoryContextOperationRepository:
     def __init__(self) -> None:
@@ -119,17 +160,17 @@ class InMemoryContextOperationRepository:
         return tuple(items)
 
 
-class InMemoryContextRenderSnapshotRepository:
+class InMemoryContextSnapshotRepository:
     def __init__(self) -> None:
-        self._items: dict[str, ContextRenderSnapshot] = {}
+        self._items: dict[str, ContextSnapshot] = {}
 
-    def add(self, snapshot: ContextRenderSnapshot) -> None:
+    def add(self, snapshot: ContextSnapshot) -> None:
         self._items[snapshot.id] = snapshot
 
-    def get(self, snapshot_id: str) -> ContextRenderSnapshot | None:
+    def get(self, snapshot_id: str) -> ContextSnapshot | None:
         return self._items.get(snapshot_id)
 
-    def get_by_run(self, run_id: str) -> ContextRenderSnapshot | None:
+    def get_by_run(self, run_id: str) -> ContextSnapshot | None:
         normalized = run_id.strip()
         items = [
             item
@@ -149,7 +190,46 @@ class InMemoryContextRenderSnapshotRepository:
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[ContextRenderSnapshot, ...]:
+    ) -> tuple[ContextSnapshot, ...]:
+        items = sorted(
+            self._items.values(),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+        return tuple(items[max(0, offset) : max(0, offset) + max(1, limit)])
+
+
+class InMemoryContextRequestRenderSnapshotRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, ContextRequestRenderSnapshot] = {}
+
+    def add(self, snapshot: ContextRequestRenderSnapshot) -> None:
+        self._items[snapshot.id] = snapshot
+
+    def get(self, snapshot_id: str) -> ContextRequestRenderSnapshot | None:
+        return self._items.get(snapshot_id)
+
+    def get_by_run(self, run_id: str) -> ContextRequestRenderSnapshot | None:
+        normalized = run_id.strip()
+        items = [
+            item
+            for item in self._items.values()
+            if item.run_id == normalized
+        ]
+        if not items:
+            return None
+        return sorted(
+            items,
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )[0]
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[ContextRequestRenderSnapshot, ...]:
         items = sorted(
             self._items.values(),
             key=lambda item: (item.created_at, item.id),
@@ -161,6 +241,7 @@ class InMemoryContextRenderSnapshotRepository:
 __all__ = [
     "InMemoryContextNodeRepository",
     "InMemoryContextOperationRepository",
-    "InMemoryContextRenderSnapshotRepository",
+    "InMemoryContextRequestRenderSnapshotRepository",
+    "InMemoryContextSnapshotRepository",
     "InMemoryContextWorkspaceRepository",
 ]

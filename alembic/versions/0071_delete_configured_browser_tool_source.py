@@ -1,7 +1,7 @@
 """delete configured browser tool source
 
 Revision ID: 0071_delete_configured_browser_tool_source
-Revises: 0070_context_render_snapshot_run_history
+Revises: 0070_context_snapshot_run_history
 Create Date: 2026-06-10 00:00:00
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "0071_delete_configured_browser_tool_source"
-down_revision = "0070_context_render_snapshot_run_history"
+down_revision = "0070_context_snapshot_run_history"
 branch_labels = None
 depends_on = None
 

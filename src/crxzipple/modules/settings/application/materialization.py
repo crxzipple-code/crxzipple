@@ -44,6 +44,10 @@ class SettingsEffectiveConfigMaterializer:
         self._queries = query_service
         self._environment = environment
         self._warnings: list[SettingsMaterializationWarning] = []
+        self._effective_payload_cache: dict[
+            str,
+            tuple[tuple[str, Mapping[str, Any]], ...],
+        ] = {}
 
     @property
     def warnings(self) -> tuple[SettingsMaterializationWarning, ...]:
@@ -51,6 +55,9 @@ class SettingsEffectiveConfigMaterializer:
 
     def clear_warnings(self) -> None:
         self._warnings.clear()
+
+    def clear_cache(self) -> None:
+        self._effective_payload_cache.clear()
 
     def legacy_llm_profile_payloads(self) -> tuple[JsonObject, ...]:
         return self._materialize_many(
@@ -118,20 +125,13 @@ class SettingsEffectiveConfigMaterializer:
         parser: Callable[[str, Mapping[str, Any]], ConfigT | None],
     ) -> tuple[ConfigT, ...]:
         values: list[ConfigT] = []
-        for resource in self._queries.list_resources(resource_kind=resource_kind):
+        for resource_id, payload in self._effective_payloads_for_kind(resource_kind):
             try:
-                resolution = self._queries.get_effective(
-                    resource.id,
-                    environment=self._environment,
-                )
-                payload = resolution.effective_value
-                if not isinstance(payload, Mapping):
-                    raise ValueError("effective payload must be an object.")
-                value = parser(resource.id, payload)
+                value = parser(resource_id, payload)
             except Exception as exc:
                 self._warn(
                     resource_kind=resource_kind,
-                    resource_id=resource.id,
+                    resource_id=resource_id,
                     code="invalid_effective_payload",
                     message=str(exc),
                 )
@@ -139,6 +139,35 @@ class SettingsEffectiveConfigMaterializer:
             if value is not None:
                 values.append(value)
         return tuple(values)
+
+    def _effective_payloads_for_kind(
+        self,
+        resource_kind: str,
+    ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+        cached = self._effective_payload_cache.get(resource_kind)
+        if cached is not None:
+            return cached
+
+        payloads: list[tuple[str, Mapping[str, Any]]] = []
+        for resource_id, payload in self._queries.list_effective_payloads(
+            resource_kind=resource_kind,
+            environment=self._environment,
+        ):
+            try:
+                if not isinstance(payload, Mapping):
+                    raise ValueError("effective payload must be an object.")
+            except Exception as exc:
+                self._warn(
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    code="invalid_effective_payload",
+                    message=str(exc),
+                )
+                continue
+            payloads.append((resource_id, payload))
+        resolved = tuple(payloads)
+        self._effective_payload_cache[resource_kind] = resolved
+        return resolved
 
     def _materialize_many_from_kinds(
         self,

@@ -24,6 +24,7 @@ class AgentMemoryScopeResolver:
     default_retrieval_backend: str
     context_observer: Callable[[MemoryUseContext], None] | None = None
     event_emitter: MemoryEventEmitter | None = None
+    create_missing_spaces: bool = True
 
     def resolve(self, space_ref: str | None) -> MemoryUseContext | None:
         normalized_space_ref = (space_ref or "").strip()
@@ -99,6 +100,8 @@ class AgentMemoryScopeResolver:
         if not profile.memory.enabled:
             return None
         scope_ref = profile.memory.effective_scope_ref(profile.id)
+        if not self.create_missing_spaces:
+            return self.memory_spaces.resolve_context(scope_ref)
         owner_kind = memory_scope_owner_kind(scope_ref, agent_id=profile.id)
         space = self.memory_spaces.ensure_space(
             scope_ref=scope_ref,

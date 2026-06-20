@@ -205,6 +205,37 @@ class SettingsQueryService:
             trace_context=trace_context,
         )
 
+    def list_effective_payloads(
+        self,
+        *,
+        resource_kind: str,
+        environment: str | None = None,
+    ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+        resources = self.list_resources(resource_kind=resource_kind)
+        if not resources:
+            return ()
+        resource_ids = tuple(resource.id for resource in resources)
+        published_by_resource = _latest_published_versions_for_resources(
+            self._versions,
+            resource_ids,
+        )
+        overrides_by_resource = _active_overrides_for_resources(
+            self._overrides,
+            resource_ids,
+            environment=environment,
+        )
+        payloads: list[tuple[str, Mapping[str, Any]]] = []
+        for resource in resources:
+            value: JsonObject = {}
+            published = published_by_resource.get(resource.id)
+            if published is not None:
+                value.update(published.payload)
+            value["enabled"] = resource.enabled
+            for override in overrides_by_resource.get(resource.id, ()):
+                value = _deep_merge(value, override.values)
+            payloads.append((resource.id, value))
+        return tuple(payloads)
+
     def latest_snapshot(
         self,
         resource_id: str,
@@ -796,6 +827,47 @@ def _require_resource(
     if resource is None:
         raise SettingsNotFoundError(f"settings resource '{normalized}' was not found.")
     return resource
+
+
+def _latest_published_versions_for_resources(
+    repository: SettingsResourceVersionRepository,
+    resource_ids: tuple[str, ...],
+) -> dict[str, SettingsResourceVersion]:
+    batch_reader = getattr(repository, "latest_published_for_resources", None)
+    if callable(batch_reader):
+        return dict(batch_reader(resource_ids))
+    return {
+        resource_id: version
+        for resource_id in resource_ids
+        for version in (repository.latest_published_for_resource(resource_id),)
+        if version is not None
+    }
+
+
+def _active_overrides_for_resources(
+    repository: SettingsOverrideRepository,
+    resource_ids: tuple[str, ...],
+    *,
+    environment: str | None,
+) -> dict[str, tuple[SettingsOverride, ...]]:
+    batch_reader = getattr(repository, "list_for_resources", None)
+    if callable(batch_reader):
+        return {
+            resource_id: tuple(items)
+            for resource_id, items in batch_reader(
+                resource_ids,
+                environment=environment,
+                enabled_only=True,
+            ).items()
+        }
+    return {
+        resource_id: repository.list_for_resource(
+            resource_id,
+            environment=environment,
+            enabled_only=True,
+        )
+        for resource_id in resource_ids
+    }
 
 
 def _required_text(value: str | None, field_name: str) -> str:

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from crxzipple.modules.llm.application.runtime_request import (
+    RuntimeLlmRequestRenderSnapshot,
+    RuntimeLlmRequest,
+    RuntimeToolSurface,
+)
 from crxzipple.modules.llm.application import LlmStreamEvent
 from crxzipple.modules.llm.domain import LlmProviderContinuation
 from crxzipple.modules.orchestration.application.engine_llm_invoker import (
@@ -35,14 +40,45 @@ def test_llm_invoker_passes_provider_continuation_to_stream_input() -> None:
         previous_invocation_id="llm-previous",
         provider_family="openai_codex_responses",
     )
-
-    invocation = invoker.invoke(
+    request_envelope = RuntimeLlmRequest(
         llm_id="openai_codex.gpt-5.5",
+        session_key="session:test",
+        active_session_id="session-instance-1",
         messages=(),
         tool_schemas=(),
+        request_render_snapshot=RuntimeLlmRequestRenderSnapshot(),
+        tool_surface=RuntimeToolSurface(id="tool_surface:test"),
+    )
+
+    invocation = invoker.invoke(
+        request_envelope=request_envelope,
         continuation=continuation,
     )
 
     assert invocation.id == "llm-invocation-1"
     assert port.last_stream_input is not None
     assert port.last_stream_input.continuation == continuation
+
+
+def test_llm_invoker_uses_runtime_request_provider_overrides() -> None:
+    port = _CapturingLlmPort()
+    invoker = OrchestrationEngineLlmInvoker(llm_port=port)
+    request_envelope = RuntimeLlmRequest(
+        llm_id="openai.gpt-5",
+        session_key="session:test",
+        active_session_id="session-instance-1",
+        messages=(),
+        tool_schemas=(),
+        request_render_snapshot=RuntimeLlmRequestRenderSnapshot(),
+        tool_surface=RuntimeToolSurface(id="tool_surface:test"),
+        provider_options={"service_tier": "default"},
+        reasoning_config={"effort": "medium"},
+    )
+
+    invoker.invoke(request_envelope=request_envelope)
+
+    assert port.last_stream_input is not None
+    assert port.last_stream_input.overrides == {
+        "service_tier": "default",
+        "reasoning": {"effort": "medium"},
+    }

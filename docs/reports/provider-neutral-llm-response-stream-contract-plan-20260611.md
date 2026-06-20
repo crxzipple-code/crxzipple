@@ -617,12 +617,12 @@ else:
 - `provider_external_item`：保存为 LLM response item；按 Codex 口径进入 history/model replay；可投影到 Session/Trace/Operations；绝不创建 ToolRun。
 - `tool_argument_delta`：保存在 response events / Trace；Workbench 主 timeline 默认只展示 completed tool_call arguments。
 - `MessagePhase.unknown`：按 Codex fallback，可作为 final answer 候选；Orchestration 仍必须结合 continuation/pending work，不能退回 `tool_calls empty`。
-- response events：默认保留完整短期调试流；completed `LlmResponseItem` 是长期 durable fact。
+- response events：默认保留完整短期调试流；completed `LlmResponseItem` 是长期 durable fact。当前 owner module 已显式暴露 `LlmResponseEventRetentionPolicy(full_event_window_seconds=86400, detail_event_limit=100, durable_fact=completed_response_items, overflow_action=prefer_response_items_and_request_preview)`，Operations LLM detail 会展示该策略。
 
 仍待施工细化：
 
 - `provider_external_item` 的 artifact/link 规范。
-- response events 的长期压缩/采样窗口。
+- response events 的长期压缩/采样后台任务。
 
 ## 定期纠偏原则
 

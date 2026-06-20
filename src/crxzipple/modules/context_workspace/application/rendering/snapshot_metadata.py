@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from crxzipple.modules.context_workspace.application import root_nodes
 from crxzipple.modules.context_workspace.domain import ContextNode
-from crxzipple.shared.context_render_budget import (
-    CONTEXT_RENDER_BUDGET_METADATA_FIELDS,
-    context_render_budget_metadata,
+from crxzipple.shared.request_render_budget import (
+    REQUEST_RENDER_BUDGET_METADATA_FIELDS,
+    request_render_budget_metadata,
 )
 
 
@@ -40,7 +40,7 @@ def root_node_ids(nodes: tuple[ContextNode, ...]) -> tuple[str, ...]:
     )
 
 
-def render_snapshot_metadata_defaults(
+def snapshot_metadata_defaults(
     metadata: dict[str, object],
     *,
     nodes: tuple[ContextNode, ...],
@@ -60,13 +60,54 @@ def render_snapshot_metadata_defaults(
         "session_current_node_id",
         root_nodes.SESSION_CURRENT_NODE_ID,
     )
+    archived_refs = _archived_refs(nodes)
+    payload.setdefault("archived_ref_count", len(archived_refs))
+    if archived_refs:
+        payload.setdefault("archived_refs", archived_refs)
     return payload
 
 
+def _archived_refs(nodes: tuple[ContextNode, ...]) -> list[dict[str, object]]:
+    refs: list[dict[str, object]] = []
+    for node in nodes:
+        if not node.state.archived:
+            continue
+        ref: dict[str, object] = {
+            "node_id": node.id,
+            "owner": node.owner,
+            "kind": node.kind,
+            "title": node.title,
+            "reason": _metadata_text(node.metadata.get("archived_reason"))
+            or _metadata_text(node.owner_ref.get("archived_reason"))
+            or "archived",
+        }
+        for key in (
+            "session_key",
+            "session_id",
+            "session_item_id",
+            "sequence_no",
+            "summary_item_id",
+            "archived_by_compaction_run_id",
+            "compacted_segment_id",
+            "archived_through_item_sequence_no",
+        ):
+            value = node.owner_ref.get(key)
+            if value not in (None, "", {}, []):
+                ref[key] = value
+        refs.append(ref)
+    return refs
+
+
+def _metadata_text(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 __all__ = [
-    "CONTEXT_RENDER_BUDGET_METADATA_FIELDS",
-    "context_render_budget_metadata",
-    "render_snapshot_metadata_defaults",
+    "REQUEST_RENDER_BUDGET_METADATA_FIELDS",
+    "request_render_budget_metadata",
+    "snapshot_metadata_defaults",
     "root_node_ids",
     "runtime_contract_metadata",
 ]

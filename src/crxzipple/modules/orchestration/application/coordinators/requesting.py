@@ -105,7 +105,7 @@ class RunRequestCoordinator:
                 queue_policy=data.queue_policy,
                 priority=data.priority,
                 max_steps=data.max_steps,
-                prompt_flow_hint=self._compaction_prompt_flow_hint(
+                runtime_request_flow_hint=self._compaction_runtime_request_flow_hint(
                     reason=data.reason,
                     preserve=data.preserve,
                 ),
@@ -146,7 +146,7 @@ class RunRequestCoordinator:
                 queue_policy=data.queue_policy,
                 priority=data.priority,
                 max_steps=data.max_steps,
-                prompt_flow_hint=self._heartbeat_prompt_flow_hint(
+                runtime_request_flow_hint=self._heartbeat_runtime_request_flow_hint(
                     reason=data.reason,
                     idle_reply=data.idle_reply,
                 ),
@@ -180,7 +180,7 @@ class RunRequestCoordinator:
                 queue_policy=data.queue_policy,
                 priority=data.priority,
                 max_steps=data.max_steps,
-                prompt_flow_hint=self._memory_flush_prompt_flow_hint(
+                runtime_request_flow_hint=self._memory_flush_runtime_request_flow_hint(
                     reason=data.reason,
                 ),
                 metadata={
@@ -342,13 +342,13 @@ class RunRequestCoordinator:
         queue_policy: OrchestrationQueuePolicy,
         priority: int | None,
         max_steps: int,
-        prompt_flow_hint: dict[str, object],
+        runtime_request_flow_hint: dict[str, object],
         metadata: dict[str, object],
     ) -> OrchestrationRun:
         run_metadata = {
             "session_key": anchor.session_key,
             "session_kind": anchor.session_kind,
-            "prompt_flow_hint": prompt_flow_hint,
+            "runtime_request_flow_hint": runtime_request_flow_hint,
             **metadata,
         }
         run = OrchestrationRun.accept(
@@ -468,7 +468,7 @@ class RunRequestCoordinator:
         )
 
     @staticmethod
-    def _compaction_prompt_flow_hint(
+    def _compaction_runtime_request_flow_hint(
         *,
         reason: str | None,
         preserve: str | None,
@@ -481,7 +481,7 @@ class RunRequestCoordinator:
         return payload
 
     @staticmethod
-    def _heartbeat_prompt_flow_hint(
+    def _heartbeat_runtime_request_flow_hint(
         *,
         reason: str | None,
         idle_reply: str | None,
@@ -494,7 +494,7 @@ class RunRequestCoordinator:
         return payload
 
     @staticmethod
-    def _memory_flush_prompt_flow_hint(
+    def _memory_flush_runtime_request_flow_hint(
         *,
         reason: str | None,
     ) -> dict[str, object]:

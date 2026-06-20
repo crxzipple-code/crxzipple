@@ -61,6 +61,7 @@ class LlmResolver:
         routing_policy: AgentLlmRoutingPolicy,
         input_content: Any | None,
         workspace_dir: str | None = None,
+        validate_access: bool = True,
     ) -> ResolvedLlmSelection:
         normalized_requested = normalize_requested_llm_id(
             requested_llm_id=requested_llm_id,
@@ -68,15 +69,23 @@ class LlmResolver:
         )
         input_has_image, input_has_file = _detect_input_modalities(input_content)
         if not is_auto_llm_id(normalized_requested):
-            profile = self.llm_port.get_profile(normalized_requested)
+            try:
+                profile = self.llm_port.get_profile(normalized_requested)
+            except LlmNotFoundError as exc:
+                raise OrchestrationValidationError(
+                    f"LLM profile '{normalized_requested}' was not found.",
+                    code="llm_profile_not_found",
+                    details={"llm_id": normalized_requested},
+                ) from exc
             if not profile.enabled:
                 raise OrchestrationValidationError(
                     f"LLM profile '{profile.id}' is disabled.",
                 )
-            self._ensure_profile_access_ready(
-                profile,
-                workspace_dir=workspace_dir,
-            )
+            if validate_access:
+                self._ensure_profile_access_ready(
+                    profile,
+                    workspace_dir=workspace_dir,
+                )
             strategy = (
                 "explicit"
                 if requested_llm_id is not None and requested_llm_id.strip()
@@ -124,7 +133,10 @@ class LlmResolver:
                 continue
             if any(capability not in profile.capabilities for capability in required_capabilities):
                 continue
-            if not self._profile_access_ready(profile, workspace_dir=workspace_dir):
+            if validate_access and not self._profile_access_ready(
+                profile,
+                workspace_dir=workspace_dir,
+            ):
                 continue
             return ResolvedLlmSelection(
                 requested_llm_id=normalized_requested,

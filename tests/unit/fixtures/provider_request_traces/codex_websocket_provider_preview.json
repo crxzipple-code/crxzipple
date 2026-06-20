@@ -1,0 +1,98 @@
+{
+  "api_family": "openai_codex_responses",
+  "context_slice_id": null,
+  "context_slice_projected_input_item_count": null,
+  "context_slice_unresolved_ref_count": null,
+  "has_previous_response_id": true,
+  "input": [
+    {
+      "call_id": "call_ws",
+      "output": "ws output",
+      "type": "function_call_output"
+    }
+  ],
+  "input_delta_count": 1,
+  "input_delta_mode": true,
+  "input_item_count": 1,
+  "input_item_types": [
+    "function_call_output"
+  ],
+  "instructions": "Runtime contract.",
+  "message_type": "response.create",
+  "model": "gpt-5.5",
+  "option_summary": {
+    "include": [],
+    "parallel_tool_calls": true,
+    "prompt_cache_key": null,
+    "reasoning": null,
+    "service_tier": null,
+    "store": false,
+    "stream": true,
+    "text": null,
+    "tool_choice": "auto"
+  },
+  "payload_keys": [
+    "include",
+    "input",
+    "instructions",
+    "model",
+    "parallel_tool_calls",
+    "previous_response_id",
+    "store",
+    "stream",
+    "tool_choice",
+    "tools",
+    "type"
+  ],
+  "previous_response_id": "resp_previous",
+  "provider": "openai_codex",
+  "render_report": {
+    "input_item_mapping": [
+      {
+        "input_item_index": 1,
+        "input_item_kind": "message",
+        "input_item_source": "session_item",
+        "provider_payload_index": 0,
+        "trace_reason": "session_item",
+        "trace_status": "input_item_source"
+      },
+      {
+        "input_item_index": 2,
+        "input_item_kind": "function_call",
+        "input_item_source": "session_item",
+        "provider_payload_index": 1,
+        "trace_reason": "session_item",
+        "trace_status": "input_item_source"
+      },
+      {
+        "input_item_index": 3,
+        "input_item_kind": "function_call_output",
+        "input_item_source": "session_item",
+        "provider_payload_index": 2,
+        "trace_reason": "session_item",
+        "trace_status": "input_item_source"
+      }
+    ],
+    "input_item_mapping_coverage": {
+      "canonical_input_item_count": 3,
+      "provider_generated_or_unattributed": [],
+      "provider_input_item_count": 1,
+      "traced_input_item_count": 3,
+      "untraced_input_item_count": 0
+    },
+    "loss_report": {},
+    "render_strategy": "provider_native_delta",
+    "tool_surface": {
+      "dropped_tool_schema_count": 0,
+      "provider_tool_mapping": [],
+      "provider_visible_tool_count": 0,
+      "provider_visible_tool_names": [],
+      "source_tool_schema_count": 0
+    }
+  },
+  "render_strategy": "provider_native_delta",
+  "renderer_id": "openai_codex_responses",
+  "request_context_source": null,
+  "tools": [],
+  "transport": "websocket"
+}

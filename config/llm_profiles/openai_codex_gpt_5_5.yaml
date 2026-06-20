@@ -7,10 +7,13 @@ model_family: reasoning
 capabilities:
   - tool_calling
   - provider_native_continuation
+  - provider_websocket_transport
+  - provider_incremental_input
   - vision_input
   - reasoning
 default_params:
   reasoning_effort: medium
+  provider_transport: websocket
 credential_binding_id: codex-oauth-default
 timeout_seconds: 120
 source_kind: imported

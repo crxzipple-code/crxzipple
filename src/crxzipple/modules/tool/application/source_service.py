@@ -144,7 +144,7 @@ class ToolSourceCatalogSyncResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolPromptBundleGroup:
+class ToolRuntimeRequestBundleGroup:
     group_key: str
     title: str
     summary: str
@@ -155,14 +155,14 @@ class ToolPromptBundleGroup:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolPromptBundle:
+class ToolRuntimeRequestBundle:
     source_id: str
     title: str
     summary: str
     source_kind: str
     function_ids: tuple[str, ...]
     function_count: int
-    groups: tuple[ToolPromptBundleGroup, ...] = ()
+    groups: tuple[ToolRuntimeRequestBundleGroup, ...] = ()
     credential_requirement_count: int = 0
     runtime_requirement_count: int = 0
     capability_ids: tuple[str, ...] = ()
@@ -225,10 +225,10 @@ class ToolSourceQueryService:
                 return None
             return _function_entity_to_record(function)
 
-    def list_prompt_bundles(
+    def list_runtime_request_bundles(
         self,
         function_ids: Iterable[str],
-    ) -> tuple[ToolPromptBundle, ...]:
+    ) -> tuple[ToolRuntimeRequestBundle, ...]:
         requested_ids = tuple(
             dict.fromkeys(
                 str(function_id).strip()
@@ -279,7 +279,7 @@ class ToolSourceQueryService:
             ).append(function_record)
 
         return tuple(
-            _prompt_bundle_from_records(
+            _runtime_request_bundle_from_records(
                 source_records[source_id],
                 tuple(function_records_by_source.get(source_id, ())),
             )
@@ -696,25 +696,25 @@ class ToolFunctionCommandService:
             )
 
 
-def _prompt_bundle_from_records(
+def _runtime_request_bundle_from_records(
     source: ToolSourceCatalogRecord,
     functions: tuple[ToolFunctionCatalogRecord, ...],
-) -> ToolPromptBundle:
-    prompt = _prompt_config(source)
-    title = _prompt_text(prompt, "title") or source.display_name
+) -> ToolRuntimeRequestBundle:
+    runtime_request = _runtime_request_config(source)
+    title = _runtime_request_text(runtime_request, "title") or source.display_name
     summary = (
-        _prompt_text(prompt, "summary")
+        _runtime_request_text(runtime_request, "summary")
         or source.description
         or f"Tool bundle '{title}' exposed by source '{source.source_id}'."
     )
-    return ToolPromptBundle(
+    return ToolRuntimeRequestBundle(
         source_id=source.source_id,
         title=title,
         summary=summary,
         source_kind=source.kind.value,
         function_ids=tuple(function.function_id for function in functions),
         function_count=len(functions),
-        groups=_prompt_bundle_groups(source, prompt, functions),
+        groups=_runtime_request_bundle_groups(source, runtime_request, functions),
         credential_requirement_count=_credential_requirement_count(
             source,
             functions,
@@ -724,40 +724,40 @@ def _prompt_bundle_from_records(
         metadata={
             "source_id": source.source_id,
             "source_kind": source.kind.value,
-            "prompt": dict(prompt),
+            "runtime_request": dict(runtime_request),
             "config_hash": source.config_hash,
             "function_ids": [function.function_id for function in functions],
         },
     )
 
 
-def _prompt_config(source: ToolSourceCatalogRecord) -> Mapping[str, Any]:
-    raw_prompt = source.config.get("prompt")
-    if isinstance(raw_prompt, Mapping):
-        return dict(raw_prompt)
+def _runtime_request_config(source: ToolSourceCatalogRecord) -> Mapping[str, Any]:
+    raw_runtime_request = source.config.get("runtime_request")
+    if isinstance(raw_runtime_request, Mapping):
+        return dict(raw_runtime_request)
     provider = source.config.get("provider")
     if isinstance(provider, Mapping):
-        provider_prompt = provider.get("prompt")
-        if isinstance(provider_prompt, Mapping):
-            return dict(provider_prompt)
+        provider_runtime_request = provider.get("runtime_request")
+        if isinstance(provider_runtime_request, Mapping):
+            return dict(provider_runtime_request)
     return {}
 
 
-def _prompt_bundle_groups(
+def _runtime_request_bundle_groups(
     source: ToolSourceCatalogRecord,
-    prompt: Mapping[str, Any],
+    runtime_request: Mapping[str, Any],
     functions: tuple[ToolFunctionCatalogRecord, ...],
-) -> tuple[ToolPromptBundleGroup, ...]:
-    raw_groups = prompt.get("groups")
+) -> tuple[ToolRuntimeRequestBundleGroup, ...]:
+    raw_groups = runtime_request.get("groups")
     function_by_id = {function.function_id: function for function in functions}
-    groups: list[tuple[int, int, ToolPromptBundleGroup]] = []
+    groups: list[tuple[int, int, ToolRuntimeRequestBundleGroup]] = []
     grouped_function_ids: set[str] = set()
     if isinstance(raw_groups, Mapping):
         for index, (raw_group_key, raw_group) in enumerate(raw_groups.items()):
             group_key = str(raw_group_key).strip()
             if not group_key or not isinstance(raw_group, Mapping):
                 continue
-            declared_function_ids = _prompt_group_function_ids(raw_group)
+            declared_function_ids = _runtime_request_group_function_ids(raw_group)
             group_functions = tuple(
                 function_by_id[function_id]
                 for function_id in declared_function_ids
@@ -766,17 +766,17 @@ def _prompt_bundle_groups(
             if not group_functions:
                 continue
             grouped_function_ids.update(function.function_id for function in group_functions)
-            title = _prompt_text(raw_group, "title") or group_key.replace("_", " ").title()
+            title = _runtime_request_text(raw_group, "title") or group_key.replace("_", " ").title()
             summary = (
-                _prompt_text(raw_group, "summary")
+                _runtime_request_text(raw_group, "summary")
                 or f"Tool functions in the '{title}' group."
             )
-            order = _prompt_group_order(raw_group, fallback=1000 + index)
+            order = _runtime_request_group_order(raw_group, fallback=1000 + index)
             groups.append(
                 (
                     order,
                     index,
-                    ToolPromptBundleGroup(
+                    ToolRuntimeRequestBundleGroup(
                         group_key=group_key,
                         title=title,
                         summary=summary,
@@ -791,7 +791,7 @@ def _prompt_bundle_groups(
                             "function_ids": [
                                 function.function_id for function in group_functions
                             ],
-                            **_prompt_group_metadata(raw_group),
+                            **_runtime_request_group_metadata(raw_group),
                         },
                     ),
                 ),
@@ -808,10 +808,10 @@ def _prompt_bundle_groups(
             (
                 order,
                 len(groups),
-                ToolPromptBundleGroup(
+                ToolRuntimeRequestBundleGroup(
                     group_key=group_key,
-                    title=_default_source_group_title(source, prompt, group_key),
-                    summary=_default_source_group_summary(source, prompt, group_key),
+                    title=_default_source_group_title(source, runtime_request, group_key),
+                    summary=_default_source_group_summary(source, runtime_request, group_key),
                     function_ids=tuple(function.function_id for function in ungrouped_functions),
                     function_count=len(ungrouped_functions),
                     capability_ids=_function_capability_ids(ungrouped_functions),
@@ -832,25 +832,25 @@ def _prompt_bundle_groups(
 
 def _default_source_group_title(
     source: ToolSourceCatalogRecord,
-    prompt: Mapping[str, Any],
+    runtime_request: Mapping[str, Any],
     group_key: str,
 ) -> str:
     if group_key == "other":
         return "Other Functions"
-    return _prompt_text(prompt, "title") or source.display_name
+    return _runtime_request_text(runtime_request, "title") or source.display_name
 
 
 def _default_source_group_summary(
     source: ToolSourceCatalogRecord,
-    prompt: Mapping[str, Any],
+    runtime_request: Mapping[str, Any],
     group_key: str,
 ) -> str:
     if group_key == "other":
         return (
             "Additional functions from this source that were not assigned to a "
-            "more specific prompt group. Expand to inspect exact callable functions."
+            "more specific runtime request group. Expand to inspect exact callable functions."
         )
-    source_summary = _prompt_text(prompt, "summary") or source.description
+    source_summary = _runtime_request_text(runtime_request, "summary") or source.description
     kind_summary = _default_source_kind_summary(source.kind)
     if source_summary:
         return (
@@ -874,7 +874,7 @@ def _default_source_kind_summary(source_kind: ToolSourceCatalogKind) -> str:
     return "Tool source functions come from one configured capability source."
 
 
-def _prompt_group_order(group: Mapping[str, Any], *, fallback: int) -> int:
+def _runtime_request_group_order(group: Mapping[str, Any], *, fallback: int) -> int:
     raw_order = group.get("order")
     if raw_order is None:
         return fallback
@@ -884,7 +884,7 @@ def _prompt_group_order(group: Mapping[str, Any], *, fallback: int) -> int:
         return fallback
 
 
-def _prompt_group_function_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
+def _runtime_request_group_function_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
     raw_function_ids = group.get("function_ids")
     if not isinstance(raw_function_ids, Iterable) or isinstance(
         raw_function_ids,
@@ -900,17 +900,17 @@ def _prompt_group_function_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _prompt_group_metadata(group: Mapping[str, Any]) -> dict[str, Any]:
+def _runtime_request_group_metadata(group: Mapping[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    default_schema_ids = _prompt_group_string_values(
+    default_schema_ids = _runtime_request_group_string_values(
         group.get("default_tool_schema_ids"),
     )
     if default_schema_ids:
         metadata["default_tool_schema_ids"] = list(default_schema_ids)
-    default_schema_source = _prompt_text(group, "default_tool_schema_source")
+    default_schema_source = _runtime_request_text(group, "default_tool_schema_source")
     if default_schema_source:
         metadata["default_tool_schema_source"] = default_schema_source
-    default_schema_max_count = _prompt_group_positive_int(
+    default_schema_max_count = _runtime_request_group_positive_int(
         group.get("default_tool_schema_max_count"),
     )
     if default_schema_max_count is not None:
@@ -918,7 +918,7 @@ def _prompt_group_metadata(group: Mapping[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _prompt_group_string_values(value: Any) -> tuple[str, ...]:
+def _runtime_request_group_string_values(value: Any) -> tuple[str, ...]:
     if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
         return ()
     return tuple(
@@ -930,7 +930,7 @@ def _prompt_group_string_values(value: Any) -> tuple[str, ...]:
     )
 
 
-def _prompt_group_positive_int(value: Any) -> int | None:
+def _runtime_request_group_positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -944,8 +944,8 @@ def _prompt_group_positive_int(value: Any) -> int | None:
     return None
 
 
-def _prompt_text(prompt: Mapping[str, Any], key: str) -> str | None:
-    value = prompt.get(key)
+def _runtime_request_text(runtime_request: Mapping[str, Any], key: str) -> str | None:
+    value = runtime_request.get(key)
     if not isinstance(value, str):
         return None
     normalized = value.strip()

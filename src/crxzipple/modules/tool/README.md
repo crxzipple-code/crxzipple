@@ -221,6 +221,28 @@ for workspace-bound command execution.
 and truncation flags. Provider-facing content remains bounded; owner facts and
 artifacts keep the traceable full result path.
 
+## Tool result envelope contract
+
+Tool runtimes can attach `metadata["tool_result_envelope"]` to make result
+replay explicit. The current envelope schema is
+`2026-06-14.tool_result_envelope.v1`. `ToolRun.succeed()` normalizes the
+envelope with `schema_version`, `tool_run_id`, `call_id`, and `tool_name`.
+
+Use the envelope fields as follows:
+
+- `provider_replay_payload`: compact content and facts that should be used by provider replay renderers.
+- `user_summary_payload`: short user summary fields for Workbench.
+- `trace_payload`: diagnostic details for Trace/Operations.
+- `read_handles`: follow-up handles for omitted raw output, process logs, or
+  artifacts.
+- `artifact_refs`: durable artifact references for large text, raw output, image,
+  or file material.
+- `truncated`, `omitted_count`, and `omitted_chars`: explicit budget facts.
+
+Large text blocks and raw output blocks are externalized by the Tool worker when
+an artifact service is available, then merged back into the envelope as artifact
+refs and read handles.
+
 Removed legacy paths:
 
 - `/tools/providers`, `/tools/discover`, `tool providers`, and `tool discover`

@@ -7,7 +7,7 @@ from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     EnsureContextWorkspaceInput,
-    RenderContextPromptInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.domain import (
     ContextAction,
@@ -75,15 +75,15 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            result = container.require(AppKey.CONTEXT_RENDER_SERVICE).render_prompt_body(
-                RenderContextPromptInput(session_key=session_key),
+            result = container.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE).render_observation(
+                ContextObservationRenderInput(session_key=session_key),
             )
         except ContextWorkspaceNotFoundError as exc:
             _exit_not_found(exc)
         echo_data(
             {
                 "workspace": _workspace_payload(result.workspace),
-                "prompt_body": result.prompt_body,
+                "debug_body": result.debug_body,
                 "estimate": result.estimate.to_payload(),
                 "included_node_ids": list(result.included_node_ids),
             },

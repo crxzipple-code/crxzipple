@@ -277,57 +277,54 @@ def test_browser_tool_source_registers_single_profile_context_source() -> None:
     assert source.config["package_kind"] == "local_package"
     assert source.runtime_requirements == ("browser-profile-runtime",)
     assert "browser_profile" not in source.config
-    prompt = source.config["prompt"]
-    ladder = prompt["evidence_path_ladder"]
-    assert [step["key"] for step in ladder] == [
-        "orient",
-        "runtime_and_code",
-        "network_truth",
-        "stateful_interaction",
-        "diagnose_blockers",
-    ]
-    assert "browser.script.find_request" in ladder[1]["tool_ids"]
-    assert "browser.network.replay_request" in ladder[2]["tool_ids"]
-    prompt_groups = source.config["prompt"]["groups"]
-    assert "Avoid repeated tab inventory" in prompt["summary"]
-    assert prompt_groups["navigation"]["default_tool_schema_ids"] == [
+    runtime_request = source.config["runtime_request"]
+    assert "evidence_path_ladder" not in runtime_request
+    runtime_request_groups = source.config["runtime_request"]["groups"]
+    assert "Avoid repeated tab inventory" in runtime_request["summary"]
+    assert runtime_request_groups["navigation"]["default_tool_schema_ids"] == [
         "browser.navigate",
     ]
-    assert prompt_groups["navigation"]["default_tool_schema_max_count"] == 1
-    assert "not a repeated pre-flight check" in prompt_groups["navigation"]["summary"]
-    assert prompt_groups["observation"]["function_ids"] == ["browser.observe"]
-    assert prompt_groups["observation"]["default_tool_schema_ids"] == ["browser.observe"]
-    assert prompt_groups["observation"]["default_tool_schema_max_count"] == 1
-    assert prompt_groups["action_trace"]["function_ids"] == ["browser.action.trace"]
-    assert prompt_groups["forms_overlays"]["function_ids"] == [
+    assert runtime_request_groups["navigation"]["default_tool_schema_max_count"] == 1
+    assert "not a repeated pre-flight check" in runtime_request_groups["navigation"]["summary"]
+    assert runtime_request_groups["observation"]["function_ids"] == ["browser.observe"]
+    assert runtime_request_groups["observation"]["default_tool_schema_ids"] == ["browser.observe"]
+    assert runtime_request_groups["observation"]["default_tool_schema_max_count"] == 1
+    assert runtime_request_groups["action_trace"]["function_ids"] == ["browser.action.trace"]
+    assert runtime_request_groups["forms_overlays"]["function_ids"] == [
         "browser.form.inspect",
         "browser.form.fill",
         "browser.overlay.observe",
         "browser.overlay.select",
     ]
-    assert "browser.dom.inspect" in prompt_groups["dom_inspection"]["function_ids"]
-    assert "browser.network.inspect" in prompt_groups["network"]["function_ids"]
-    assert prompt_groups["network"]["default_tool_schema_max_count"] == 6
-    assert "browser.evaluate" not in prompt_groups["page_interaction"]["function_ids"]
-    assert "browser.code.search" in prompt_groups["code_insight"]["function_ids"]
-    assert "browser.script.inspect" in prompt_groups["code_insight"]["function_ids"]
-    assert "browser.evaluate" in prompt_groups["code_insight"]["function_ids"]
-    assert "browser.script.extract_request" in prompt_groups["code_insight"]["function_ids"]
+    assert "browser.dom.inspect" in runtime_request_groups["dom_inspection"]["function_ids"]
+    assert "browser.network.inspect" in runtime_request_groups["network"]["function_ids"]
+    assert runtime_request_groups["network"]["default_tool_schema_max_count"] == 6
+    assert "browser.evaluate" not in runtime_request_groups["page_interaction"]["function_ids"]
+    assert "browser.code.search" in runtime_request_groups["code_insight"]["function_ids"]
+    assert "browser.script.inspect" in runtime_request_groups["code_insight"]["function_ids"]
+    assert "browser.evaluate" in runtime_request_groups["code_insight"]["function_ids"]
+    assert "browser.script.extract_request" in runtime_request_groups["code_insight"]["function_ids"]
     assert (
         "browser.script.extract_request"
-        in prompt_groups["code_insight"]["default_tool_schema_ids"]
+        in runtime_request_groups["code_insight"]["default_tool_schema_ids"]
     )
-    assert "browser.runtime.probe_client" in prompt_groups["code_insight"]["function_ids"]
-    assert "browser.runtime.probe_client" in prompt_groups["code_insight"]["default_tool_schema_ids"]
-    assert "browser.runtime.call_client" in prompt_groups["code_insight"]["function_ids"]
-    assert "browser.runtime.call_client" in prompt_groups["code_insight"]["default_tool_schema_ids"]
-    assert "browser.code.search" in prompt_groups["code_insight"]["default_tool_schema_ids"]
-    assert "browser.script.inspect" in prompt_groups["code_insight"]["default_tool_schema_ids"]
-    assert "browser.evaluate" in prompt_groups["code_insight"]["default_tool_schema_ids"]
-    assert prompt_groups["code_insight"]["default_tool_schema_max_count"] == 8
+    assert "browser.runtime.probe_client" not in runtime_request_groups["code_insight"]["function_ids"]
+    assert (
+        "browser.runtime.probe_client"
+        not in runtime_request_groups["code_insight"]["default_tool_schema_ids"]
+    )
+    assert "browser.runtime.call_client" not in runtime_request_groups["code_insight"]["function_ids"]
+    assert (
+        "browser.runtime.call_client"
+        not in runtime_request_groups["code_insight"]["default_tool_schema_ids"]
+    )
+    assert "browser.code.search" in runtime_request_groups["code_insight"]["default_tool_schema_ids"]
+    assert "browser.script.inspect" in runtime_request_groups["code_insight"]["default_tool_schema_ids"]
+    assert "browser.evaluate" in runtime_request_groups["code_insight"]["default_tool_schema_ids"]
+    assert runtime_request_groups["code_insight"]["default_tool_schema_max_count"] == 6
     assert all(
         not function_id.startswith("configured.mcp.browser_")
-        for group in prompt_groups.values()
+        for group in runtime_request_groups.values()
         for function_id in group["function_ids"]
     )
 
@@ -396,8 +393,6 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
         "browser.script.find_request",
         "browser.code.search",
         "browser.script.extract_request",
-        "browser.runtime.probe_client",
-        "browser.runtime.call_client",
         "browser.script.inspect",
         "browser.tabs.list",
         "browser.tabs.select",
@@ -422,16 +417,8 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
             for requirement_set in runtime_requirements
             for requirement in requirement_set
         )
-    call_client = next(
-        candidate
-        for candidate in candidates
-        if candidate.function_id == "browser.runtime.call_client"
-    )
-    call_policy = call_client.metadata["execution_policy"]
-    assert call_policy["mutates_state"] is False
-    assert call_policy["supports_parallel"] is False
-    assert call_policy["resource_scope"] == "browser.target"
-    assert call_policy["serial_group_key"] == "browser.target"
+    assert "browser.runtime.probe_client" not in function_ids
+    assert "browser.runtime.call_client" not in function_ids
 
 
 def test_existing_session_daemon_spec_uses_attach_only_browser_host() -> None:

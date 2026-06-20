@@ -5,13 +5,20 @@ from datetime import datetime
 import unittest
 
 from crxzipple.modules.llm.application import (
-    InvokeLlmInput,
+    InvokeLlmInput as _InvokeLlmInput,
     LlmAdapterRequest,
     LlmAdapterResponse,
     LlmApplicationService,
     LlmStreamEvent,
     RegisterLlmProfileInput,
-    StreamLlmInput,
+    RuntimeLlmRequest,
+    RuntimeLlmRequestRenderSnapshot,
+    RuntimeToolSurface,
+    StreamLlmInput as _StreamLlmInput,
+    WarmupLlmProfileInput,
+    profile_supports_provider_continuation,
+    provider_continuation_from_state,
+    filter_provider_options_for_api_family,
 )
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
@@ -19,10 +26,13 @@ from crxzipple.modules.llm.domain import (
     LlmContinuationReason,
     LlmContinuationSignal,
     LlmDefaults,
+    LlmInputItem,
+    LlmInputItemKind,
     LlmMessagePhase,
     LlmMessage,
     LlmMessageRole,
     LlmModelFamily,
+    LlmProviderContinuation,
     LlmProviderKind,
     LlmResponseEvent,
     LlmResponseEventType,
@@ -34,11 +44,221 @@ from crxzipple.modules.llm.domain import (
     ToolCallIntent,
     ToolSchema,
 )
-from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
+from crxzipple.modules.llm.domain.entities import (
+    LlmInvocation as _LlmInvocation,
+    LlmProfile,
+)
 from crxzipple.modules.llm.interfaces.dto import LlmInvocationDTO, LlmProfileDTO
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
 from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness, published_event_bus_events
+
+
+def _input_items_from_messages(
+    messages: tuple[LlmMessage, ...],
+) -> tuple[LlmInputItem, ...]:
+    return tuple(
+        LlmInputItem(
+            kind=LlmInputItemKind.MESSAGE,
+            payload={"role": message.role.value, "content": message.content},
+        )
+        for message in messages
+        if message.role is not LlmMessageRole.SYSTEM
+    )
+
+
+def InvokeLlmInput(**kwargs):  # noqa: N802, ANN003, ANN201
+    if "input_items" not in kwargs and kwargs.get("messages"):
+        kwargs["input_items"] = _input_items_from_messages(tuple(kwargs["messages"]))
+    return _InvokeLlmInput(**kwargs)
+
+
+def StreamLlmInput(**kwargs):  # noqa: N802, ANN003, ANN201
+    if "input_items" not in kwargs and kwargs.get("messages"):
+        kwargs["input_items"] = _input_items_from_messages(tuple(kwargs["messages"]))
+    return _StreamLlmInput(**kwargs)
+
+
+def LlmInvocation(**kwargs):  # noqa: N802, ANN003, ANN201
+    if "input_items" not in kwargs and kwargs.get("messages"):
+        kwargs["input_items"] = _input_items_from_messages(tuple(kwargs["messages"]))
+    return _LlmInvocation(**kwargs)
+
+
+def test_profile_supports_provider_continuation_for_openai_responses() -> None:
+    profile = LlmProfile(
+        id="profile-openai-responses",
+        provider=LlmProviderKind.OPENAI,
+        api_family=LlmApiFamily.OPENAI_RESPONSES,
+        model_name="gpt-5.1",
+        capabilities=(LlmCapability.PROVIDER_NATIVE_CONTINUATION,),
+    )
+    continuation = LlmProviderContinuation(
+        mode="provider_native",
+        previous_response_id="resp_previous",
+    )
+
+    assert profile_supports_provider_continuation(
+        profile=profile,
+        continuation=continuation,
+    )
+
+
+def test_profile_supports_provider_continuation_for_codex_websocket_only() -> None:
+    profile = LlmProfile(
+        id="profile-codex-websocket",
+        provider=LlmProviderKind.OPENAI,
+        api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+        model_name="gpt-5.1-codex",
+        capabilities=(
+            LlmCapability.PROVIDER_NATIVE_CONTINUATION,
+            LlmCapability.PROVIDER_WEBSOCKET_TRANSPORT,
+            LlmCapability.PROVIDER_INCREMENTAL_INPUT,
+        ),
+    )
+    continuation = LlmProviderContinuation(
+        mode="provider_native",
+        previous_response_id="resp_previous",
+    )
+
+    assert profile_supports_provider_continuation(
+        profile=profile,
+        continuation=continuation,
+        provider_options={"provider_transport": "websocket"},
+    )
+    assert not profile_supports_provider_continuation(
+        profile=profile,
+        continuation=continuation,
+        provider_options={"provider_transport": "http"},
+    )
+
+
+def test_profile_supports_provider_continuation_requires_capability() -> None:
+    profile = LlmProfile(
+        id="profile-openai-without-continuation",
+        provider=LlmProviderKind.OPENAI,
+        api_family=LlmApiFamily.OPENAI_RESPONSES,
+        model_name="gpt-5.1",
+        capabilities=(),
+    )
+    continuation = LlmProviderContinuation(
+        mode="provider_native",
+        previous_response_id="resp_previous",
+    )
+
+    assert not profile_supports_provider_continuation(
+        profile=profile,
+        continuation=continuation,
+    )
+
+
+def test_provider_continuation_from_state_maps_provider_native_payload() -> None:
+    continuation = provider_continuation_from_state(
+        {
+            "mode": "provider_native",
+            "previous_response_id": "resp_previous",
+            "previous_invocation_id": "invocation-1",
+            "provider_family": LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
+            "transport": "websocket",
+            "input_item_fingerprints": [" input-a ", "", "input-b"],
+            "input_item_count": "2",
+            "instructions_fingerprint": "instructions-1",
+            "tool_fingerprints": ["tool-a"],
+        },
+    )
+
+    assert continuation is not None
+    assert continuation.previous_response_id == "resp_previous"
+    assert continuation.previous_invocation_id == "invocation-1"
+    assert continuation.provider_family == LlmApiFamily.OPENAI_CODEX_RESPONSES.value
+    assert continuation.transport == "websocket"
+    assert continuation.input_item_fingerprints == ("input-a", "input-b")
+    assert continuation.input_item_count == 2
+    assert continuation.instructions_fingerprint == "instructions-1"
+    assert continuation.tool_fingerprints == ("tool-a",)
+
+
+def test_provider_continuation_from_state_rejects_invalid_payload() -> None:
+    assert provider_continuation_from_state(None) is None
+    assert provider_continuation_from_state({"mode": "manual"}) is None
+    assert provider_continuation_from_state({"mode": "provider_native"}) is None
+
+
+def test_filter_provider_options_keeps_responses_options_for_responses_family() -> None:
+    result = filter_provider_options_for_api_family(
+        {
+            "include": ["reasoning.encrypted_content"],
+            "parallel_tool_calls": False,
+            "prompt_cache_key": "session-key",
+            "service_tier": "default",
+            "text": {"verbosity": "low"},
+        },
+        llm_api_family=LlmApiFamily.OPENAI_RESPONSES.value,
+    )
+
+    assert result.provider_options == {
+        "include": ["reasoning.encrypted_content"],
+        "parallel_tool_calls": False,
+        "prompt_cache_key": "session-key",
+        "service_tier": "default",
+        "text": {"verbosity": "low"},
+    }
+    assert result.removed_options == ()
+
+
+def test_filter_provider_options_removes_responses_only_options_for_other_family() -> None:
+    result = filter_provider_options_for_api_family(
+        {
+            "include": ["reasoning.encrypted_content"],
+            "parallel_tool_calls": False,
+            "prompt_cache_key": "session-key",
+            "service_tier": "default",
+            "text": {"verbosity": "low"},
+        },
+        llm_api_family="anthropic_messages",
+    )
+
+    assert result.provider_options == {"service_tier": "default"}
+    assert set(result.removed_options) == {
+        "include",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "text",
+    }
+
+
+def test_invoke_input_from_runtime_request_uses_provider_overrides() -> None:
+    runtime_request = RuntimeLlmRequest(
+        llm_id="profile-openai",
+        session_key="session-key",
+        active_session_id="session-1",
+        messages=(LlmMessage(role=LlmMessageRole.USER, content="hello"),),
+        tool_schemas=(),
+        request_render_snapshot=RuntimeLlmRequestRenderSnapshot(),
+        tool_surface=RuntimeToolSurface(id="tool_surface:empty"),
+        provider_options={"service_tier": "default", "provider_transport": "http"},
+        reasoning_config={"effort": "medium"},
+        output_contract={"response_format": {"type": "json_object"}},
+    )
+
+    invoke_input = _InvokeLlmInput.from_runtime_request(runtime_request)
+
+    assert invoke_input.overrides == {
+        "service_tier": "default",
+        "provider_transport": "http",
+        "reasoning": {"effort": "medium"},
+    }
+    assert invoke_input.runtime_route == {
+        "llm_id": "profile-openai",
+        "session_key": "session-key",
+        "active_session_id": "session-1",
+        "provider_transport": "http",
+    }
+    assert invoke_input.runtime_policy == {
+        "reasoning": {"effort": "medium"},
+        "response_format": {"type": "json_object"},
+        "provider_option_keys": ["provider_transport", "service_tier"],
+    }
 
 
 class _FakeLlmAdapter:
@@ -81,8 +301,8 @@ class _FakeLlmAdapter:
                     content_payload={"text": "hello from fake adapter"},
                     provider_payload={"type": "message"},
                     provider_item_type="message",
-                    model_visible=True,
-                    user_visible=True,
+                    provider_replay_candidate=True,
+                    user_timeline_candidate=True,
                 ),
                 LlmResponseItem(
                     id=f"{request.invocation_id}:tool_call:1",
@@ -100,8 +320,8 @@ class _FakeLlmAdapter:
                     provider_item_type="function_call",
                     call_id="tool-call-1",
                     tool_name="search_docs",
-                    model_visible=True,
-                    user_visible=False,
+                    provider_replay_candidate=True,
+                    user_timeline_candidate=False,
                 ),
             ),
             continuation=LlmContinuationSignal(
@@ -260,6 +480,19 @@ class _FakeAsyncStreamingLlmAdapter:
         )
 
 
+class _FakeWarmupLlmAdapter(_FakeLlmAdapter):
+    def __init__(self) -> None:
+        self.warmups: list[tuple[str, str | None]] = []
+
+    def warmup_websocket(self, profile, *, resolved_credential=None):  # noqa: ANN001, ANN201
+        self.warmups.append((profile.id, resolved_credential))
+        return {
+            "transport": "websocket",
+            "endpoint": "wss://example.test/responses",
+            "reused_connection": False,
+        }
+
+
 class _FakeCredentialProvider:
     def __init__(self, credential: str = "injected-secret") -> None:
         self.credential = credential
@@ -331,8 +564,8 @@ class LlmServiceTestCase(unittest.TestCase):
             provider_payload={"type": "message", "id": "msg_1"},
             provider_item_id="msg_1",
             provider_item_type="message",
-            model_visible=True,
-            user_visible=True,
+            provider_replay_candidate=True,
+            user_timeline_candidate=True,
         )
         event = LlmResponseEvent(
             id="event-1",
@@ -366,6 +599,44 @@ class LlmServiceTestCase(unittest.TestCase):
             LlmContinuationReason.PROVIDER_END_TURN_FALSE,
         )
         self.assertTrue(restored_continuation.needs_follow_up)
+
+    def test_response_event_retention_policy_is_explicit(self) -> None:
+        policy = self.service.response_event_retention_policy()
+        restored = type(policy).from_payload(policy.to_payload())
+
+        self.assertEqual(policy.full_event_window_seconds, 86_400)
+        self.assertEqual(policy.detail_event_limit, 100)
+        self.assertEqual(policy.durable_fact, "completed_response_items")
+        self.assertEqual(restored.overflow_action, "prefer_response_items_and_request_preview")
+
+    def test_provider_continuation_payload_preserves_transport(self) -> None:
+        continuation = LlmProviderContinuation(
+            mode="provider_native",
+            previous_response_id="resp-1",
+            previous_invocation_id="inv-1",
+            provider_family="openai_responses",
+            transport="http",
+            input_item_fingerprints=("fingerprint-1", "fingerprint-2"),
+            input_item_count=2,
+            instructions_fingerprint="instructions-fingerprint",
+            tool_fingerprints=("tool-fingerprint",),
+        )
+
+        restored = LlmProviderContinuation.from_payload(continuation.to_payload())
+
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.previous_response_id, "resp-1")
+        self.assertEqual(restored.previous_invocation_id, "inv-1")
+        self.assertEqual(restored.provider_family, "openai_responses")
+        self.assertEqual(restored.transport, "http")
+        self.assertEqual(
+            restored.input_item_fingerprints,
+            ("fingerprint-1", "fingerprint-2"),
+        )
+        self.assertEqual(restored.input_item_count, 2)
+        self.assertEqual(restored.instructions_fingerprint, "instructions-fingerprint")
+        self.assertEqual(restored.tool_fingerprints, ("tool-fingerprint",))
 
     def test_result_summary_can_be_derived_from_response_items(self) -> None:
         usage = LlmUsage(input_tokens=10, output_tokens=8, total_tokens=18)
@@ -451,8 +722,8 @@ class LlmServiceTestCase(unittest.TestCase):
             content_payload={"text": "Done."},
             provider_payload={"type": "message"},
             provider_item_type="message",
-            model_visible=True,
-            user_visible=True,
+            provider_replay_candidate=True,
+            user_timeline_candidate=True,
         )
         continuation = LlmContinuationSignal(
             end_turn=True,
@@ -542,9 +813,12 @@ class LlmServiceTestCase(unittest.TestCase):
                     ),
                 ),
                 response_format={"type": "json_object"},
-                overrides={"reasoning_effort": "medium"},
+                overrides={
+                    "reasoning_effort": "medium",
+                    "provider_transport": "websocket",
+                },
                 request_metadata={
-                    "context_render_snapshot_id": "ctxsnap_run_1",
+                    "request_render_snapshot_id": "ctxsnap_run_1",
                     "runtime_contract_version": "2026-06-09",
                     "runtime_contract_hash": "abc123",
                     "mirrored_tool_schema_count": 1,
@@ -563,6 +837,21 @@ class LlmServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(self.adapter.last_profile.id, "writer")
         self.assertEqual(self.adapter.last_request.response_format, {"type": "json_object"})
+        self.assertEqual(self.adapter.last_request.provider_transport, "websocket")
+        self.assertEqual(
+            self.adapter.last_request.runtime_route,
+            {"llm_id": "writer", "provider_transport": "websocket"},
+        )
+        self.assertEqual(
+            self.adapter.last_request.runtime_policy,
+            {
+                "response_format": {"type": "json_object"},
+                "provider_option_keys": [
+                    "provider_transport",
+                    "reasoning_effort",
+                ],
+            },
+        )
 
         fetched_profile = self.service.get_profile("writer")
         fetched_invocation = self.service.get_invocation(invocation.id)
@@ -580,7 +869,7 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(
             fetched_invocation.request_metadata,
             {
-                "context_render_snapshot_id": "ctxsnap_run_1",
+                "request_render_snapshot_id": "ctxsnap_run_1",
                 "runtime_contract_version": "2026-06-09",
                 "runtime_contract_hash": "abc123",
                 "mirrored_tool_schema_count": 1,
@@ -595,7 +884,7 @@ class LlmServiceTestCase(unittest.TestCase):
                 "model": "gpt-5",
                 "message_count": 2,
                 "tool_count": 1,
-                "override_keys": ["reasoning_effort"],
+                "override_keys": ["provider_transport", "reasoning_effort"],
             },
         )
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
@@ -609,9 +898,62 @@ class LlmServiceTestCase(unittest.TestCase):
             ],
             {"text": "hello from fake adapter"},
         )
+        invocation_dto = LlmInvocationDTO.from_entity(fetched_invocation)
+        self.assertEqual(invocation_dto.provider_render_report, {})
+        self.assertEqual(
+            invocation_dto.provider_wire_preview,
+            fetched_invocation.provider_request_payload_preview,
+        )
         self.assertEqual(fetched_invocation.response_items[0].invocation_id, invocation.id)
         self.assertEqual(fetched_invocation.continuation.reason, LlmContinuationReason.TOOL_CALL)
         self.assertEqual([item.id for item in invocation_list], [invocation.id])
+
+    def test_invoke_passes_provider_context_messages_to_adapter(self) -> None:
+        self.service.upsert_profile(
+            RegisterLlmProfileInput(
+                id="writer-context",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        invocation = self.service.invoke(
+            InvokeLlmInput(
+                llm_id="writer-context",
+                messages=(LlmMessage(role=LlmMessageRole.USER, content="hello"),),
+                provider_context_messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.SYSTEM,
+                        content="## Skills\n\n- browser: inspect pages",
+                        metadata={"provider_context_kind": "available_skills"},
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            tuple(
+                message.content
+                for message in self.adapter.last_request.provider_context_messages
+            ),
+            ("## Skills\n\n- browser: inspect pages",),
+        )
+        self.assertEqual(
+            self.adapter.last_request.provider_context_messages[0].metadata[
+                "provider_context_kind"
+            ],
+            "available_skills",
+        )
+        stored = self.service.get_invocation(invocation.id)
+        self.assertEqual(
+            tuple(message.content for message in stored.provider_context_messages),
+            ("## Skills\n\n- browser: inspect pages",),
+        )
+        self.assertEqual(
+            LlmInvocationDTO.from_entity(stored).provider_context_messages[0].metadata,
+            {"provider_context_kind": "available_skills"},
+        )
 
     def test_invocation_succeeded_event_exposes_text_and_tool_diagnostics(self) -> None:
         profile = self.service.register_profile(
@@ -654,6 +996,137 @@ class LlmServiceTestCase(unittest.TestCase):
             payload["provider_request_payload_preview"]["preview_source"],
             "fake_adapter",
         )
+
+    def test_invocation_provider_request_prepared_event_exposes_preview(self) -> None:
+        profile = self.service.register_profile(
+            RegisterLlmProfileInput(
+                id="preview-event-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        invocation = self.service.invoke(
+            InvokeLlmInput(
+                llm_id=profile.id,
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="inspect provider request preview",
+                    ),
+                ),
+                overrides={"provider_transport": "websocket"},
+                input_items=(
+                    LlmInputItem(
+                        kind=LlmInputItemKind.MESSAGE,
+                        payload={
+                            "role": "user",
+                            "content": "inspect provider request preview",
+                        },
+                        source="session_item",
+                    ),
+                ),
+                request_metadata={
+                    "request_render_snapshot_id": "ctxsnap-preview-event",
+                    "input_mode": "runtime_transcript",
+                    "runtime_contract_hash": "runtime-hash",
+                    "request_render_snapshot": {
+                        "snapshot_id": "ctxsnap-preview-event",
+                        "tree_schema_version": "2026-06-11",
+                        "included_node_ids": ["runtime.contract"],
+                        "raw_tree_body": "tree body must stay out of summary",
+                    },
+                    "tool_surface": {
+                        "id": "tool_surface:ctxsnap-preview-event",
+                        "functions": [{"name": "command.exec"}],
+                        "mirrored_schema_names": ["command.exec"],
+                    },
+                },
+            ),
+        )
+
+        events = [
+            event
+            for event in published_event_bus_events(self.container)
+            if event.name == "llm.invocation_provider_request_prepared"
+            and event.payload.get("invocation_id") == invocation.id
+        ]
+
+        self.assertEqual(len(events), 1)
+        payload = events[0].payload
+        self.assertEqual(payload["provider"], LlmProviderKind.OPENAI.value)
+        self.assertEqual(payload["api_family"], LlmApiFamily.OPENAI_RESPONSES.value)
+        self.assertEqual(
+            payload["provider_request_payload_preview"]["preview_source"],
+            "fake_adapter",
+        )
+        self.assertEqual(
+            payload["provider_request_payload_preview"]["override_keys"],
+            ["provider_transport"],
+        )
+        self.assertEqual(
+            payload["runtime_request_summary"]["request_render_snapshot_id"],
+            "ctxsnap-preview-event",
+        )
+        self.assertEqual(
+            payload["runtime_request_summary"]["input_mode"],
+            "runtime_transcript",
+        )
+        self.assertEqual(
+            payload["runtime_request_summary"]["request_render_snapshot"]["snapshot_id"],
+            "ctxsnap-preview-event",
+        )
+        self.assertNotIn(
+            "raw_tree_body",
+            payload["runtime_request_summary"]["request_render_snapshot"],
+        )
+        self.assertEqual(
+            payload["runtime_request_summary"]["tool_surface"],
+            {
+                "id": "tool_surface:ctxsnap-preview-event",
+                "function_count": 1,
+                "mirrored_schema_count": 1,
+            },
+        )
+
+    def test_warmup_profile_uses_adapter_without_creating_invocation(self) -> None:
+        adapter = _FakeWarmupLlmAdapter()
+        registry = LlmAdapterRegistry()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, adapter)
+        credential_provider = _FakeCredentialProvider("warmup-token")
+        service = LlmApplicationService(
+            self.uow_factory,
+            registry,
+            credential_provider=credential_provider,
+        )
+        service.register_profile(
+            RegisterLlmProfileInput(
+                id="warmup-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+                credential_binding_id="openai-api-key",
+            ),
+        )
+
+        result = service.warmup_profile(WarmupLlmProfileInput(llm_id="warmup-writer"))
+
+        self.assertEqual(result.llm_id, "warmup-writer")
+        self.assertEqual(result.status, "warmed")
+        self.assertEqual(result.details["transport"], "websocket")
+        self.assertEqual(adapter.warmups, [("warmup-writer", "warmup-token")])
+        self.assertEqual(service.list_invocations(llm_id="warmup-writer"), [])
+        events = [
+            event
+            for event in published_event_bus_events(self.container)
+            if event.name == "llm.profile_warmup_succeeded"
+            and event.payload.get("llm_id") == "warmup-writer"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].payload["status"], "warmed")
+        self.assertEqual(events[0].payload["transport"], "websocket")
+        self.assertEqual(events[0].payload["reused_connection"], False)
 
     def test_profile_update_enable_disable_and_delete_use_llm_repository(self) -> None:
         self.service.register_profile(

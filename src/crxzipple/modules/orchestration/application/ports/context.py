@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from crxzipple.modules.agent.domain.entities import AgentProfile
     from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
     from crxzipple.modules.llm.domain import ToolSchema
-    from crxzipple.modules.orchestration.application.prompt_input import (
-        RunPromptInput,
+    from crxzipple.modules.orchestration.application.runtime_llm_request_draft import (
+        RuntimeLlmRequestDraft,
     )
     from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
     from crxzipple.modules.session.domain.entities import Session
@@ -51,7 +51,7 @@ class SessionTranscriptPort(Protocol):
     ) -> "SessionItemsBundle":
         ...
 
-    def list_model_visible_items(
+    def list_items(
         self,
         data: "ListSessionItemsInput",
     ) -> list["SessionItem"]:
@@ -160,47 +160,48 @@ class ArtifactVariantReadPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ContextRenderSnapshotRecord:
+class RequestRenderSnapshotRecord:
     snapshot_id: str
-    prompt_body: str | None = None
     estimate: dict[str, object] | None = None
     included_node_ids: tuple[str, ...] = ()
     mirrored_node_ids: tuple[str, ...] = ()
     included_refs: tuple[dict[str, object], ...] = ()
     collapsed_refs: tuple[dict[str, object], ...] = ()
     protocol_required_refs: tuple[dict[str, object], ...] = ()
+    input_item_refs: tuple[dict[str, object], ...] = ()
+    projected_input_items: tuple[dict[str, object], ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
-    provider_attachments: dict[str, object] = field(default_factory=dict)
     tool_schemas: tuple["ToolSchema", ...] | None = None
+    tool_schema_refs: tuple[dict[str, object], ...] = ()
     tool_schema_mirror_available: bool = False
     artifact_content_blocks: tuple[dict[str, object], ...] = ()
     parent_snapshot_id: str | None = None
     parent_tree_revision: int | None = None
 
 
-class ContextRenderSnapshotPort(Protocol):
-    def get_recorded_run_prompt_snapshot(
+class RequestRenderSnapshotPort(Protocol):
+    def get_recorded_run_request_render_snapshot(
         self,
         *,
         run: "OrchestrationRun",
-        prompt: "RunPromptInput",
-    ) -> ContextRenderSnapshotRecord | None:
+        draft: "RuntimeLlmRequestDraft",
+    ) -> RequestRenderSnapshotRecord | None:
         ...
 
-    def preview_run_prompt_snapshot(
+    def preview_run_request_render_snapshot(
         self,
         *,
         run: "OrchestrationRun",
-        prompt: "RunPromptInput",
-    ) -> ContextRenderSnapshotRecord | None:
+        draft: "RuntimeLlmRequestDraft",
+    ) -> RequestRenderSnapshotRecord | None:
         ...
 
-    def record_run_prompt_snapshot(
+    def record_run_request_render_snapshot(
         self,
         *,
         run: "OrchestrationRun",
-        prompt: "RunPromptInput",
-    ) -> ContextRenderSnapshotRecord | None:
+        draft: "RuntimeLlmRequestDraft",
+    ) -> RequestRenderSnapshotRecord | None:
         ...
 
 

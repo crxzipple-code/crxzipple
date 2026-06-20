@@ -5,12 +5,14 @@ from typing import Any
 
 TOOL_RESULT_ENVELOPE_METADATA_KEY = "tool_result_envelope"
 TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY = "tool_result_raw_output_blocks"
+TOOL_RESULT_ENVELOPE_SCHEMA_VERSION = "2026-06-14.tool_result_envelope.v1"
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultEnvelope:
     status: str
     summary: str
+    schema_version: str = TOOL_RESULT_ENVELOPE_SCHEMA_VERSION
     tool_run_id: str | None = None
     call_id: str | None = None
     tool_name: str | None = None
@@ -21,8 +23,8 @@ class ToolResultEnvelope:
     warnings: tuple[str, ...] = field(default_factory=tuple)
     evidence_refs: tuple[str, ...] = field(default_factory=tuple)
     read_handles: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    model_visible_payload: dict[str, Any] = field(default_factory=dict)
-    user_visible_payload: dict[str, Any] = field(default_factory=dict)
+    provider_replay_payload: dict[str, Any] = field(default_factory=dict)
+    user_summary_payload: dict[str, Any] = field(default_factory=dict)
     trace_payload: dict[str, Any] = field(default_factory=dict)
     omitted_count: int = 0
     omitted_chars: int = 0
@@ -30,6 +32,7 @@ class ToolResultEnvelope:
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
+            "schema_version": self.schema_version,
             "status": self.status,
             "summary": self.summary,
             "tool_run_id": self.tool_run_id,
@@ -42,8 +45,8 @@ class ToolResultEnvelope:
             "warnings": list(self.warnings),
             "evidence_refs": list(self.evidence_refs),
             "read_handles": [dict(handle) for handle in self.read_handles],
-            "model_visible_payload": dict(self.model_visible_payload),
-            "user_visible_payload": dict(self.user_visible_payload),
+            "provider_replay_payload": dict(self.provider_replay_payload),
+            "user_summary_payload": dict(self.user_summary_payload),
             "trace_payload": dict(self.trace_payload),
             "omitted_count": self.omitted_count,
             "omitted_chars": self.omitted_chars,

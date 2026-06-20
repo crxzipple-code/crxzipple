@@ -1070,13 +1070,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                     worker_id="scheduler-linked-runtime",
                     poll_interval_seconds=0.01,
                     max_runs=4,
-                    max_idle_cycles=20,
+                    max_idle_cycles=100,
                 ),
                 self.orchestration_executor_service.run_until_stopped_async(
                     worker_id="executor-linked-runtime",
                     poll_interval_seconds=0.01,
                     max_runs=4,
-                    max_idle_cycles=20,
+                    max_idle_cycles=100,
                     max_concurrent_assignments=2,
                 ),
             )

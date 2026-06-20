@@ -15,12 +15,18 @@ from crxzipple.modules.llm.application import (
     InvokeLlmInput,
     RegisterLlmProfileInput,
     StreamLlmInput,
+    WarmupLlmProfileInput,
 )
 from crxzipple.modules.llm.application.services import register_llm_profile_input_from_config
+from crxzipple.modules.llm.application.runtime_request import (
+    request_metadata_preview_payload,
+)
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
     LlmDefaults,
+    LlmInputItem,
+    LlmInputItemKind,
     LlmMessage,
     LlmMessageRole,
     LlmModelFamily,
@@ -43,6 +49,7 @@ class LlmDefaultsResponse(BaseModel):
     top_p: float | None = None
     max_output_tokens: int | None = None
     reasoning_effort: str | None = None
+    provider_transport: str | None = None
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -82,11 +89,24 @@ class LlmProfileResponse(BaseModel):
     enabled: bool
 
 
+class WarmupLlmProfileResponse(BaseModel):
+    llm_id: str
+    status: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class LlmMessageRequest(BaseModel):
     role: LlmMessageRole
     content: Any
     name: str | None = None
     tool_call_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LlmInputItemRequest(BaseModel):
+    kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    source: str = "projection"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -98,6 +118,8 @@ class ToolSchemaRequest(BaseModel):
 
 class InvokeLlmRequest(BaseModel):
     messages: list[LlmMessageRequest]
+    input_items: list[LlmInputItemRequest] = Field(min_length=1)
+    provider_context_messages: list[LlmMessageRequest] = Field(default_factory=list)
     tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = Field(default_factory=dict)
@@ -108,6 +130,8 @@ class InvokeLlmRequest(BaseModel):
 class TestLlmProfileRequest(BaseModel):
     profile: RegisterLlmProfileRequest
     messages: list[LlmMessageRequest]
+    input_items: list[LlmInputItemRequest] = Field(min_length=1)
+    provider_context_messages: list[LlmMessageRequest] = Field(default_factory=list)
     tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = Field(default_factory=dict)
@@ -147,11 +171,15 @@ class LlmInvocationResponse(BaseModel):
     id: str
     llm_id: str
     messages: list[LlmMessageRequest]
+    input_items: list[LlmInputItemRequest] = Field(default_factory=list)
+    provider_context_messages: list[LlmMessageRequest] = Field(default_factory=list)
     tool_schemas: list[ToolSchemaRequest]
     response_format: dict[str, Any] | None = None
     request_overrides: dict[str, Any]
     request_metadata: dict[str, Any] = Field(default_factory=dict)
     provider_request_payload_preview: dict[str, Any] = Field(default_factory=dict)
+    provider_render_report: dict[str, Any] = Field(default_factory=dict)
+    provider_wire_preview: dict[str, Any] = Field(default_factory=dict)
     status: str
     result: LlmResultResponse | None = None
     response_items: list[dict[str, Any]] = Field(default_factory=list)
@@ -162,18 +190,17 @@ class LlmInvocationResponse(BaseModel):
     completed_at: str | None = None
 
 
-class LlmInvocationPromptPreviewResponse(BaseModel):
+class LlmInvocationRuntimeRequestPreviewResponse(BaseModel):
     invocation_id: str
     run_id: str | None = None
     llm_id: str
     mode: str
     messages: list[LlmMessageRequest] = Field(default_factory=list)
     tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
-    prompt_report: dict[str, Any] | None = None
-    context_render_snapshot_id: str | None = None
-    context_render: dict[str, Any] | None = None
-    context_render_metadata: dict[str, Any] = Field(default_factory=dict)
-    provider_attachments: dict[str, Any] = Field(default_factory=dict)
+    runtime_request_report: dict[str, Any] | None = None
+    request_render_snapshot_id: str | None = None
+    request_render_snapshot: dict[str, Any] | None = None
+    request_render_snapshot_metadata: dict[str, Any] = Field(default_factory=dict)
     provider_request_options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -211,6 +238,7 @@ def _register_request_to_input(
             top_p=payload.default_params.top_p,
             max_output_tokens=payload.default_params.max_output_tokens,
             reasoning_effort=payload.default_params.reasoning_effort,
+            provider_transport=payload.default_params.provider_transport,
             extra_body=dict(payload.default_params.extra_body),
         ),
         base_url=payload.base_url,
@@ -291,6 +319,10 @@ def test_profile(
                         metadata=item.metadata,
                     )
                     for item in payload.messages
+                ),
+                input_items=_input_items_from_request(payload.input_items),
+                provider_context_messages=_messages_from_request(
+                    payload.provider_context_messages,
                 ),
                 tool_schemas=tuple(
                     ToolSchema(
@@ -410,6 +442,10 @@ def invoke_llm(
                 )
                 for item in payload.messages
             ),
+            input_items=_input_items_from_request(payload.input_items),
+            provider_context_messages=_messages_from_request(
+                payload.provider_context_messages,
+            ),
             tool_schemas=tuple(
                 ToolSchema(
                     name=item.name,
@@ -454,6 +490,10 @@ def stream_llm(
                     )
                     for item in payload.messages
                 ),
+                input_items=_input_items_from_request(payload.input_items),
+                provider_context_messages=_messages_from_request(
+                    payload.provider_context_messages,
+                ),
                 tool_schemas=tuple(
                     ToolSchema(
                         name=item.name,
@@ -477,6 +517,27 @@ def stream_llm(
     )
 
 
+@router.post("/{llm_id}/warmup", response_model=WarmupLlmProfileResponse)
+def warmup_llm_profile(
+    llm_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> WarmupLlmProfileResponse:
+    authorize_llm_action(
+        container,
+        llm_id=llm_id,
+        action="llm.warmup",
+        interface_name="http",
+    )
+    result = container.require(AppKey.LLM_SERVICE).warmup_profile(
+        WarmupLlmProfileInput(llm_id=llm_id),
+    )
+    return WarmupLlmProfileResponse(
+        llm_id=result.llm_id,
+        status=result.status,
+        details=dict(result.details),
+    )
+
+
 @router.get("/{llm_id}/invocations", response_model=list[LlmInvocationResponse])
 def list_invocations(
     llm_id: str,
@@ -497,16 +558,16 @@ def get_invocation(
 
 
 @router.get(
-    "/calls/{invocation_id}/prompt-preview",
-    response_model=LlmInvocationPromptPreviewResponse,
+    "/calls/{invocation_id}/llm-request-preview",
+    response_model=LlmInvocationRuntimeRequestPreviewResponse,
 )
-def get_invocation_prompt_preview(
+def get_invocation_llm_request_preview(
     invocation_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
     run_id: str | None = Query(default=None),
-) -> LlmInvocationPromptPreviewResponse:
+) -> LlmInvocationRuntimeRequestPreviewResponse:
     invocation = container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id)
-    return _to_invocation_prompt_preview_response(invocation, run_id=run_id)
+    return _to_invocation_llm_request_preview_response(invocation, run_id=run_id)
 
 
 def _format_sse_event(event_name: str, payload: dict[str, Any]) -> str:
@@ -527,6 +588,7 @@ def _to_profile_response(profile: Any) -> LlmProfileResponse:
             top_p=profile.default_params.top_p,
             max_output_tokens=profile.default_params.max_output_tokens,
             reasoning_effort=profile.default_params.reasoning_effort,
+            provider_transport=profile.default_params.provider_transport,
             extra_body=dict(profile.default_params.extra_body),
         ),
         base_url=profile.base_url,
@@ -540,6 +602,9 @@ def _to_profile_response(profile: Any) -> LlmProfileResponse:
 
 
 def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
+    provider_request_payload_preview = dict(
+        invocation.provider_request_payload_preview,
+    )
     return LlmInvocationResponse(
         id=invocation.id,
         llm_id=invocation.llm_id,
@@ -552,6 +617,25 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
                 metadata=dict(item.metadata),
             )
             for item in invocation.messages
+        ],
+        input_items=[
+            LlmInputItemRequest(
+                kind=item.kind.value,
+                payload=dict(item.payload),
+                source=item.source,
+                metadata=dict(item.metadata),
+            )
+            for item in invocation.input_items
+        ],
+        provider_context_messages=[
+            LlmMessageRequest(
+                role=item.role,
+                content=item.content,
+                name=item.name,
+                tool_call_id=item.tool_call_id,
+                metadata=dict(item.metadata),
+            )
+            for item in invocation.provider_context_messages
         ],
         tool_schemas=[
             ToolSchemaRequest(
@@ -568,8 +652,12 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
         ),
         request_overrides=dict(invocation.request_overrides),
         request_metadata=dict(invocation.request_metadata),
-        provider_request_payload_preview=dict(
-            invocation.provider_request_payload_preview,
+        provider_request_payload_preview=provider_request_payload_preview,
+        provider_render_report=_provider_render_report(
+            provider_request_payload_preview,
+        ),
+        provider_wire_preview=_provider_wire_preview(
+            provider_request_payload_preview,
         ),
         status=invocation.status.value,
         result=(
@@ -617,17 +705,57 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
     )
 
 
-def _to_invocation_prompt_preview_response(
+def _provider_render_report(preview: dict[str, Any]) -> dict[str, Any]:
+    render_report = preview.get("render_report")
+    return dict(render_report) if isinstance(render_report, dict) else {}
+
+
+def _provider_wire_preview(preview: dict[str, Any]) -> dict[str, Any]:
+    wire_preview = dict(preview)
+    wire_preview.pop("render_report", None)
+    return wire_preview
+
+
+def _input_items_from_request(
+    items: list[LlmInputItemRequest],
+) -> tuple[LlmInputItem, ...]:
+    return tuple(
+        LlmInputItem(
+            kind=LlmInputItemKind(item.kind),
+            payload=item.payload,
+            source=item.source,
+            metadata=item.metadata,
+        )
+        for item in items
+    )
+
+
+def _messages_from_request(
+    messages: list[LlmMessageRequest],
+) -> tuple[LlmMessage, ...]:
+    return tuple(
+        LlmMessage(
+            role=item.role,
+            content=item.content,
+            name=item.name,
+            tool_call_id=item.tool_call_id,
+            metadata=item.metadata,
+        )
+        for item in messages
+    )
+
+
+def _to_invocation_llm_request_preview_response(
     invocation: Any,
     *,
     run_id: str | None,
-) -> LlmInvocationPromptPreviewResponse:
-    request_metadata = dict(invocation.request_metadata)
-    context_render_snapshot_id = _optional_metadata_string(
-        request_metadata.get("context_render_snapshot_id"),
+) -> LlmInvocationRuntimeRequestPreviewResponse:
+    request_metadata = request_metadata_preview_payload(invocation.request_metadata)
+    request_render_snapshot_id = _optional_metadata_string(
+        request_metadata.get("request_render_snapshot_id"),
     )
-    mode = _optional_metadata_string(request_metadata.get("prompt_mode")) or "unknown"
-    return LlmInvocationPromptPreviewResponse(
+    mode = _optional_metadata_string(request_metadata.get("runtime_request_mode")) or "unknown"
+    return LlmInvocationRuntimeRequestPreviewResponse(
         invocation_id=invocation.id,
         run_id=run_id,
         llm_id=invocation.llm_id,
@@ -650,11 +778,10 @@ def _to_invocation_prompt_preview_response(
             )
             for item in invocation.tool_schemas
         ],
-        prompt_report=None,
-        context_render_snapshot_id=context_render_snapshot_id,
-        context_render=None,
-        context_render_metadata={},
-        provider_attachments={},
+        runtime_request_report=None,
+        request_render_snapshot_id=request_render_snapshot_id,
+        request_render_snapshot=None,
+        request_render_snapshot_metadata={},
         provider_request_options={
             "response_format": (
                 dict(invocation.response_format)

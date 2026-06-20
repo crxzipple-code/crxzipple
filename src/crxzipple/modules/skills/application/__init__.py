@@ -1,5 +1,5 @@
 from crxzipple.modules.skills.application.catalog import (
-    build_skill_catalog_prompt,
+    build_skill_runtime_request_catalog,
 )
 from crxzipple.modules.skills.application.authoring_service import SkillAuthoringService
 from crxzipple.modules.skills.application.catalog_service import SkillCatalogService
@@ -39,7 +39,7 @@ from crxzipple.modules.skills.application.governance_service import SkillGoverna
 from crxzipple.modules.skills.application.manager import SkillManager
 from crxzipple.modules.skills.application.models import (
     InstalledSkill,
-    SkillCatalogPrompt,
+    SkillRuntimeRequestCatalog,
     SkillCreateRequest,
     SkillDraft,
     SkillDraftCreateRequest,
@@ -71,7 +71,7 @@ from crxzipple.modules.skills.application.ports import (
     SkillReadPort,
     SkillRepositoryPort,
 )
-from crxzipple.modules.skills.application.prompt_resolver import (
+from crxzipple.modules.skills.application.runtime_request_resolver import (
     ResolvedSkill,
     ResolvedSkillReadiness,
     SkillAccessReadinessPort,
@@ -79,9 +79,9 @@ from crxzipple.modules.skills.application.prompt_resolver import (
     SkillAuthorizationReadiness,
     SkillAuthorizationReadinessPort,
     SkillToolReadinessPort,
-    SkillPromptResolutionContext,
-    SkillPromptResolution,
-    SkillPromptResolver,
+    SkillRuntimeRequestResolutionContext,
+    SkillRuntimeRequestResolution,
+    SkillRuntimeRequestResolver,
 )
 from crxzipple.modules.skills.application.readiness_service import SkillReadinessService
 from crxzipple.modules.skills.application.source_service import SkillSourceService
@@ -100,7 +100,7 @@ __all__ = [
     "SKILL_DRAFT_UPDATED_EVENT",
     "SKILL_DRAFT_VALIDATED_EVENT",
     "SKILL_ENABLE_SUCCEEDED_EVENT",
-    "SkillCatalogPrompt",
+    "SkillRuntimeRequestCatalog",
     "SkillCatalogPort",
     "SkillCatalogService",
     "SkillAuthoringDraftRepositoryPort",
@@ -129,9 +129,9 @@ __all__ = [
     "SkillManager",
     "SkillMutationResult",
     "SkillOwnerCatalogRepositoryPort",
-    "SkillPromptResolution",
-    "SkillPromptResolutionContext",
-    "SkillPromptResolver",
+    "SkillRuntimeRequestResolution",
+    "SkillRuntimeRequestResolutionContext",
+    "SkillRuntimeRequestResolver",
     "SkillOwnerStateService",
     "SKILL_INSTALL_FAILED_EVENT",
     "SKILL_INSTALL_SUCCEEDED_EVENT",
@@ -161,7 +161,7 @@ __all__ = [
     "SkillSourceService",
     "SkillSourceUpdateRequest",
     "SkillUpdateRequest",
-    "build_skill_catalog_prompt",
+    "build_skill_runtime_request_catalog",
     "emit_skill_event",
     "skill_event_from_payload",
 ]

@@ -8,8 +8,8 @@ from crxzipple.modules.orchestration.application.ports.database import (
 from crxzipple.modules.orchestration.application.ports.context import (
     AgentProfileCatalogPort,
     ArtifactVariantReadPort,
-    ContextRenderSnapshotRecord,
-    ContextRenderSnapshotPort,
+    RequestRenderSnapshotRecord,
+    RequestRenderSnapshotPort,
     EventBusPort,
     EventPublishPort,
     EventPublishManyPort,
@@ -31,9 +31,6 @@ from crxzipple.modules.orchestration.application.ports.authorization import (
 )
 from crxzipple.modules.orchestration.application.ports.access import AccessReadinessPort
 from crxzipple.modules.orchestration.application.ports.llm import LlmPort
-from crxzipple.modules.orchestration.application.ports.skill import (
-    SkillCatalogPort,
-)
 from crxzipple.modules.orchestration.application.ports.tool import (
     ToolCatalogPort,
     ToolExecutionPort,
@@ -60,8 +57,8 @@ __all__ = [
     "ArtifactVariantReadPort",
     "AuthorizationPort",
     "AccessReadinessPort",
-    "ContextRenderSnapshotPort",
-    "ContextRenderSnapshotRecord",
+    "RequestRenderSnapshotPort",
+    "RequestRenderSnapshotRecord",
     "EventBusPort",
     "EventPublishManyPort",
     "EventPublishPort",
@@ -93,7 +90,6 @@ __all__ = [
     "SessionRecorderPort",
     "SessionResolutionPort",
     "SessionTranscriptPort",
-    "SkillCatalogPort",
     "ToolCatalogPort",
     "ToolExecutionPort",
     "ToolSurfacePort",

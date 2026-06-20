@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from crxzipple.modules.context_workspace.application import root_nodes
 from crxzipple.modules.context_workspace.application.rendering.snapshot_metadata import (
-    context_render_budget_metadata,
-    render_snapshot_metadata_defaults,
+    request_render_budget_metadata,
+    snapshot_metadata_defaults,
     root_node_ids,
     runtime_contract_metadata,
 )
 from crxzipple.modules.context_workspace.application.rendering.estimates import (
-    evidence_path_breakdown,
+    evidence_observation_breakdown,
 )
 from crxzipple.modules.context_workspace.domain import (
     ContextNode,
@@ -49,13 +49,13 @@ def test_root_node_ids_follow_schema_order_before_display_order() -> None:
     )
 
     assert root_node_ids(nodes) == (
-        root_nodes.CONTEXT_INSTRUCTIONS_NODE_ID,
         root_nodes.SESSION_CURRENT_NODE_ID,
         "tools.available",
+        root_nodes.CONTEXT_INSTRUCTIONS_NODE_ID,
     )
 
 
-def test_render_snapshot_metadata_defaults_preserve_existing_values() -> None:
+def test_snapshot_metadata_defaults_preserve_existing_values() -> None:
     workspace = ContextWorkspace.new(
         session_key="session:metadata",
         agent_id="assistant",
@@ -70,7 +70,7 @@ def test_render_snapshot_metadata_defaults_preserve_existing_values() -> None:
         ),
     )
 
-    metadata = render_snapshot_metadata_defaults(
+    metadata = snapshot_metadata_defaults(
         {
             "tree_schema_version": "custom",
             "root_node_ids": ["custom.root"],
@@ -113,14 +113,14 @@ def test_runtime_contract_metadata_reads_contract_node_identity() -> None:
     }
 
 
-def test_context_render_budget_metadata_extracts_fixed_budget_fields() -> None:
-    metadata = context_render_budget_metadata(
+def test_request_render_budget_metadata_extracts_fixed_budget_fields() -> None:
+    metadata = request_render_budget_metadata(
         {
-            "rendered_prompt_estimated_tokens": 10,
-            "direct_transcript_estimated_tokens": 2,
+            "debug_body_estimated_tokens": 10,
+            "draft_input_estimated_tokens": 2,
             "mirrored_tool_schema_estimated_tokens": 3,
             "artifact_content_estimated_tokens": 4,
-            "estimated_provider_prompt_tokens": 19,
+            "estimated_provider_input_tokens": 19,
             "tool_schema_mirror_budget_status": "ok",
             "artifact_content_budget": {"status": "ok"},
             "node_estimate_breakdown": {
@@ -130,18 +130,16 @@ def test_context_render_budget_metadata_extracts_fixed_budget_fields() -> None:
     )
 
     assert metadata == {
-        "rendered_prompt_estimated_tokens": 10,
-        "direct_transcript_estimated_tokens": 2,
+        "draft_input_estimated_tokens": 2,
         "mirrored_tool_schema_estimated_tokens": 3,
         "artifact_content_estimated_tokens": 4,
-        "estimated_provider_prompt_tokens": 19,
+        "estimated_provider_input_tokens": 19,
         "tool_schema_mirror_budget_status": "ok",
         "artifact_content_budget": {"status": "ok"},
-        "top_rendered_nodes": [{"node_id": "runtime.contract"}],
     }
 
 
-def test_evidence_path_breakdown_marks_final_response_requirement() -> None:
+def test_evidence_observation_breakdown_counts_verified_and_uncertain_refs() -> None:
     workspace = ContextWorkspace.new(
         session_key="session:evidence",
         agent_id="assistant",
@@ -156,7 +154,7 @@ def test_evidence_path_breakdown_marks_final_response_requirement() -> None:
             metadata={
                 "tool_name": "browser.network.replay_request",
                 "verified": True,
-                "facts": {"evidence_path": "network_truth"},
+                "facts": {"evidence_ref": "network-request"},
             },
             owner_ref={"evidence_lifecycle_status": "verified"},
         ),
@@ -168,17 +166,15 @@ def test_evidence_path_breakdown_marks_final_response_requirement() -> None:
             title="Runtime Evidence",
             metadata={
                 "tool_name": "browser.runtime.inspect",
-                "facts": {"evidence_path": "runtime_and_code"},
+                "facts": {"evidence_ref": "runtime-state"},
             },
         ),
     )
 
-    breakdown = evidence_path_breakdown(nodes)
+    breakdown = evidence_observation_breakdown(nodes)
 
     assert breakdown["session_evidence_count"] == 2
-    assert breakdown["verified_evidence_path_count"] == 1
-    assert breakdown["verified_evidence_paths"] == ["network_truth"]
-    assert breakdown["browser_verified_evidence_path_count"] == 1
-    assert breakdown["browser_verified_evidence_paths"] == ["network_truth"]
-    assert breakdown["unverified_evidence_paths"] == ["runtime_and_code"]
-    assert breakdown["final_response_requires_evidence_path"] is True
+    assert breakdown["observed_evidence_count"] == 1
+    assert breakdown["observed_evidence_refs"] == ["network-request"]
+    assert breakdown["uncertain_evidence_count"] == 1
+    assert breakdown["uncertain_evidence_refs"] == ["runtime-state"]

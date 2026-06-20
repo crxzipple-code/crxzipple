@@ -227,6 +227,12 @@ class OperationsToolWorkerPruneRequest(OperationsActionRequest):
     retention_seconds: int = 3600
 
 
+class OperationsLlmWarmupResponse(BaseModel):
+    llm_id: str
+    status: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class OperationsChannelDeadLetterReplayRequest(OperationsActionRequest):
     runtime_id: str | None = None
     cursor: str | None = None
@@ -1008,13 +1014,20 @@ class LlmInvocationDetailResponse(BaseModel):
     tone: str
     summary: list[OperationsKeyValueItemResponse]
     request_context: list[OperationsKeyValueItemResponse]
+    runtime_observations: OperationsKeyValueSectionResponse
+    runtime_request_summary: dict[str, Any]
     request_payload: Any
+    provider_render_report: dict[str, Any]
+    provider_wire_preview: dict[str, Any]
+    provider_context_mapping: OperationsTableSectionResponse
     result_payload: Any
     result_summary: str
     error: str
     resolver: OperationsKeyValueSectionResponse
     error_facts: OperationsKeyValueSectionResponse
+    policy_trace: OperationsTableSectionResponse
     response_items: OperationsTableSectionResponse
+    response_runtime_mapping: OperationsTableSectionResponse
     response_events: OperationsTableSectionResponse
     events: OperationsTableSectionResponse
 
@@ -1036,7 +1049,16 @@ class LlmInvocationDetailResponse(BaseModel):
                 OperationsKeyValueItemResponse.from_value(item)
                 for item in value.request_context
             ],
+            runtime_observations=OperationsKeyValueSectionResponse.from_value(
+                value.runtime_observations,
+            ),
+            runtime_request_summary=dict(value.runtime_request_summary),
             request_payload=value.request_payload,
+            provider_render_report=value.provider_render_report,
+            provider_wire_preview=value.provider_wire_preview,
+            provider_context_mapping=OperationsTableSectionResponse.from_value(
+                value.provider_context_mapping,
+            ),
             result_payload=value.result_payload,
             result_summary=value.result_summary,
             error=value.error,
@@ -1044,8 +1066,14 @@ class LlmInvocationDetailResponse(BaseModel):
             error_facts=OperationsKeyValueSectionResponse.from_value(
                 value.error_facts,
             ),
+            policy_trace=OperationsTableSectionResponse.from_value(
+                value.policy_trace,
+            ),
             response_items=OperationsTableSectionResponse.from_value(
                 value.response_items,
+            ),
+            response_runtime_mapping=OperationsTableSectionResponse.from_value(
+                value.response_runtime_mapping,
             ),
             response_events=OperationsTableSectionResponse.from_value(
                 value.response_events,

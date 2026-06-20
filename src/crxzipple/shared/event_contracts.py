@@ -274,6 +274,7 @@ TOOL_CLI_EVENT_NAMES: tuple[str, ...] = (
 
 LLM_INVOCATION_EVENT_NAMES: tuple[str, ...] = (
     "llm.invocation_started",
+    "llm.invocation_provider_request_prepared",
     "llm.invocation_succeeded",
     "llm.invocation_failed",
 )
@@ -281,6 +282,9 @@ LLM_INVOCATION_EVENT_NAMES: tuple[str, ...] = (
 LLM_PROFILE_EVENT_NAMES: tuple[str, ...] = (
     "llm.profile_registered",
     "llm.profile_updated",
+    "llm.profile_warmup_succeeded",
+    "llm.profile_warmup_skipped",
+    "llm.profile_warmup_failed",
 )
 
 LLM_STREAM_EVENT_NAMES: tuple[str, ...] = (
@@ -453,6 +457,12 @@ _LLM_PROFILE_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("provider", "LLM provider.", "string", True),
     EventDefinitionField("api_family", "Adapter API family.", "string", True),
     EventDefinitionField("source_kind", "Profile source kind when synced.", "string"),
+    EventDefinitionField("status", "Profile operation status.", "string"),
+    EventDefinitionField("transport", "Provider transport used by profile operation.", "string"),
+    EventDefinitionField("endpoint", "Provider endpoint used by profile operation.", "string"),
+    EventDefinitionField("reused_connection", "Whether warmup reused an existing provider connection.", "boolean"),
+    EventDefinitionField("reason", "Display-safe reason for skipped or failed profile operation.", "string"),
+    EventDefinitionField("details", "Provider profile operation details.", "object"),
 )
 
 _LLM_STREAM_FIELDS: tuple[EventDefinitionField, ...] = (

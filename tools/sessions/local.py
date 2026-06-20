@@ -16,7 +16,6 @@ from crxzipple.modules.session.application import (
 )
 from crxzipple.modules.session.domain import (
     SessionItemKind,
-    SessionItemVisibility,
     SessionNotFoundError,
 )
 from crxzipple.modules.session.interfaces.dto import (
@@ -100,14 +99,14 @@ def session_status(deps: SessionsToolDeps | Any):
         except SessionNotFoundError as exc:
             raise ValueError(str(exc)) from exc
 
-        visible_items = _filter_items(
+        unarchived_items = _filter_items(
             all_items,
             include_archived=False,
             include_internal=False,
         )
-        active_visible_items = [
+        active_unarchived_items = [
             item
-            for item in visible_items
+            for item in unarchived_items
             if item.session_id == session.active_session_id
         ]
         session_dto = SessionDTO.from_entity(session)
@@ -136,8 +135,8 @@ def session_status(deps: SessionsToolDeps | Any):
             "instances": [_serialize_instance(item) for item in instance_dtos],
             "counts": {
                 "instance_count": len(instance_dtos),
-                "active_visible_item_count": len(active_visible_items),
-                "visible_item_count": len(visible_items),
+                "active_unarchived_item_count": len(active_unarchived_items),
+                "unarchived_item_count": len(unarchived_items),
                 "total_item_count": len(all_items),
             },
             "compaction": _extract_compaction_metadata(session_dto.metadata),
@@ -148,8 +147,8 @@ def session_status(deps: SessionsToolDeps | Any):
                 session=session_dto,
                 active_instance=active_instance,
                 instance_count=len(instance_dtos),
-                active_visible_item_count=len(active_visible_items),
-                visible_item_count=len(visible_items),
+                active_unarchived_item_count=len(active_unarchived_items),
+                unarchived_item_count=len(unarchived_items),
                 total_item_count=len(all_items),
                 requester_tree=requester_tree,
             ),
@@ -356,12 +355,6 @@ def sessions_send(deps: SessionsToolDeps | Any):
                         }
                     ]
                 },
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=True,
-                    chat_visible=True,
-                    trace_visible=True,
-                ),
                 source_module="session",
                 source_kind="sessions_send",
                 source_id=f"sessions_send:{uuid4().hex}",
@@ -800,13 +793,10 @@ def _filter_items(
     filtered: list[Any] = []
     for item in items:
         metadata = dict(getattr(item, "metadata", {}) or {})
-        visibility = getattr(item, "visibility", SessionItemVisibility())
         if not include_archived and (
             metadata.get("archived_reason") is not None
             or metadata.get("compacted_segment_id") is not None
         ):
-            continue
-        if not include_internal and not visibility.model_visible:
             continue
         filtered.append(item)
     return filtered
@@ -856,7 +846,6 @@ def _serialize_item(item: SessionItemDTO) -> dict[str, Any]:
         "role": item.role,
         "kind": item.kind,
         "phase": item.phase,
-        "visibility": dict(item.visibility),
         "content": _truncate_text(
             describe_content_for_text_fallback(item.content_payload),
             limit=MAX_RENDERED_MESSAGE_CHARS,
@@ -1078,7 +1067,7 @@ def _serialize_run_summary(run: SessionRuntimeRunRecord) -> dict[str, Any]:
         "current_step": run.current_step,
         "max_steps": run.max_steps,
         "waiting_reason": run.waiting_reason,
-        "prompt_mode": run.prompt_mode,
+        "runtime_request_mode": run.runtime_request_mode,
         "worker_id": run.worker_id,
         "updated_at": _isoformat(run.updated_at),
         "queued_at": _isoformat(run.queued_at),
@@ -1121,8 +1110,8 @@ def _render_session_status(
     session: SessionDTO,
     active_instance: SessionInstanceDTO | None,
     instance_count: int,
-    active_visible_item_count: int,
-    visible_item_count: int,
+    active_unarchived_item_count: int,
+    unarchived_item_count: int,
     total_item_count: int,
     requester_tree: dict[str, Any] | None,
 ) -> str:
@@ -1138,8 +1127,8 @@ def _render_session_status(
         f"- updated_at: {_isoformat(session.updated_at)}",
         f"- last_reset_at: {_isoformat(session.last_reset_at)}",
         f"- instance_count: {instance_count}",
-        f"- active_visible_item_count: {active_visible_item_count}",
-        f"- visible_item_count: {visible_item_count}",
+        f"- active_unarchived_item_count: {active_unarchived_item_count}",
+        f"- unarchived_item_count: {unarchived_item_count}",
         f"- total_item_count: {total_item_count}",
     ]
     compaction = _extract_compaction_metadata(session.metadata)
@@ -1269,7 +1258,6 @@ def _render_sessions_history(
             f"- session_id: {item.session_id}",
             f"- kind: {item.kind}",
             f"- phase: {item.phase}",
-            f"- visibility: {dict(item.visibility)}",
             f"- created_at: {_isoformat(item.created_at)}",
             f"- content: {content or '[no textual content]'}",
             "",
@@ -1372,7 +1360,7 @@ def _render_subagents(
                     f"- stage: {latest_run['stage']}",
                     f"- current_step: {latest_run['current_step']}/{latest_run['max_steps']}",
                     f"- waiting_reason: {latest_run.get('waiting_reason') or 'none'}",
-                    f"- prompt_mode: {latest_run.get('prompt_mode') or 'n/a'}",
+                    f"- runtime_request_mode: {latest_run.get('runtime_request_mode') or 'n/a'}",
                     f"- updated_at: {latest_run.get('updated_at')}",
                     "",
                 ],

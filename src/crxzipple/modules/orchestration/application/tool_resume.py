@@ -107,21 +107,11 @@ class OrchestrationToolResumeCoordinator:
                 tool_runs=pending_tool_runs,
                 item_ids=item_ids,
             )
-            evidence_frontier = _evidence_frontier_for_tool_runs(
-                self.engine,
-                run=run,
-                tool_runs=pending_tool_runs,
-            )
             resumed_runs.append(
                 self.resume_run(
                     run.id,
                     OrchestrationQueuePolicy.RESUME_FIRST,
                     self._resume_reason_from_tool_runs(pending_tool_runs),
-                    metadata=(
-                        {"evidence_frontier": [dict(item) for item in evidence_frontier]}
-                        if evidence_frontier
-                        else None
-                    ),
                 ),
             )
         return resumed_runs
@@ -220,21 +210,6 @@ class OrchestrationToolResumeCoordinator:
                 tool_result_item_links=links,
             )
             uow.commit()
-
-
-def _evidence_frontier_for_tool_runs(
-    engine: OrchestrationEngine,
-    *,
-    run: OrchestrationRun,
-    tool_runs: tuple[object, ...],
-) -> tuple[dict[str, object], ...]:
-    builder = getattr(engine, "evidence_frontier_for_tool_runs", None)
-    if not callable(builder):
-        return ()
-    result = builder(run, tool_runs=tool_runs)
-    if not isinstance(result, list | tuple):
-        return ()
-    return tuple(dict(item) for item in result if isinstance(item, dict))
 
 
 def _tool_run_terminal_summary(tool_run: object) -> dict[str, object]:

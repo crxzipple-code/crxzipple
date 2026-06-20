@@ -3,18 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from crxzipple.modules.skills.application.catalog import (
-    build_skill_catalog_prompt,
+    build_skill_runtime_request_catalog,
 )
 from crxzipple.modules.skills.application.models import (
-    SkillCatalogPrompt,
+    SkillRuntimeRequestCatalog,
     SkillPackage,
 )
 from crxzipple.modules.skills.application.owner_state import SkillOwnerStateService
 from crxzipple.modules.skills.application.ports import SkillRepositoryPort
-from crxzipple.modules.skills.application.prompt_resolver import (
-    SkillPromptResolution,
-    SkillPromptResolutionContext,
-    SkillPromptResolver,
+from crxzipple.modules.skills.application.runtime_request_resolver import (
+    SkillRuntimeRequestResolution,
+    SkillRuntimeRequestResolutionContext,
+    SkillRuntimeRequestResolver,
 )
 from crxzipple.modules.skills.application.surface import skill_surface_matches
 from crxzipple.modules.skills.domain import SkillNotFoundError
@@ -24,22 +24,23 @@ from crxzipple.modules.skills.domain import SkillNotFoundError
 class SkillCatalogService:
     repository: SkillRepositoryPort
     owner_state: SkillOwnerStateService
-    prompt_resolver: SkillPromptResolver
+    runtime_request_resolver: SkillRuntimeRequestResolver
+    persist_runtime_request_readiness: bool = True
 
-    def build_prompt_catalog(
+    def build_runtime_request_catalog(
         self,
         *,
         workspace_dir: str | None,
         surface: str,
-    ) -> SkillCatalogPrompt | None:
-        return build_skill_catalog_prompt(
+    ) -> SkillRuntimeRequestCatalog | None:
+        return build_skill_runtime_request_catalog(
             self.list_available(
                 workspace_dir=workspace_dir,
                 surface=surface,
             ),
         )
 
-    def resolve_prompt_catalog(
+    def resolve_runtime_request_catalog(
         self,
         *,
         workspace_dir: str | None,
@@ -50,12 +51,12 @@ class SkillCatalogService:
         run_id: str | None = None,
         session_key: str | None = None,
         active_session_id: str | None = None,
-    ) -> SkillPromptResolution:
+    ) -> SkillRuntimeRequestResolution:
         packages = self.list_available(
             workspace_dir=workspace_dir,
             surface=surface,
         )
-        context = SkillPromptResolutionContext(
+        context = SkillRuntimeRequestResolutionContext(
             workspace_dir=workspace_dir,
             surface=surface,
             interface=interface,
@@ -64,16 +65,21 @@ class SkillCatalogService:
             session_key=session_key,
             active_session_id=active_session_id,
         )
-        resolution = self.prompt_resolver.resolve(
+        resolution = self.runtime_request_resolver.resolve(
             packages,
             available_tool_ids=available_tool_ids,
             context=context,
         )
-        self.owner_state.persist_prompt_readiness_snapshots(
-            packages=packages,
-            resolution=resolution,
-            context=context,
-        )
+        if self.persist_runtime_request_readiness:
+            self.owner_state.persist_runtime_request_readiness_snapshots(
+                packages=packages,
+                resolution=resolution,
+                context=context,
+            )
+            self.owner_state.record_runtime_request_resolution_completed(
+                resolution=resolution,
+                context=context,
+            )
         return resolution
 
     def list_available(

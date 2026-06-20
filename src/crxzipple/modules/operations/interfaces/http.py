@@ -14,7 +14,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
-from crxzipple.interfaces.authorization import authorize_tool_run
+from crxzipple.interfaces.authorization import authorize_llm_action, authorize_tool_run
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.events import EventTopicRecord, EventTopicWatch
 from crxzipple.modules.operations.interfaces.http_models import (
@@ -32,6 +32,7 @@ from crxzipple.modules.operations.interfaces.http_models import (
     OperationsEventSubscriptionAdvanceResponse,
     OperationsMemoryWriteLongTermRequest,
     OperationsMemoryWriteResultResponse,
+    OperationsLlmWarmupResponse,
     ChannelsOperationsResponse,
     DaemonOperationsResponse,
     EventsOperationsResponse,
@@ -74,6 +75,11 @@ from crxzipple.modules.access.interfaces.presenters import (
 )
 from crxzipple.modules.daemon import DaemonNotFoundError, DaemonValidationError
 from crxzipple.modules.daemon.interfaces.presenters import instance_payload
+from crxzipple.modules.llm.domain import (
+    LlmAdapterNotConfiguredError,
+    LlmInvocationNotAllowedError,
+    LlmNotFoundError,
+)
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
     OrchestrationValidationError,
@@ -104,6 +110,7 @@ def _operations_action_service(container: AppContainer) -> OperationsActionServi
         channel_runtime_manager=container.require(AppKey.CHANNEL_RUNTIME_MANAGER),
         daemon_manager=container.require(AppKey.DAEMON_MANAGER),
         tool_service=container.require(AppKey.TOOL_RUN_CONTROL_SERVICE),
+        llm_service=container.require(AppKey.LLM_SERVICE),
         skill_manager=container.require(AppKey.SKILL_MANAGER),
         access_service=container.require(AppKey.ACCESS_SERVICE),
         access_inventory_collector=lambda **kwargs: collect_access_inventory(
@@ -372,6 +379,60 @@ def get_llm_invocation_operations_detail(
             query_key=invocation_id,
         ),
     )
+
+
+@router.post(
+    "/llm/profiles/{llm_id}/warmup",
+    response_model=OperationsLlmWarmupResponse,
+)
+def warmup_llm_profile_from_operations(
+    llm_id: str,
+    request: OperationsActionReasonRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> OperationsLlmWarmupResponse:
+    reason, audit_id = _begin_operations_action_audit(
+        container,
+        request,
+        action_type="llm.profile.warmup",
+        target_type="llm_profile",
+        target_id=llm_id,
+        target={"llm_id": llm_id},
+        default_reason="Operations LLM profile warmup",
+        risk="controlled",
+    )
+    try:
+        authorize_llm_action(
+            container,
+            llm_id=llm_id,
+            action="llm.warmup",
+            interface_name="operations",
+        )
+        result = _operations_action_service(container).warmup_llm_profile(
+            llm_id=llm_id,
+            reason=reason,
+        )
+    except LlmNotFoundError as exc:
+        http_exc = HTTPException(status_code=404, detail=str(exc))
+        _mark_operations_action_failed(container, audit_id, http_exc)
+        raise http_exc from None
+    except LlmInvocationNotAllowedError as exc:
+        http_exc = HTTPException(status_code=400, detail=str(exc))
+        _mark_operations_action_failed(container, audit_id, http_exc)
+        raise http_exc from None
+    except LlmAdapterNotConfiguredError as exc:
+        http_exc = HTTPException(status_code=503, detail=str(exc))
+        _mark_operations_action_failed(container, audit_id, http_exc)
+        raise http_exc from None
+    except Exception as exc:
+        _mark_operations_action_failed(container, audit_id, exc)
+        raise
+    response = OperationsLlmWarmupResponse(
+        llm_id=result.llm_id,
+        status=result.status,
+        details=dict(result.details),
+    )
+    _mark_operations_action_succeeded(container, audit_id, response)
+    return response
 
 
 @router.get("/memory", response_model=MemoryOperationsResponse)

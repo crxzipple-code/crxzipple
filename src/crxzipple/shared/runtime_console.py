@@ -24,7 +24,7 @@ class TraceContext:
     tool_call_id: str | None = None
     llm_invocation_id: str | None = None
     llm_response_item_id: str | None = None
-    context_render_snapshot_id: str | None = None
+    request_render_snapshot_id: str | None = None
     session_item_id: str | None = None
     continuation_decision_id: str | None = None
     artifact_id: str | None = None
@@ -52,7 +52,7 @@ class TraceContext:
                 "tool_call_id": self.tool_call_id,
                 "llm_invocation_id": self.llm_invocation_id,
                 "llm_response_item_id": self.llm_response_item_id,
-                "context_render_snapshot_id": self.context_render_snapshot_id,
+                "request_render_snapshot_id": self.request_render_snapshot_id,
                 "session_item_id": self.session_item_id,
                 "continuation_decision_id": self.continuation_decision_id,
                 "artifact_id": self.artifact_id,

@@ -20,15 +20,23 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmUsage,
     utcnow,
 )
-from crxzipple.modules.llm.infrastructure.adapters.common import (
-    default_base_url,
-    ensure_async_json_response,
+from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     ensure_image_input_supported,
+)
+from crxzipple.modules.llm.infrastructure.adapters.http_helpers import (
+    ensure_async_json_response,
     ensure_json_response,
-    gemini_contents,
-    gemini_tool_schema,
-    join_url,
     resolve_credential_binding,
+)
+from crxzipple.modules.llm.infrastructure.adapters.gemini_generate_content_renderer import (
+    GeminiGenerateContentRenderer,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_protocol import (
+    ProviderRenderInput,
+    ProviderWireRequest,
+)
+from crxzipple.modules.llm.infrastructure.rendering.input_projection import (
+    messages_from_projected_input_items,
 )
 from crxzipple.shared.infrastructure.http import get_async_http_client
 
@@ -36,17 +44,23 @@ from crxzipple.shared.infrastructure.http import get_async_http_client
 class GeminiGenerateContentAdapter:
     DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+    def __init__(self) -> None:
+        self._renderer = GeminiGenerateContentRenderer(
+            default_base_url=self.DEFAULT_BASE_URL,
+        )
+
     def invoke(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
-        url, headers, payload = self._invoke_request(profile, request)
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(profile, request, render_input=render_input)
+        response = self._send_wire_request(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
         data = ensure_json_response(
             response,
@@ -58,21 +72,27 @@ class GeminiGenerateContentAdapter:
             invocation_id=request.invocation_id,
         )
 
+    def preview_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> dict[str, Any]:
+        return self._renderer.preview_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
+        )
+
     async def invoke_async(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
-        url, headers, payload = self._invoke_request(profile, request)
-        client = get_async_http_client(
-            url,
-            timeout=profile.timeout_seconds,
-            client_factory=httpx.AsyncClient,
-        )
-        response = await client.post(
-            url,
-            headers=headers,
-            json=payload,
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(profile, request, render_input=render_input)
+        response = await self._send_wire_request_async(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
         data = await ensure_async_json_response(
             response,
@@ -84,64 +104,90 @@ class GeminiGenerateContentAdapter:
             invocation_id=request.invocation_id,
         )
 
-    def _invoke_request(
+    def _request_headers(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
-    ) -> tuple[str, dict[str, str], dict[str, Any]]:
-        ensure_image_input_supported(profile, request.messages)
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> dict[str, str]:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        request_messages = messages_from_projected_input_items(
+            model_input.input_items,
+        )
+        ensure_image_input_supported(profile, request_messages)
         token = resolve_credential_binding(
             profile.credential_binding_id,
             required=True,
             description=f"LLM profile '{profile.id}'",
             resolved_credential=request.resolved_credential,
         )
-        headers = {
+        return {
             "Content-Type": "application/json",
             "x-goog-api-key": token,
         }
 
-        contents, system_parts = gemini_contents(request.messages)
-        payload: dict[str, Any] = {"contents": list(contents)}
-        if system_parts:
-            payload["system_instruction"] = {
-                "parts": [{"text": "\n\n".join(system_parts)}],
-            }
-
-        generation_config: dict[str, Any] = {}
-        if profile.default_params.temperature is not None:
-            generation_config["temperature"] = profile.default_params.temperature
-        if profile.default_params.top_p is not None:
-            generation_config["topP"] = profile.default_params.top_p
-        if profile.default_params.max_output_tokens is not None:
-            generation_config["maxOutputTokens"] = profile.default_params.max_output_tokens
-        if isinstance(request.overrides.get("generationConfig"), dict):
-            generation_config.update(dict(request.overrides["generationConfig"]))
-        if generation_config:
-            payload["generationConfig"] = generation_config
-
-        if request.tool_schemas:
-            payload["tools"] = [
-                {
-                    "functionDeclarations": [
-                        gemini_tool_schema(tool) for tool in request.tool_schemas
-                    ],
-                },
-            ]
-        if isinstance(request.overrides.get("toolConfig"), dict):
-            payload["toolConfig"] = dict(request.overrides["toolConfig"])
-
-        for key, value in request.overrides.items():
-            if key not in {"contents", "system_instruction", "tools", "toolConfig", "generationConfig"}:
-                payload[key] = value
-
-        return (
-            join_url(
-                default_base_url(profile, self.DEFAULT_BASE_URL),
-                f"/models/{profile.model_name}:generateContent",
+    def _send_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> requests.Response:
+        return requests.post(
+            wire_request.endpoint,
+            headers=self._request_headers(
+                profile,
+                request,
+                render_input=render_input,
             ),
-            headers,
-            payload,
+            json=wire_request.payload,
+            timeout=profile.timeout_seconds,
+        )
+
+    async def _send_wire_request_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> httpx.Response:
+        client = get_async_http_client(
+            wire_request.endpoint,
+            timeout=profile.timeout_seconds,
+            client_factory=httpx.AsyncClient,
+        )
+        return await client.post(
+            wire_request.endpoint,
+            headers=self._request_headers(
+                profile,
+                request,
+                render_input=render_input,
+            ),
+            json=wire_request.payload,
+        )
+
+    def _wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> ProviderWireRequest:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        rendered = self._renderer.render_input(model_input)
+        return ProviderWireRequest.from_rendered(
+            renderer_id=self._renderer.renderer_id,
+            rendered=rendered,
+            preview=self._renderer.preview_input(model_input),
         )
 
     @staticmethod
@@ -250,8 +296,8 @@ def _gemini_response_items(
                     else f"{invocation_id}:text"
                 ),
                 provider_item_type="candidate.text",
-                model_visible=True,
-                user_visible=True,
+                provider_replay_candidate=True,
+                user_timeline_candidate=True,
                 created_at=now,
                 completed_at=now,
             ),
@@ -285,8 +331,8 @@ def _gemini_response_items(
                 provider_item_type="functionCall",
                 call_id=call_id,
                 tool_name=str(tool_name),
-                model_visible=True,
-                user_visible=False,
+                provider_replay_candidate=True,
+                user_timeline_candidate=False,
                 created_at=now,
                 completed_at=now,
             ),

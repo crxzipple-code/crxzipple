@@ -98,6 +98,20 @@ class LlmResolverTestCase(unittest.TestCase):
         self.assertEqual(resolved.resolved_llm_id, "text-default")
         self.assertEqual(resolved.strategy, "explicit")
 
+    def test_explicit_missing_llm_id_reports_orchestration_validation(self) -> None:
+        resolver = LlmResolver(_FakeLlmPort(_profile("text-default")))
+        routing_policy = AgentLlmRoutingPolicy(default_llm_id="text-default")
+
+        with self.assertRaises(OrchestrationValidationError) as caught:
+            resolver.resolve(
+                requested_llm_id="missing-profile",
+                routing_policy=routing_policy,
+                input_content="hello",
+            )
+
+        self.assertEqual(caught.exception.code, "llm_profile_not_found")
+        self.assertEqual(caught.exception.details["llm_id"], "missing-profile")
+
     def test_auto_routes_image_input_to_image_llm(self) -> None:
         resolver = LlmResolver(
             _FakeLlmPort(
@@ -295,6 +309,25 @@ class LlmResolverTestCase(unittest.TestCase):
         self.assertIsInstance(setup_flow, dict)
         assert isinstance(setup_flow, dict)
         self.assertEqual(setup_flow["kind"], "unsupported")
+
+    def test_explicit_model_can_skip_access_validation_for_request_preview(self) -> None:
+        resolver = LlmResolver(
+            _FakeLlmPort(
+                _profile("missing-access", credential_binding_id="missing-token"),
+            ),
+            access_port=AccessApplicationService(config_view=_StaticAccessConfigView()),
+        )
+        routing_policy = AgentLlmRoutingPolicy(default_llm_id="missing-access")
+
+        resolved = resolver.resolve(
+            requested_llm_id="missing-access",
+            routing_policy=routing_policy,
+            input_content="hello",
+            validate_access=False,
+        )
+
+        self.assertEqual(resolved.resolved_llm_id, "missing-access")
+        self.assertEqual(resolved.strategy, "explicit")
 
 
 if __name__ == "__main__":

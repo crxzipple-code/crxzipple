@@ -1,4 +1,4 @@
-"""Artifact provider attachment helpers for orchestration prompt snapshots."""
+"""Artifact provider attachment helpers for orchestration context snapshots."""
 
 from __future__ import annotations
 

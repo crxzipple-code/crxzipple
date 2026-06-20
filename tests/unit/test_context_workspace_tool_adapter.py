@@ -13,26 +13,27 @@ from crxzipple.app.integration.context_workspace_orchestration.tool_schema_boots
 from crxzipple.app.integration.context_workspace_tool import ToolContextNodeProvider
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
-    ContextRenderService,
+    ContextSliceBuilderService,
+    ContextObservationSnapshotService,
     ContextOwnerRegistry,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
-    RenderContextPromptInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.domain import ContextAction
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
-from crxzipple.modules.tool.application import ToolPromptBundle, ToolPromptBundleGroup
+from crxzipple.modules.tool.application import ToolRuntimeRequestBundle, ToolRuntimeRequestBundleGroup
 from crxzipple.modules.tool.domain import Tool, ToolNotFoundError, ToolParameter
 from crxzipple.modules.tool.infrastructure.tool_packages import load_tool_package_plan
 
 
-def test_tool_adapter_expands_only_prompt_input_tool_nodes() -> None:
+def test_tool_adapter_expands_only_runtime_request_tool_nodes() -> None:
     tool_service = _FakeToolService(
         Tool(
             id="fetch_weather",
@@ -102,10 +103,10 @@ def test_tool_adapter_expands_only_prompt_input_tool_nodes() -> None:
     assert tool_nodes[0].metadata["schema_default_enabled"] is False
     assert "location" in tool_nodes[0].summary
     assert tool_nodes[0].metadata["required_effect_ids"] == ["network_fetch"]
-    assert tool_nodes[0].metadata["provider_schema"]["name"] == "fetch_weather"
+    assert "provider_schema" not in tool_nodes[0].metadata
 
 
-def test_tool_adapter_expands_source_prompt_groups_before_functions() -> None:
+def test_tool_adapter_expands_source_runtime_request_groups_before_functions() -> None:
     tool_service = _FakeToolService(
         Tool(
             id="fetch_weather",
@@ -121,14 +122,14 @@ def test_tool_adapter_expands_source_prompt_groups_before_functions() -> None:
         ),
         groups_by_source={
             "configured.openapi.weather": (
-                ToolPromptBundleGroup(
+                ToolRuntimeRequestBundleGroup(
                     group_key="forecast",
                     title="Forecast",
                     summary="Weather forecast calls.",
                     function_ids=("fetch_weather",),
                     function_count=1,
                 ),
-                ToolPromptBundleGroup(
+                ToolRuntimeRequestBundleGroup(
                     group_key="lookup",
                     title="Location Lookup",
                     summary="Location lookup calls.",
@@ -199,18 +200,100 @@ def test_tool_adapter_expands_source_prompt_groups_before_functions() -> None:
     assert forecast_children[0].state.schema_enabled is False
 
 
-def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
+def test_enabled_tool_function_enters_context_slice_active_tools() -> None:
+    tool_service = _FakeToolService(
+        Tool(
+            id="fetch_weather",
+            source_id="configured.openapi.weather",
+            name="Fetch Weather",
+            description="Fetch current weather for a location.",
+        ),
+        Tool(
+            id="geocode_location",
+            source_id="configured.openapi.weather",
+            name="Geocode Location",
+            description="Resolve a location name to coordinates.",
+        ),
+        groups_by_source={
+            "configured.openapi.weather": (
+                ToolRuntimeRequestBundleGroup(
+                    group_key="forecast",
+                    title="Forecast",
+                    summary="Weather forecast calls.",
+                    function_ids=("fetch_weather",),
+                    function_count=1,
+                ),
+                ToolRuntimeRequestBundleGroup(
+                    group_key="lookup",
+                    title="Location Lookup",
+                    summary="Location lookup calls.",
+                    function_ids=("geocode_location",),
+                    function_count=1,
+                ),
+            ),
+        },
+    )
+    services = _context_services(tool_service)
+    session_key = "session:tool-active-slice"
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key=session_key,
+            agent_id="assistant",
+            metadata={"available_tool_names": ["fetch_weather", "geocode_location"]},
+        ),
+    )
+    for node_id in (
+        "tools.available",
+        "tools.bundle.configured.openapi.weather",
+        "tools.bundle.configured.openapi.weather.group.forecast",
+    ):
+        services["tree"].apply_action(
+            ContextActionInput(
+                session_key=session_key,
+                node_id=node_id,
+                action=ContextAction.EXPAND,
+            ),
+        )
+
+    before_slice = services["slice"].build_slice(
+        session_key=session_key,
+        run_id="run-tool-active-slice",
+    )
+    assert before_slice.active_tools == ()
+
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key=session_key,
+            node_id="tools.tool.fetch_weather",
+            action=ContextAction.ENABLE_TOOL_SCHEMA,
+            run_id="run-tool-active-slice",
+        ),
+    )
+    after_slice = services["slice"].build_slice(
+        session_key=session_key,
+        run_id="run-tool-active-slice",
+    )
+
+    assert [tool.function_name for tool in after_slice.active_tools] == [
+        "fetch_weather",
+    ]
+    assert after_slice.active_tools[0].source_id == "configured.openapi.weather"
+    assert after_slice.active_tools[0].owner_ref["tool_id"] == "fetch_weather"
+    assert after_slice.active_tools[0].metadata["status"] == "available"
+
+
+def test_browser_source_runtime_request_groups_surface_in_context_tree() -> None:
     source = browser_source_records_from_package()[0]
     candidates = browser_function_catalog_candidates()
-    groups = _prompt_groups_from_browser_source(source.config["prompt"]["groups"])
+    groups = _runtime_request_groups_from_browser_source(source.config["runtime_request"]["groups"])
     tool_service = _FakeToolService(
         *(_tool_from_browser_candidate(candidate) for candidate in candidates),
         groups_by_source={source.source_id: groups},
         summary_by_source={
-            source.source_id: str(source.config["prompt"]["summary"]),
+            source.source_id: str(source.config["runtime_request"]["summary"]),
         },
         metadata_by_source={
-            source.source_id: {"prompt": dict(source.config["prompt"])},
+            source.source_id: {"runtime_request": dict(source.config["runtime_request"])},
         },
     )
     services = _context_services(tool_service)
@@ -224,14 +307,14 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
             },
         ),
     )
-    initial_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    initial_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
 
-    assert "not just a DOM snapshot tool" in initial_render.prompt_body
-    assert "verifiable browser evidence" in initial_render.prompt_body
-    assert "Avoid repeated tab inventory" in initial_render.prompt_body
-    assert "Browser Observation" not in initial_render.prompt_body
+    assert "not just a DOM snapshot tool" in initial_render.debug_body
+    assert "verifiable browser facts" in initial_render.debug_body
+    assert "Avoid repeated tab inventory" in initial_render.debug_body
+    assert "Browser Observation" not in initial_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -247,7 +330,7 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert bundle_nodes[0].kind == "tool_bundle"
     assert bundle_nodes[0].state.collapsed is True
     assert bundle_nodes[0].metadata["source_id"] == "bundled.local_package.browser"
-    bundle_prompt = bundle_nodes[0].metadata["prompt"]
+    bundle_prompt = bundle_nodes[0].metadata["runtime_request"]
     assert bundle_prompt["default_tool_schema_policy"] == {"priority": 20}
     assert bundle_prompt["default_tool_schema_group_refs"][0]["source_id"] == (
         "bundled.local_package.browser"
@@ -268,12 +351,9 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
         tree_service=default_services["tree"],
         session_key=default_session_key,
         run_id="run-browser-defaults",
-        prompt=SimpleNamespace(flow_hint={}),  # type: ignore[arg-type]
+        draft=SimpleNamespace(flow_hint={}),  # type: ignore[arg-type]
     )
-    assert source_default_metadata["default_tool_schema_group_refs"][0]["source_id"] == (
-        "bundled.local_package.browser"
-    )
-    assert "browser.navigate" in source_default_metadata["default_tool_schema_ids"]
+    assert source_default_metadata == {}
     browser_bootstrap_refs = [
         {
             "source_id": "bundled.local_package.browser",
@@ -325,7 +405,7 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
         tree_service=default_services["tree"],
         session_key=default_session_key,
         run_id="run-browser-defaults",
-        prompt=SimpleNamespace(
+        draft=SimpleNamespace(
             flow_hint={"default_tool_schema_group_refs": browser_bootstrap_refs},
         ),  # type: ignore[arg-type]
     )
@@ -341,8 +421,8 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert "browser.network.inspect" in default_metadata["default_tool_schema_ids"]
     assert "browser.runtime.inspect" in default_metadata["default_tool_schema_ids"]
     assert "browser.script.extract_request" in default_metadata["default_tool_schema_ids"]
-    assert "browser.runtime.probe_client" in default_metadata["default_tool_schema_ids"]
-    assert "browser.runtime.call_client" in default_metadata["default_tool_schema_ids"]
+    assert "browser.runtime.probe_client" not in default_metadata["default_tool_schema_ids"]
+    assert "browser.runtime.call_client" not in default_metadata["default_tool_schema_ids"]
     assert "browser.evaluate" in default_metadata["default_tool_schema_ids"]
     assert "browser.action.trace" in default_metadata["default_tool_schema_ids"]
     assert "browser.native.run" in default_metadata["default_tool_schema_ids"]
@@ -351,8 +431,8 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert "browser.form.inspect" in default_metadata["default_tool_schema_ids"]
     assert "browser.dom.inspect" in default_metadata["default_tool_schema_ids"]
     assert "browser.tabs.list" not in default_metadata["default_tool_schema_ids"]
-    rendered_default = default_services["render"].render_prompt_body(
-        RenderContextPromptInput(
+    rendered_default = default_services["render"].render_observation(
+        ContextObservationRenderInput(
             session_key=default_session_key,
             metadata=default_metadata,
         ),
@@ -364,8 +444,8 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert "browser.network.inspect" in default_schema_names
     assert "browser.runtime.inspect" in default_schema_names
     assert "browser.script.extract_request" in default_schema_names
-    assert "browser.runtime.probe_client" in default_schema_names
-    assert "browser.runtime.call_client" in default_schema_names
+    assert "browser.runtime.probe_client" not in default_schema_names
+    assert "browser.runtime.call_client" not in default_schema_names
     assert "browser.evaluate" in default_schema_names
     assert "browser.action.trace" in default_schema_names
     assert "browser.native.run" in default_schema_names
@@ -438,7 +518,7 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert native_script.owner_ref["function_ids"] == ["browser.native.run"]
     assert "date/calendar pickers" in forms_overlays.summary
     assert "response/request bodies" in network.summary
-    assert "trigger a runtime client method or one focused page action" in network.summary
+    assert "one focused page action" in network.summary
     assert "live frontend scripts" in code_insight.summary
     assert "browser.evaluate" in code_insight.summary
     assert "client state" in storage.summary
@@ -455,19 +535,19 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert network.metadata["default_tool_schema_max_count"] == 6
     assert code_insight.metadata["default_tool_schema_ids"][-1] == "browser.evaluate"
     assert "browser.script.extract_request" in code_insight.metadata["default_tool_schema_ids"]
-    assert "browser.runtime.probe_client" in code_insight.metadata["default_tool_schema_ids"]
-    assert "browser.runtime.call_client" in code_insight.metadata["default_tool_schema_ids"]
-    assert code_insight.metadata["default_tool_schema_max_count"] == 8
+    assert "browser.runtime.probe_client" not in code_insight.metadata["default_tool_schema_ids"]
+    assert "browser.runtime.call_client" not in code_insight.metadata["default_tool_schema_ids"]
+    assert code_insight.metadata["default_tool_schema_max_count"] == 6
     assert code_insight.metadata["default_tool_schema_source"] == (
-        "bundled.local_package.browser.prompt_group.code_insight"
+        "bundled.local_package.browser.runtime_request_group.code_insight"
     )
     assert native_script.metadata["default_tool_schema_ids"] == ["browser.native.run"]
     assert native_script.metadata["default_tool_schema_max_count"] == 1
     assert native_script.metadata["default_tool_schema_source"] == (
-        "bundled.local_package.browser.prompt_group.native_script"
+        "bundled.local_package.browser.runtime_request_group.native_script"
     )
-    rendered_group_report = services["render"].render_prompt_body(
-        RenderContextPromptInput(
+    rendered_group_report = services["render"].render_observation(
+        ContextObservationRenderInput(
             session_key=session_key,
             metadata={
                 "default_tool_schema_group_refs": browser_bootstrap_refs,
@@ -507,7 +587,7 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
     assert groups_by_key["network"]["default_schema_count"] == 6
     assert groups_by_key["network"]["function_count"] == 10
     assert groups_by_key["code_insight"]["default_group"] is True
-    assert groups_by_key["code_insight"]["default_schema_count"] == 8
+    assert groups_by_key["code_insight"]["default_schema_count"] == 6
     assert groups_by_key["action_trace"]["default_group"] is True
     assert groups_by_key["forms_overlays"]["default_group"] is True
     assert groups_by_key["page_interaction"]["default_group"] is True
@@ -545,12 +625,12 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
         "tools.tool.browser.action.trace",
     ]
     assert action_trace_children[0].state.schema_enabled is False
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
-    assert '<tool_function name="browser.observe"' in rendered.prompt_body
-    assert '<tool_function name="browser.action.trace"' in rendered.prompt_body
-    assert "The snapshot is only a first pass" not in rendered.prompt_body
+    assert '<tool_function name="browser.observe"' in rendered.debug_body
+    assert '<tool_function name="browser.action.trace"' in rendered.debug_body
+    assert "The snapshot is only a first pass" not in rendered.debug_body
     services["tree"].apply_action(
         ContextActionInput(
             session_key=session_key,
@@ -565,14 +645,14 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
             action=ContextAction.EXPAND,
         ),
     )
-    rendered_after_function_expand = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered_after_function_expand = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
     assert "The snapshot is only a first pass" in (
-        rendered_after_function_expand.prompt_body
+        rendered_after_function_expand.debug_body
     )
     assert "Use it to verify concrete page effects" in (
-        rendered_after_function_expand.prompt_body
+        rendered_after_function_expand.debug_body
     )
     assert rendered.tool_schema_mirror_available is True
     assert rendered.mirrored_node_ids == ()
@@ -586,8 +666,8 @@ def test_browser_source_prompt_groups_surface_in_context_tree() -> None:
                 action=ContextAction.ENABLE_TOOL_SCHEMA,
             ),
         )
-    rendered_after_enable = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered_after_enable = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
     mirrored_schema_names = [
         schema["name"]
@@ -641,8 +721,8 @@ def test_tool_schema_mirror_follows_context_node_state() -> None:
         ),
     )
 
-    rendered_before_enable = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered_before_enable = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered_before_enable.tool_schema_mirror_available is True
@@ -656,8 +736,8 @@ def test_tool_schema_mirror_follows_context_node_state() -> None:
             action=ContextAction.ENABLE_TOOL_SCHEMA,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered.mirrored_node_ids == ("tools.tool.fetch_weather",)
@@ -670,8 +750,8 @@ def test_tool_schema_mirror_follows_context_node_state() -> None:
             action=ContextAction.DISABLE_TOOL_SCHEMA,
         ),
     )
-    rendered_after_disable = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered_after_disable = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered_after_disable.mirrored_node_ids == ()
@@ -728,8 +808,8 @@ def test_owner_refresh_clears_stale_tool_schema_state_without_action_marker() ->
     stale_node.metadata.pop("schema_enabled_source", None)
     services["nodes"].save(stale_node)
 
-    rendered_after_refresh = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered_after_refresh = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
     tree_after_refresh = services["tree"].list_tree(session_key)
     refreshed_node = next(
@@ -747,8 +827,8 @@ def test_owner_refresh_clears_stale_tool_schema_state_without_action_marker() ->
     )
     refreshed_node.metadata.pop("schema_enabled_source", None)
     services["nodes"].save(refreshed_node)
-    rendered_after_same_revision_refresh = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered_after_same_revision_refresh = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
     same_revision_tree = services["tree"].list_tree(session_key)
     same_revision_node = next(
@@ -772,8 +852,8 @@ def test_owner_refresh_clears_stale_tool_schema_state_without_action_marker() ->
     )
     enabled_node.revision = "old-tool-context-revision"
     services["nodes"].save(enabled_node)
-    rendered_after_action_refresh = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered_after_action_refresh = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
     action_refreshed_tree = services["tree"].list_tree(session_key)
     action_refreshed_node = next(
@@ -846,8 +926,8 @@ def test_tool_schema_mirror_budget_limits_enabled_function_schemas() -> None:
             ),
         )
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key=session_key),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
     )
     schemas = rendered.provider_attachments.get("tool_schemas")
     budget = rendered.provider_attachment_report["tool_schema_mirror_budget"]
@@ -903,8 +983,8 @@ def test_tool_schema_mirror_runtime_defaults_do_not_mutate_node_state() -> None:
         ),
     )
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(
             session_key=session_key,
             metadata={
                 "default_tool_schema_ids": ["fetch_weather"],
@@ -946,8 +1026,8 @@ def test_tool_schema_mirror_requires_expanded_tool_bundle() -> None:
             metadata={"available_tool_names": ["fetch_weather"]},
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert not rendered.tool_schema_mirror_available
@@ -961,8 +1041,8 @@ def test_tool_schema_mirror_requires_expanded_tool_bundle() -> None:
             action=ContextAction.EXPAND,
         ),
     )
-    rendered_after_group_expand = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered_after_group_expand = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered_after_group_expand.tool_schema_mirror_available
@@ -976,8 +1056,8 @@ def test_tool_schema_mirror_requires_expanded_tool_bundle() -> None:
             action=ContextAction.ENABLE_TOOL_SCHEMA,
         ),
     )
-    rendered_after_enable = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered_after_enable = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered_after_enable.mirrored_node_ids == ("tools.tool.fetch_weather",)
@@ -986,7 +1066,7 @@ def test_tool_schema_mirror_requires_expanded_tool_bundle() -> None:
     )
 
 
-def test_context_tree_control_group_is_expanded_as_prompt_bootstrap() -> None:
+def test_context_tree_control_group_is_not_default_provider_surface() -> None:
     services = _context_services(
         _FakeToolService(
             Tool(
@@ -1007,17 +1087,15 @@ def test_context_tree_control_group_is_expanded_as_prompt_bootstrap() -> None:
             metadata={"available_tool_names": ["context_tree.expand"]},
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert "tools.available" in rendered.included_node_ids
     assert "tools.bundle.bundled.local_package.context_tree" in rendered.included_node_ids
-    assert "tools.tool.context_tree.expand" in rendered.included_node_ids
-    assert rendered.mirrored_node_ids == ("tools.tool.context_tree.expand",)
-    assert rendered.provider_attachments["tool_schemas"][0]["name"] == (
-        "context_tree.expand"
-    )
+    assert "tools.tool.context_tree.expand" not in rendered.included_node_ids
+    assert rendered.mirrored_node_ids == ()
+    assert rendered.provider_attachments.get("tool_schemas", ()) == ()
 
 
 def test_workspace_tools_group_by_workspace_before_session_capability() -> None:
@@ -1049,7 +1127,7 @@ def test_workspace_tools_group_by_workspace_before_session_capability() -> None:
     ]
 
 
-def test_source_kind_tags_do_not_become_prompt_bundle_titles() -> None:
+def test_source_kind_tags_do_not_become_runtime_request_bundle_titles() -> None:
     services = _context_services(
         _FakeToolService(
             Tool(
@@ -1192,8 +1270,8 @@ def test_cli_sources_are_guidance_nodes_not_tool_functions() -> None:
         "configured_cli_help",
     ]
 
-    rendered_before_enable = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered_before_enable = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered_before_enable.tool_schema_mirror_available is True
@@ -1207,8 +1285,8 @@ def test_cli_sources_are_guidance_nodes_not_tool_functions() -> None:
             action=ContextAction.ENABLE_TOOL_SCHEMA,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered.mirrored_node_ids == ("tools.tool.exec",)
@@ -1262,8 +1340,8 @@ def test_owner_refresh_preserves_tool_schema_toggle_state() -> None:
             metadata={"available_tool_names": ["fetch_weather"]},
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tools"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tools"),
     )
 
     assert rendered.mirrored_node_ids == ("tools.tool.fetch_weather",)
@@ -1316,7 +1394,7 @@ def test_default_direct_tool_schema_ids_expand_matching_source_bundle() -> None:
         tree_service=services["tree"],
         session_key="session:weather-defaults",
         run_id="run-weather-defaults",
-        prompt=SimpleNamespace(
+        draft=SimpleNamespace(
             flow_hint={
                 "default_tool_schema_ids": [
                     "open_meteo_weather.forecast_weather",
@@ -1326,8 +1404,8 @@ def test_default_direct_tool_schema_ids_expand_matching_source_bundle() -> None:
     )
 
     assert default_metadata == {}
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(
             session_key="session:weather-defaults",
             metadata={
                 "default_tool_schema_ids": [
@@ -1372,7 +1450,7 @@ def test_default_direct_command_tool_schema_ids_expand_command_bundle() -> None:
         tree_service=services["tree"],
         session_key="session:command-defaults",
         run_id="run-command-defaults",
-        prompt=SimpleNamespace(
+        draft=SimpleNamespace(
             flow_hint={"default_tool_schema_ids": ["exec", "process"]},
         ),  # type: ignore[arg-type]
     )
@@ -1386,8 +1464,8 @@ def test_default_direct_command_tool_schema_ids_expand_command_bundle() -> None:
     )
     assert command_bundle.state.collapsed is False
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(
             session_key="session:command-defaults",
             metadata={
                 "default_tool_schema_ids": ["exec", "process"],
@@ -1406,25 +1484,35 @@ def test_default_direct_command_tool_schema_ids_expand_command_bundle() -> None:
     assert budget["default_mirrored_count"] == 2
 
 
-def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -> None:
+def test_core_default_schemas_come_from_tool_source_runtime_request_policy() -> None:
     command_plan = load_tool_package_plan("tools/command/tool.yaml")
     web_plan = load_tool_package_plan("tools/web/tool.yaml")
+    context_tree_plan = load_tool_package_plan("tools/context_tree/tool.yaml")
     command_source_id = "bundled.local_package.command"
     web_source_id = "bundled.local_package.web"
+    context_tree_source_id = "bundled.local_package.context_tree"
     tool_service = _FakeToolService(
         *_tools_from_local_package_plan(command_plan, source_id=command_source_id),
         *_tools_from_local_package_plan(web_plan, source_id=web_source_id),
+        *_tools_from_local_package_plan(
+            context_tree_plan,
+            source_id=context_tree_source_id,
+        ),
         groups_by_source={
-            command_source_id: _prompt_groups_from_browser_source(
-                command_plan.prompt["groups"],
+            command_source_id: _runtime_request_groups_from_browser_source(
+                command_plan.runtime_request["groups"],
             ),
-            web_source_id: _prompt_groups_from_browser_source(
-                web_plan.prompt["groups"],
+            web_source_id: _runtime_request_groups_from_browser_source(
+                web_plan.runtime_request["groups"],
+            ),
+            context_tree_source_id: _runtime_request_groups_from_browser_source(
+                context_tree_plan.runtime_request["groups"],
             ),
         },
         metadata_by_source={
-            command_source_id: {"prompt": command_plan.prompt},
-            web_source_id: {"prompt": web_plan.prompt},
+            command_source_id: {"runtime_request": command_plan.runtime_request},
+            web_source_id: {"runtime_request": web_plan.runtime_request},
+            context_tree_source_id: {"runtime_request": context_tree_plan.runtime_request},
         },
     )
     services = _context_services(tool_service)
@@ -1439,6 +1527,7 @@ def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -
                     "process",
                     "web.fetch_json",
                     "web.fetch_text",
+                    "capability.search",
                 ],
             },
         ),
@@ -1448,19 +1537,18 @@ def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -
         tree_service=services["tree"],
         session_key=session_key,
         run_id="run-source-policy-defaults",
-        prompt=SimpleNamespace(flow_hint={}),  # type: ignore[arg-type]
+        draft=SimpleNamespace(flow_hint={}),  # type: ignore[arg-type]
     )
 
     assert default_metadata["default_tool_schema_ids"] == [
         "exec",
         "process",
-        "web.fetch_json",
-        "web.fetch_text",
+        "capability.search",
     ]
     assert default_metadata["default_tool_schema_source"] == (
-        "bundled.local_package.command.prompt_group.run_and_verify,"
-        "bundled.local_package.command.prompt_group.background_processes,"
-        "bundled.local_package.web.prompt_group.public_fetch"
+        "bundled.local_package.command.runtime_request_group.run_and_verify,"
+        "bundled.local_package.command.runtime_request_group.background_processes,"
+        "bundled.local_package.context_tree.runtime_request_group.capability_discovery"
     )
     assert default_metadata["default_tool_schema_group_refs"] == [
         {"source_id": command_source_id, "group_key": "run_and_verify", "priority": "10"},
@@ -1469,12 +1557,16 @@ def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -
             "group_key": "background_processes",
             "priority": "10",
         },
-        {"source_id": web_source_id, "group_key": "public_fetch", "priority": "40"},
+        {
+            "source_id": context_tree_source_id,
+            "group_key": "capability_discovery",
+            "priority": "5",
+        },
     ]
     for node_id in (
         "tools.available",
+        "tools.bundle.bundled.local_package.context_tree",
         "tools.bundle.bundled.local_package.command",
-        "tools.bundle.bundled.local_package.web",
     ):
         services["tree"].apply_action(
             ContextActionInput(
@@ -1484,8 +1576,8 @@ def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -
             ),
         )
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(
             session_key=session_key,
             metadata=default_metadata,
         ),
@@ -1494,12 +1586,16 @@ def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -
     assert {
         schema["name"]
         for schema in rendered.provider_attachments["tool_schemas"]
-    } == {"exec", "process", "web.fetch_json", "web.fetch_text"}
+    } == {
+        "exec",
+        "process",
+        "capability.search",
+    }
     budget = rendered.provider_attachment_report["tool_schema_mirror_budget"]
     assert budget["default_schema_source"] == default_metadata["default_tool_schema_source"]
-    assert budget["default_requested_count"] == 4
-    assert budget["default_candidate_count"] == 4
-    assert budget["default_mirrored_count"] == 4
+    assert budget["default_requested_count"] == 3
+    assert budget["default_candidate_count"] == 3
+    assert budget["default_mirrored_count"] == 3
     assert budget["default_group_match_count"] == 3
     assert budget["default_group_matches"] == [
         {
@@ -1517,24 +1613,111 @@ def test_command_and_web_default_schemas_come_from_tool_source_prompt_policy() -
             "priority": "102000",
         },
         {
-            "node_id": "tools.bundle.bundled.local_package.web.group.public_fetch",
-            "source_id": web_source_id,
-            "group_key": "public_fetch",
-            "priority": "401000",
+            "node_id": (
+                "tools.bundle.bundled.local_package.context_tree.group.capability_discovery"
+            ),
+            "source_id": context_tree_source_id,
+            "group_key": "capability_discovery",
+            "priority": "51000",
         },
     ]
-    assert "high-signal commands" in rendered.prompt_body
-    assert "max_output_tokens" in rendered.prompt_body
-    assert "source URL" in rendered.prompt_body
-    assert "extracted fields" in rendered.prompt_body
     schemas_by_name = {
         schema["name"]: schema
         for schema in rendered.provider_attachments["tool_schemas"]
     }
+    assert "Search available runtime capabilities" in schemas_by_name[
+        "capability.search"
+    ]["description"]
     assert "max_output_tokens" in schemas_by_name["exec"]["description"]
-    exec_properties = schemas_by_name["exec"]["input_schema"]["properties"]
-    assert "yield_time_ms" in exec_properties
-    assert "source URL" in schemas_by_name["web.fetch_json"]["description"]
+    assert "web.fetch_json" not in schemas_by_name
+
+
+def test_explicit_browser_network_schema_survives_default_surface_budget() -> None:
+    browser_plan = load_tool_package_plan("tools/browser/tool.yaml")
+    context_tree_plan = load_tool_package_plan("tools/context_tree/tool.yaml")
+    browser_source_id = "bundled.local_package.browser"
+    context_tree_source_id = "bundled.local_package.context_tree"
+    tool_service = _FakeToolService(
+        *_tools_from_local_package_plan(browser_plan, source_id=browser_source_id),
+        *_tools_from_local_package_plan(
+            context_tree_plan,
+            source_id=context_tree_source_id,
+        ),
+        groups_by_source={
+            browser_source_id: _runtime_request_groups_from_browser_source(
+                browser_plan.runtime_request["groups"],
+            ),
+            context_tree_source_id: _runtime_request_groups_from_browser_source(
+                context_tree_plan.runtime_request["groups"],
+            ),
+        },
+        metadata_by_source={
+            browser_source_id: {"runtime_request": browser_plan.runtime_request},
+            context_tree_source_id: {"runtime_request": context_tree_plan.runtime_request},
+        },
+    )
+    services = _context_services(tool_service)
+    session_key = "session:browser-network-budget"
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key=session_key,
+            agent_id="assistant",
+            metadata={
+                "available_tool_names": [
+                    "browser.navigate",
+                    "browser.observe",
+                    "browser.code.search",
+                    "browser.runtime.inspect",
+                    "browser.evaluate",
+                    "browser.network.inspect",
+                    "capability.search",
+                ],
+            },
+        ),
+    )
+
+    default_metadata = resolve_default_tool_schema_metadata(
+        tree_service=services["tree"],
+        session_key=session_key,
+        run_id="run-browser-network-budget",
+        draft=SimpleNamespace(flow_hint={}),  # type: ignore[arg-type]
+    )
+    for node_id in (
+        "tools.available",
+        "tools.bundle.bundled.local_package.browser",
+        "tools.bundle.bundled.local_package.browser.group.network",
+    ):
+        services["tree"].apply_action(
+            ContextActionInput(
+                session_key=session_key,
+                node_id=node_id,
+                action=ContextAction.EXPAND,
+            ),
+        )
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key=session_key,
+            node_id="tools.tool.browser.network.inspect",
+            action=ContextAction.ENABLE_TOOL_SCHEMA,
+        ),
+    )
+
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(
+            session_key=session_key,
+            metadata={
+                **default_metadata,
+                "tool_schema_mirror_max_count": 6,
+            },
+        ),
+    )
+
+    schema_names = [
+        schema["name"]
+        for schema in rendered.provider_attachments["tool_schemas"]
+    ]
+    assert "browser.network.inspect" in schema_names
+    assert "tools.tool.browser.network.inspect" in rendered.mirrored_node_ids
 
 
 def _context_services(tool_service: "_FakeToolService"):
@@ -1543,7 +1726,7 @@ def _context_services(tool_service: "_FakeToolService"):
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
     operations = InMemoryContextOperationRepository()
-    snapshots = InMemoryContextRenderSnapshotRepository()
+    snapshots = InMemoryContextSnapshotRepository()
     return {
         "workspace": ContextWorkspaceService(
             workspace_repository=workspaces,
@@ -1556,10 +1739,15 @@ def _context_services(tool_service: "_FakeToolService"):
             operation_repository=operations,
             owner_registry=registry,
         ),
-        "render": ContextRenderService(
+        "render": ContextObservationSnapshotService(
             workspace_repository=workspaces,
             node_repository=nodes,
             snapshot_repository=snapshots,
+            owner_registry=registry,
+        ),
+        "slice": ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
             owner_registry=registry,
         ),
         "nodes": nodes,
@@ -1586,7 +1774,7 @@ class _FakeToolService:
     def __init__(
         self,
         *tools: Tool,
-        groups_by_source: dict[str, tuple[ToolPromptBundleGroup, ...]] | None = None,
+        groups_by_source: dict[str, tuple[ToolRuntimeRequestBundleGroup, ...]] | None = None,
         summary_by_source: dict[str, str] | None = None,
         metadata_by_source: dict[str, Mapping[str, Any]] | None = None,
     ) -> None:
@@ -1608,10 +1796,10 @@ class _FakeToolService:
             if str(tool_id) in self._tools
         }
 
-    def list_prompt_bundles(
+    def list_runtime_request_bundles(
         self,
         function_ids,
-    ) -> tuple[ToolPromptBundle, ...]:
+    ) -> tuple[ToolRuntimeRequestBundle, ...]:
         grouped: dict[str, list[Tool]] = {}
         for function_id in function_ids:
             tool = self._tools.get(str(function_id))
@@ -1620,7 +1808,7 @@ class _FakeToolService:
             source_id = tool.source_id or f"test.source.{tool.id}"
             grouped.setdefault(source_id, []).append(tool)
         return tuple(
-            ToolPromptBundle(
+            ToolRuntimeRequestBundle(
                 source_id=source_id,
                 title=_bundle_title(source_id),
                 summary=(
@@ -1630,7 +1818,7 @@ class _FakeToolService:
                 source_kind=_source_kind(source_id),
                 function_ids=tuple(tool.id for tool in tools),
                 function_count=len(tools),
-                groups=_visible_prompt_groups(
+                groups=_visible_runtime_request_groups(
                     self._groups_by_source.get(source_id, ()),
                     tools,
                 ),
@@ -1647,13 +1835,13 @@ class _FakeToolService:
         )
 
 
-def _visible_prompt_groups(
-    groups: tuple[ToolPromptBundleGroup, ...],
+def _visible_runtime_request_groups(
+    groups: tuple[ToolRuntimeRequestBundleGroup, ...],
     tools: list[Tool],
-) -> tuple[ToolPromptBundleGroup, ...]:
+) -> tuple[ToolRuntimeRequestBundleGroup, ...]:
     tool_ids = {tool.id for tool in tools}
     tools_by_id = {tool.id: tool for tool in tools}
-    visible_groups: list[ToolPromptBundleGroup] = []
+    visible_groups: list[ToolRuntimeRequestBundleGroup] = []
     for group in groups:
         function_ids = tuple(
             function_id for function_id in group.function_ids if function_id in tool_ids
@@ -1661,7 +1849,7 @@ def _visible_prompt_groups(
         if not function_ids:
             continue
         visible_groups.append(
-            ToolPromptBundleGroup(
+            ToolRuntimeRequestBundleGroup(
                 group_key=group.group_key,
                 title=group.title,
                 summary=group.summary,
@@ -1680,10 +1868,10 @@ def _visible_prompt_groups(
     return tuple(visible_groups)
 
 
-def _prompt_groups_from_browser_source(
+def _runtime_request_groups_from_browser_source(
     raw_groups: Mapping[str, object],
-) -> tuple[ToolPromptBundleGroup, ...]:
-    groups: list[ToolPromptBundleGroup] = []
+) -> tuple[ToolRuntimeRequestBundleGroup, ...]:
+    groups: list[ToolRuntimeRequestBundleGroup] = []
     for group_key, value in sorted(
         raw_groups.items(),
         key=lambda item: int(item[1].get("order", 1000)) if isinstance(item[1], Mapping) else 1000,
@@ -1696,7 +1884,7 @@ def _prompt_groups_from_browser_source(
             if isinstance(function_id, str) and function_id.strip()
         )
         groups.append(
-            ToolPromptBundleGroup(
+            ToolRuntimeRequestBundleGroup(
                 group_key=group_key,
                 title=str(value.get("title") or group_key),
                 summary=str(value.get("summary") or ""),

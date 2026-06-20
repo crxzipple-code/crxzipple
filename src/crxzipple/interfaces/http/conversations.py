@@ -229,7 +229,6 @@ def _last_message_preview(container: AppContainer, *, session_key: str) -> str |
         items = container.require(AppKey.SESSION_SERVICE).list_items(
             ListSessionItemsInput(
                 session_key=session_key,
-                chat_visible=True,
             ),
         )
     except SessionNotFoundError:
@@ -266,7 +265,6 @@ def _conversation_title(container: AppContainer, *, session_key: str) -> str | N
         items = container.require(AppKey.SESSION_SERVICE).list_items(
             ListSessionItemsInput(
                 session_key=session_key,
-                chat_visible=True,
             ),
         )
     except SessionNotFoundError:
@@ -426,16 +424,13 @@ def list_conversation_messages(
                 session_key=session_key,
                 limit=limit,
                 active_session_only=active_session_only,
-                chat_visible=True if not include_archived else None,
                 after_sequence_no=after_sequence_no,
                 before_sequence_no=before_sequence_no,
             ),
         )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
-    if include_archived:
-        items = tuple(item for item in items if item.visibility.chat_visible)
-    else:
+    if not include_archived:
         items = tuple(item for item in items if not _session_item_is_archived(item))
     return [SessionItemResponse.from_dto(SessionItemDTO.from_entity(item)) for item in items]
 

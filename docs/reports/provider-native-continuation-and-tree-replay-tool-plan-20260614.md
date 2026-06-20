@@ -2,6 +2,36 @@
 
 Date: 2026-06-14
 
+## 2026-06-14 勘误
+
+本文早期版本把 Codex CLI 的 `previous_response_id` 使用方式理解为 HTTP `/backend-api/codex/responses` 顶层参数。后续直接审查 `/Users/crxzy/Documents/codex` 源码后，确认该结论不准确：
+
+- Codex 的 `previous_response_id` 出现在 Responses WebSocket `response.create` 消息中。
+- Codex HTTP `ResponsesApiRequest` struct 没有 `previous_response_id` 字段。
+- CRXZipple 当前 Codex HTTP endpoint 实测拒绝 `previous_response_id`，错误为 `Unsupported parameter: previous_response_id`。
+- 后续 Codex-like continuation 应通过 Codex WebSocket transport 实现，而不是继续在 HTTP adapter 上发送该字段。
+
+修正版开发方案见：
+
+- [codex-websocket-continuation-transport-plan-20260614.md](codex-websocket-continuation-transport-plan-20260614.md)
+
+## 2026-06-14 二次勘误：Context Tree 交付方式
+
+本文正文仍保留了“首轮完整 Context Tree render / 后续 tree replay”的早期表述。最新决策已经收敛为：
+
+- Context Tree 是 agent 可主动查看、管理的上下文对象。
+- 默认 provider request 不再把完整 `<context_tree>` 或 `<context_tree_delta>` 当作 system prompt 底稿。
+- 默认 provider request 使用 stable instructions + Codex-like ResponseItem replay + compact context projection。
+- 完整树只通过显式 `context_tree.*` 工具调用或 debug/prompt-preview 模式进入模型。
+
+树交付和 ResponseItem replay 的最终施工依据见：
+
+- [context-workspace-tree-projection-plan-20260614.md](context-workspace-tree-projection-plan-20260614.md)
+- [llm-session-response-item-replay-plan-20260614.md](llm-session-response-item-replay-plan-20260614.md)
+- [orchestration-codex-like-request-assembly-plan-20260614.md](orchestration-codex-like-request-assembly-plan-20260614.md)
+
+本文中与上述决策冲突的“首轮完整树默认入 prompt”描述，均视为历史中间态，不作为后续施工依据。
+
 ## 背景
 
 本轮对照了 Codex CLI 完成东航航班查询任务时的真实 Responses API 请求链，以及 CRXZipple 最新 `openai_codex.gpt-5.5` invocation 记录。
@@ -183,10 +213,9 @@ LlmProviderRequestPreview(
 
 ### Adapter 行为
 
-OpenAI/Codex Responses adapter：
+OpenAI Responses HTTP adapter：
 
 - `continuation.previous_response_id` 存在时，payload 增加：
-  - `type="response.create"`
   - `previous_response_id`
 - tool result input 使用 `function_call_output`。
 - provider options 继续从 request overrides 透传：
@@ -197,6 +226,12 @@ OpenAI/Codex Responses adapter：
   - `include`
   - `reasoning`
 - streaming completed event 继续持久化 `response_items` 和 `continuation`。
+
+Codex Responses adapter：
+
+- HTTP transport 不接收 `previous_response_id`，即使 orchestration 传入 continuation 也必须防御性忽略。
+- Codex-like `previous_response_id + delta input` 只能通过 WebSocket `response.create` 实现。
+- WebSocket transport 已有同步 adapter 与 async 桥接最小路径；input-item prefix、instructions、tool schema fingerprint continuation safety 已落地。剩余 warmup/reuse、原生 async streaming 见专项文档。
 
 非 Responses provider：
 
@@ -209,9 +244,11 @@ OpenAI/Codex Responses adapter：
 - [x] 扩展 `LlmAdapterRequest` continuation 字段。
 - [x] 扩展 `LlmInvocation` provider request preview/ref 字段。
 - [x] OpenAI Responses adapter 支持 `previous_response_id`。
-- [x] Codex Responses adapter 支持 `previous_response_id`。
+- [x] Codex HTTP adapter 禁止发送 `previous_response_id`。
+- [x] Codex WebSocket adapter 支持 `previous_response_id`。
 - [x] Tool result 映射为 `function_call_output`。
 - [x] Provider actual request preview 持久化。
+- [x] Provider actual request preview 包含 ContextSurface/ToolSurface 摘要与 fingerprint。
 - [x] 单测覆盖首轮 request。
 - [x] 单测覆盖 continuation request。
 - [x] 单测覆盖 provider 不支持 continuation 时退化 transcript/tool-result replay。
@@ -543,7 +580,8 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
   evidence builder，把 terminal tool result 合并进 resumed run metadata。
 - 显式 `run.metadata.evidence_frontier` 与 direct tool message 仍作为
   Context Workspace 的归一化入口。
-- Workbench timeline 会追加 `evidence_frontier` item，content 暴露
+- Workbench timeline 会追加 `system_event` item，并用
+  `content.event_type=evidence_frontier` 标识 evidence frontier，content 暴露
   `verified_facts`、`remaining_gaps`、`failed_evidence_paths` 和原始 items，
   不重排既有时间线。
 
@@ -671,7 +709,8 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 
 ## 成功标准
 
-- 最新 Codex/OpenAI Responses invocation 后续轮次出现 `previous_response_id`。
+- 最新 OpenAI Responses invocation 后续轮次出现 `previous_response_id`。
+- 最新 Codex WebSocket invocation 后续轮次出现 `previous_response_id`；Codex HTTP invocation 不再出现 `Unsupported parameter: previous_response_id`。
 - 后续轮次 `messages` 不再线性增长到几十条。
 - Tool result 以 provider-native output item 进入下一轮。
 - Context Tree 只有首轮完整发送；后续通过 delta 或显式 tree replay tool 更新。

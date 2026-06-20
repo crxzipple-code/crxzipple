@@ -1261,7 +1261,7 @@ def _daemon_events_table(
                     "status": _status_label(event.status),
                     "details": _event_details(payload),
                     "trace": _text(event.trace_id),
-                    "trace_route": f"/ui/trace/{event.trace_id}" if event.trace_id else "-",
+                    "trace_route": f"/workbench/traces/{event.trace_id}" if event.trace_id else "-",
                 },
                 status=event.status,
                 tone=_event_tone(event),

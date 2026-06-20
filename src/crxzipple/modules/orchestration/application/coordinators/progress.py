@@ -353,12 +353,13 @@ def _llm_step_summary(payload: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for key in (
         "assistant_progress_item_ids",
-        "context_render_snapshot_id",
         "llm_id",
+        "llm_request_input",
         "llm_response_item_ids",
         "llm_loop_diagnostic",
         "llm_transcript_consumption",
-        "prompt_mode",
+        "request_render_snapshot_id",
+        "runtime_request_mode",
         "session_item_ids",
         "tool_call_session_item_ids",
         "tool_call_names",
@@ -463,10 +464,10 @@ def _assistant_session_item_ids(payload: dict[str, object]) -> tuple[str, ...]:
 def _final_response_summary(payload: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for key in (
-        "context_render_snapshot_id",
         "llm_id",
         "llm_invocation_id",
-        "prompt_mode",
+        "request_render_snapshot_id",
+        "runtime_request_mode",
         "session_item_ids",
         "tool_result_session_item_ids",
         "user_session_item_id",

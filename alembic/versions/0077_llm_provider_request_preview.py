@@ -27,11 +27,6 @@ def upgrade() -> None:
             server_default=sa.text("'{}'"),
         ),
     )
-    op.alter_column(
-        "llm_invocations",
-        "provider_request_payload_preview",
-        server_default=None,
-    )
 
 
 def downgrade() -> None:

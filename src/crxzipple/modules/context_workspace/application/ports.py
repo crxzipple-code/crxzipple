@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from crxzipple.modules.context_workspace.application.models import (
+    BuildContextControlSliceInput,
+    BuildContextObservationSliceInput,
+    ContextControlSlice,
+    ContextSlice,
+)
 from crxzipple.modules.context_workspace.domain import (
     ContextNode,
     ContextNodeSeed,
@@ -26,6 +32,32 @@ class ContextNodeProvider(Protocol):
         ...
 
 
+class ContextSliceBuilder(Protocol):
+    def build_slice(
+        self,
+        *,
+        session_key: str = "",
+        run_id: str = "",
+        audience: str = "llm_request",
+        provider_profile: str | None = None,
+        data: BuildContextObservationSliceInput | None = None,
+    ) -> ContextSlice:
+        ...
+
+
+class ContextControlSliceBuilder(Protocol):
+    def build_control_slice(
+        self,
+        *,
+        session_key: str = "",
+        run_id: str = "",
+        audience: str = "llm_request",
+        provider_profile: str | None = None,
+        data: BuildContextControlSliceInput | None = None,
+    ) -> ContextControlSlice:
+        ...
+
+
 class ContextOwnerRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, ContextNodeProvider] = {}
@@ -46,6 +78,8 @@ class ContextOwnerRegistry:
 
 __all__ = [
     "ContextChildrenRequest",
+    "ContextControlSliceBuilder",
     "ContextNodeProvider",
     "ContextOwnerRegistry",
+    "ContextSliceBuilder",
 ]

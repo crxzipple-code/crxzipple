@@ -105,11 +105,17 @@ class ContextNodeState:
     collapsed: bool = True
     loaded: bool = False
     pinned: bool = False
-    prompt_visible: bool = True
+    snapshot_visible: bool = True
     schema_enabled: bool = False
     opened: bool = False
     consumed: bool = False
     archived: bool = False
+    summary_mode: str = "auto"
+    included_in_next_slice: bool = False
+    included_in_next_tool_surface: bool = False
+    status: str = "available"
+    render_priority: int = 0
+    render_reason: str = ""
 
     def expand(self) -> "ContextNodeState":
         return self.with_updates(collapsed=False, loaded=True)
@@ -123,18 +129,24 @@ class ContextNodeState:
         collapsed: bool | None = None,
         loaded: bool | None = None,
         pinned: bool | None = None,
-        prompt_visible: bool | None = None,
+        snapshot_visible: bool | None = None,
         schema_enabled: bool | None = None,
         opened: bool | None = None,
         consumed: bool | None = None,
         archived: bool | None = None,
+        summary_mode: str | None = None,
+        included_in_next_slice: bool | None = None,
+        included_in_next_tool_surface: bool | None = None,
+        status: str | None = None,
+        render_priority: int | None = None,
+        render_reason: str | None = None,
     ) -> "ContextNodeState":
         return ContextNodeState(
             collapsed=self.collapsed if collapsed is None else collapsed,
             loaded=self.loaded if loaded is None else loaded,
             pinned=self.pinned if pinned is None else pinned,
-            prompt_visible=(
-                self.prompt_visible if prompt_visible is None else prompt_visible
+            snapshot_visible=(
+                self.snapshot_visible if snapshot_visible is None else snapshot_visible
             ),
             schema_enabled=(
                 self.schema_enabled if schema_enabled is None else schema_enabled
@@ -142,6 +154,22 @@ class ContextNodeState:
             opened=self.opened if opened is None else opened,
             consumed=self.consumed if consumed is None else consumed,
             archived=self.archived if archived is None else archived,
+            summary_mode=self.summary_mode if summary_mode is None else summary_mode,
+            included_in_next_slice=(
+                self.included_in_next_slice
+                if included_in_next_slice is None
+                else included_in_next_slice
+            ),
+            included_in_next_tool_surface=(
+                self.included_in_next_tool_surface
+                if included_in_next_tool_surface is None
+                else included_in_next_tool_surface
+            ),
+            status=self.status if status is None else status,
+            render_priority=(
+                self.render_priority if render_priority is None else render_priority
+            ),
+            render_reason=self.render_reason if render_reason is None else render_reason,
         )
 
     def to_payload(self) -> JsonObject:
@@ -149,11 +177,17 @@ class ContextNodeState:
             "collapsed": self.collapsed,
             "loaded": self.loaded,
             "pinned": self.pinned,
-            "prompt_visible": self.prompt_visible,
+            "snapshot_visible": self.snapshot_visible,
             "schema_enabled": self.schema_enabled,
             "opened": self.opened,
             "consumed": self.consumed,
             "archived": self.archived,
+            "summary_mode": self.summary_mode,
+            "included_in_next_slice": self.included_in_next_slice,
+            "included_in_next_tool_surface": self.included_in_next_tool_surface,
+            "status": self.status,
+            "render_priority": self.render_priority,
+            "render_reason": self.render_reason,
         }
 
     @classmethod
@@ -163,11 +197,19 @@ class ContextNodeState:
             collapsed=bool(data.get("collapsed", True)),
             loaded=bool(data.get("loaded", False)),
             pinned=bool(data.get("pinned", False)),
-            prompt_visible=bool(data.get("prompt_visible", True)),
+            snapshot_visible=bool(data.get("snapshot_visible", True)),
             schema_enabled=bool(data.get("schema_enabled", False)),
             opened=bool(data.get("opened", False)),
             consumed=bool(data.get("consumed", False)),
             archived=bool(data.get("archived", False)),
+            summary_mode=str(data.get("summary_mode") or "auto"),
+            included_in_next_slice=bool(data.get("included_in_next_slice", False)),
+            included_in_next_tool_surface=bool(
+                data.get("included_in_next_tool_surface", False),
+            ),
+            status=str(data.get("status") or "available"),
+            render_priority=int(data.get("render_priority") or 0),
+            render_reason=str(data.get("render_reason") or ""),
         )
 
 

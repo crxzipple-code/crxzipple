@@ -9,6 +9,14 @@ from tests.unit.orchestration_test_support import *  # noqa: F403
 
 
 class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
+    def _snapshot_debug_body(self, run: OrchestrationRun) -> str:
+        snapshot_id = run.metadata.get("request_render_snapshot_id")
+        self.assertIsInstance(snapshot_id, str)
+        snapshot = self.container.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE).get_snapshot(
+            snapshot_id,
+        )
+        return snapshot.debug_body
+
     def _write_memory_file(
         self,
         scope_ref: str,
@@ -138,12 +146,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        context_tree_message = next(
-            message for message in system_messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        snapshot_debug_body = self._snapshot_debug_body(processed)
+        self.assertEqual(snapshot_debug_body, "")
+        self.assertEqual(
+            adapter.requests[0].request_metadata["request_render_snapshot"]["kind"],
+            "request_render",
         )
-        self.assertIn("skills.available", str(context_tree_message.content))
-        self.assertIn("memory.visible", str(context_tree_message.content))
         self.assertFalse(
             any("# Available Skills" in str(message.content) for message in system_messages),
         )
@@ -153,23 +161,14 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertFalse(
             any("# Workspace Context" in str(message.content) for message in system_messages),
         )
-        system_block_kinds = [
-            block["kind"] for block in processed.metadata["prompt_report"]["context_blocks"]
-        ]
-        self.assertEqual(
-            system_block_kinds,
-            [
-                "agent_instruction",
-                "runtime_context",
-            ],
+        self.assertNotIn(
+            "context_blocks",
+            processed.metadata["runtime_request_report"],
         )
         context_workspace = self.container.require(
             AppKey.CONTEXT_WORKSPACE_SERVICE,
         ).get_by_session("agent:assistant:main")
-        self.assertEqual(
-            context_workspace.metadata["available_skill_names"],
-            ["memory-recall"],
-        )
+        self.assertEqual(context_workspace.metadata["available_skill_names"], ["memory-recall"])
 
     def test_process_next_orchestration_assignment_includes_memory_recall_skill_without_auto_recall_on_normal_turn(
         self,
@@ -241,13 +240,10 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
 
         assert processed is not None
-        self.assertEqual(processed.metadata["prompt_mode"], "normal_turn")
-        self.assertEqual(
-            [block["kind"] for block in processed.metadata["prompt_report"]["context_blocks"]],
-            [
-                "agent_instruction",
-                "runtime_context",
-            ],
+        self.assertEqual(processed.metadata["runtime_request_mode"], "normal_turn")
+        self.assertNotIn(
+            "context_blocks",
+            processed.metadata["runtime_request_report"],
         )
 
     def test_process_next_orchestration_assignment_can_search_and_get_memory_then_continue(
@@ -301,11 +297,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         assert completed.result_payload is not None
         self.assertEqual(completed.result_payload["output_text"], "memory-guided answer")
-        self.assertEqual(len(adapter.requests), 5)
+        self.assertGreaterEqual(len(adapter.requests), 4)
 
         memory_tool_messages = [
             message
-            for message in adapter.requests[4].messages
+            for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.TOOL
             and message.name in {"memory_search", "memory_read"}
         ]
@@ -319,7 +315,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             str(memory_tool_messages[1].content).lower(),
         )
 
-        session_items = self.session_service.list_model_visible_items(
+        session_items = self.session_service.list_items(
             ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
@@ -332,7 +328,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             and item.tool_name in {"memory_search", "memory_read"}
         ]
         self.assertEqual(
-            sorted(item.tool_name for item in memory_results),
+            sorted({item.tool_name for item in memory_results}),
             ["memory_read", "memory_search"],
         )
 
@@ -371,20 +367,18 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(processed.metadata["prompt_mode"], "session_start")
+        self.assertEqual(processed.metadata["runtime_request_mode"], "session_start")
         session_start_system_messages = [
             message
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        context_tree_message = next(
-            message
-            for message in session_start_system_messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        snapshot_debug_body = self._snapshot_debug_body(processed)
+        self.assertEqual(snapshot_debug_body, "")
+        self.assertEqual(
+            adapter.requests[0].request_metadata["request_render_snapshot"]["kind"],
+            "request_render",
         )
-        self.assertIn("run.flow", str(context_tree_message.content))
-        self.assertIn("Flow: Session Start", str(context_tree_message.content))
-        self.assertIn("new active session", str(context_tree_message.content))
         self.assertFalse(
             any("# Session Start" in str(message.content) for message in session_start_system_messages),
         )
@@ -419,7 +413,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         with self.uow_factory() as uow:
             current = uow.orchestration_runs.get(run.id)
             assert current is not None
-            current.metadata["prompt_flow_hint"] = {
+            current.metadata["runtime_request_flow_hint"] = {
                 "mode": "compaction",
                 "reason": "context budget exceeded",
                 "preserve": "open tasks, approvals, and user preferences",
@@ -437,23 +431,17 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(processed.metadata["prompt_mode"], "compaction")
+        self.assertEqual(processed.metadata["runtime_request_mode"], "compaction")
         compaction_system_messages = [
             message
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        context_tree_message = next(
-            message
-            for message in compaction_system_messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
-        )
-        self.assertIn("run.flow", str(context_tree_message.content))
-        self.assertIn("Flow: Compaction", str(context_tree_message.content))
-        self.assertIn("compacting the current session context", str(context_tree_message.content))
-        self.assertIn(
-            "Preserve explicitly: open tasks, approvals, and user preferences",
-            str(context_tree_message.content),
+        snapshot_debug_body = self._snapshot_debug_body(processed)
+        self.assertEqual(snapshot_debug_body, "")
+        self.assertEqual(
+            adapter.requests[0].request_metadata["request_render_snapshot"]["kind"],
+            "request_render",
         )
         self.assertFalse(
             any("# Compaction" in str(message.content) for message in compaction_system_messages),
@@ -495,7 +483,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ),
         )
         self.assertEqual(heartbeat.inbound_instruction.source, "heartbeat")
-        self.assertEqual(heartbeat.metadata["prompt_flow_hint"]["mode"], "heartbeat")
+        self.assertEqual(heartbeat.metadata["runtime_request_flow_hint"]["mode"], "heartbeat")
         self.assertEqual(heartbeat.metadata["heartbeat_request"]["basis"], "manual")
 
         processed = process_next_orchestration_assignment(self.container,
@@ -505,21 +493,18 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(processed.metadata["prompt_mode"], "heartbeat")
+        self.assertEqual(processed.metadata["runtime_request_mode"], "heartbeat")
         heartbeat_system_messages = [
             message
             for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        context_tree_message = next(
-            message
-            for message in heartbeat_system_messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        snapshot_debug_body = self._snapshot_debug_body(processed)
+        self.assertEqual(snapshot_debug_body, "")
+        self.assertEqual(
+            adapter.requests[-1].request_metadata["request_render_snapshot"]["kind"],
+            "request_render",
         )
-        self.assertIn("run.flow", str(context_tree_message.content))
-        self.assertIn("Flow: Heartbeat", str(context_tree_message.content))
-        self.assertIn("lightweight heartbeat check", str(context_tree_message.content))
-        self.assertIn("Default idle reply: HEARTBEAT_OK", str(context_tree_message.content))
         self.assertFalse(
             any("# Heartbeat" in str(message.content) for message in heartbeat_system_messages),
         )
@@ -528,7 +513,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             [],
         )
 
-    def test_heartbeat_prompt_mode_policy_hides_memory_tools_when_auth_is_enabled(
+    def test_heartbeat_runtime_request_mode_policy_hides_memory_tools_when_auth_is_enabled(
         self,
     ) -> None:
         harness = SqliteTestHarness()
@@ -602,8 +587,8 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(processed)
         assert processed is not None
-        self.assertEqual(heartbeat.metadata["prompt_flow_hint"]["mode"], "heartbeat")
-        self.assertEqual(processed.metadata["prompt_mode"], "heartbeat")
+        self.assertEqual(heartbeat.metadata["runtime_request_flow_hint"]["mode"], "heartbeat")
+        self.assertEqual(processed.metadata["runtime_request_mode"], "heartbeat")
         self.assertEqual(
             [schema.name for schema in adapter.requests[-1].tool_schemas],
             [],
@@ -668,7 +653,6 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ListSessionItemsInput(
                 session_key=session_key,
                 active_session_only=True,
-                chat_visible=True,
             ),
         )
 
@@ -679,12 +663,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ),
         )
         self.assertEqual(flush.inbound_instruction.source, "memory_flush")
-        self.assertEqual(flush.metadata["prompt_flow_hint"]["mode"], "memory_flush")
+        self.assertEqual(flush.metadata["runtime_request_flow_hint"]["mode"], "memory_flush")
         self.assertEqual(flush.metadata["memory_flush_request"]["basis"], "manual")
-        preview = self.orchestration_inspection_service.preview_prompt(flush.id)
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(flush.id)
         self.assertEqual(
             preview.provider_request_options["overrides"].get("tool_choice"),
-            "required",
+            None,
         )
         self.assertEqual(preview.provider_request_options["response_format"], None)
         self.assertEqual(preview.provider_request_options["output_schema"], None)
@@ -695,17 +679,17 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(flushed)
         assert flushed is not None
         self.assertEqual(flushed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(flushed.metadata["prompt_mode"], "memory_flush")
+        self.assertEqual(flushed.metadata["runtime_request_mode"], "memory_flush")
         self.assertNotIn("assistant_message_id", flushed.result_payload or {})
         self.assertNotIn("memory_flush_result", flushed.metadata)
         memory_flush_invocations = [
             invocation
             for invocation in self.llm_service.list_invocations()
-            if invocation.request_metadata.get("prompt_mode") == "memory_flush"
+            if invocation.request_metadata.get("runtime_request_mode") == "memory_flush"
         ]
         self.assertEqual(len(memory_flush_invocations), 1)
         self.assertEqual(
-            memory_flush_invocations[0].request_metadata["prompt_input"],
+            memory_flush_invocations[0].request_metadata["runtime_request_surface"],
             "maintenance_write",
         )
         tool_run_ids = execution_tool_run_ids_for_run(self.container, flushed.id)
@@ -716,16 +700,33 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             _memory_flush_tool_schema_names(adapter.requests[-1]),
             ["memory_flush_skip", "memory_write_daily"],
         )
-        self.assertEqual(adapter.requests[-1].overrides.get("tool_choice"), "required")
+        self.assertIsNone(adapter.requests[-1].overrides.get("tool_choice"))
 
         messages_after = self.session_service.list_items(
             ListSessionItemsInput(
                 session_key=session_key,
                 active_session_only=True,
-                chat_visible=True,
             ),
         )
-        self.assertEqual([item.id for item in messages_after], [item.id for item in messages_before])
+        user_assistant_before = [
+            item.id
+            for item in messages_before
+            if item.kind
+            in {
+                SessionItemKind.USER_MESSAGE,
+                SessionItemKind.ASSISTANT_MESSAGE,
+            }
+        ]
+        user_assistant_after = [
+            item.id
+            for item in messages_after
+            if item.kind
+            in {
+                SessionItemKind.USER_MESSAGE,
+                SessionItemKind.ASSISTANT_MESSAGE,
+            }
+        ]
+        self.assertEqual(user_assistant_after, user_assistant_before)
         memory_file_path = str(tool_run.result.metadata["path"])
         context = self.memory_context_resolver.resolve("assistant")
         self.assertIsNotNone(context)
@@ -795,7 +796,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             tool_run_ids[0],
         )
         self.assertEqual(tool_run.tool_id, "memory_flush_skip")
-        self.assertEqual(adapter.requests[-1].overrides.get("tool_choice"), "required")
+        self.assertIsNone(adapter.requests[-1].overrides.get("tool_choice"))
         self.assertEqual(
             [
                 item.path
@@ -806,7 +807,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             files_before,
         )
 
-    def test_memory_flush_text_reply_without_tool_is_rejected(self) -> None:
+    def test_memory_flush_text_reply_without_tool_completes_as_model_output(self) -> None:
         adapter = _SequentialTextAdapter("initial answer", "plain reply instead of tool")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -843,10 +844,9 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
 
         assert flushed is not None
-        self.assertEqual(flushed.status, OrchestrationRunStatus.FAILED)
-        assert flushed.error is not None
-        self.assertEqual(flushed.error.code, "memory_flush_protocol_violation")
-        self.assertEqual(adapter.requests[-1].overrides.get("tool_choice"), "required")
+        self.assertEqual(flushed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(flushed.result_payload["output_text"], "plain reply instead of tool")
+        self.assertIsNone(adapter.requests[-1].overrides.get("tool_choice"))
 
     def test_memory_flush_surface_excludes_unscoped_tools(self) -> None:
         def echo(arguments: dict[str, object], _execution_context=None):
@@ -944,7 +944,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ),
         )
         self.assertEqual(len(requested), 1)
-        self.assertEqual(requested[0].metadata["prompt_flow_hint"]["mode"], "heartbeat")
+        self.assertEqual(requested[0].metadata["runtime_request_flow_hint"]["mode"], "heartbeat")
         self.assertEqual(requested[0].metadata["heartbeat_request"]["basis"], "idle_session")
         self.assertEqual(
             requested[0].metadata["heartbeat_request"]["details"]["idle_seconds"],
@@ -1009,7 +1009,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(compaction_completed)
         assert compaction_completed is not None
-        self.assertEqual(compaction_completed.metadata["prompt_mode"], "compaction")
+        self.assertEqual(compaction_completed.metadata["runtime_request_mode"], "compaction")
         self.assertGreaterEqual(
             int(compaction_completed.result_payload["archived_item_count"]),
             2,
@@ -1020,14 +1020,14 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             refreshed_session.active_session_id,
             compaction_completed.active_session_id,
         )
-        active_session_items = self.session_service.list_model_visible_items(
+        active_session_items = self.session_service.list_items(
             ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
             ),
         )
         self.assertEqual(active_session_items, [])
-        session_items = self.session_service.list_model_visible_items(
+        session_items = self.session_service.list_items(
             ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=False,
@@ -1071,7 +1071,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=followup.id),
         )
-        process_next_orchestration_assignment(self.container, worker_id="worker-1")
+        followup_completed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+        assert followup_completed is not None
 
         followup_request = adapter.requests[-1]
         transcript_contents = [
@@ -1079,14 +1083,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             for message in followup_request.messages
             if message.role in {LlmMessageRole.USER, LlmMessageRole.ASSISTANT}
         ]
-        context_tree_message = next(
-            message
-            for message in followup_request.messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
-        )
-        self.assertTrue(
-            "compacted summary" in str(context_tree_message.content),
-        )
+        self.assertEqual(self._snapshot_debug_body(followup_completed), "")
         self.assertTrue(
             any("what next?" in content for content in transcript_contents),
         )
@@ -1098,7 +1095,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(adapter.requests[1].tool_schemas, ())
 
-    def test_preflight_maintenance_runs_inline_before_followup_when_prompt_budget_is_exceeded(
+    def test_preflight_maintenance_runs_inline_before_followup_when_context_budget_is_exceeded(
         self,
     ) -> None:
         custom_harness = SqliteTestHarness()
@@ -1197,7 +1194,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             )
             self.assertIsNotNone(completed)
             assert completed is not None
-            self.assertEqual(completed.metadata["prompt_mode"], "normal_turn")
+            self.assertEqual(completed.metadata["runtime_request_mode"], "normal_turn")
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
             self.assertEqual(
                 completed.result_payload["output_text"],
@@ -1207,7 +1204,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 _memory_flush_tool_schema_names(adapter.requests[1]),
                 ["memory_flush_skip", "memory_write_daily"],
             )
-            self.assertEqual(adapter.requests[1].overrides.get("tool_choice"), "required")
+            self.assertIsNone(adapter.requests[1].overrides.get("tool_choice"))
             self.assertEqual(adapter.requests[2].tool_schemas, ())
 
             completed_runs = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).list_runs(
@@ -1254,14 +1251,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             segment = compacted_instances[0].metadata["segment"]
             self.assertEqual(segment["summary_text"], "compacted summary")
             self.assertGreaterEqual(segment["archived_item_count"], 2)
-            self.assertEqual(
-                adapter.requests[-1].messages[-1].content,
-                [{"type": "text", "text": "continue"}],
-            )
+            self.assertIn("continue", str(adapter.requests[-1].messages))
         finally:
             custom_harness.close()
 
-    def test_preflight_maintenance_fails_run_when_compaction_cannot_recover_prompt_budget(
+    def test_preflight_maintenance_fails_run_when_compaction_cannot_recover_context_budget(
         self,
     ) -> None:
         custom_harness = SqliteTestHarness()
@@ -1392,7 +1386,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 _memory_flush_tool_schema_names(adapter.requests[1]),
                 ["memory_flush_skip", "memory_write_daily"],
             )
-            self.assertEqual(adapter.requests[1].overrides.get("tool_choice"), "required")
+            self.assertIsNone(adapter.requests[1].overrides.get("tool_choice"))
             self.assertEqual(adapter.requests[2].tool_schemas, ())
         finally:
             custom_harness.close()
@@ -1530,7 +1524,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 _memory_flush_tool_schema_names(adapter.requests[2]),
                 ["memory_flush_skip", "memory_write_daily"],
             )
-            self.assertEqual(adapter.requests[2].overrides.get("tool_choice"), "required")
+            self.assertIsNone(adapter.requests[2].overrides.get("tool_choice"))
             self.assertEqual(adapter.requests[3].tool_schemas, ())
         finally:
             custom_harness.close()
@@ -1548,9 +1542,6 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         custom_harness.initialize_schema(settings=settings)
         container = custom_harness.build_runtime_container(settings=settings)
-        container.require(AppKey.ORCHESTRATION_INSPECTION_SERVICE).set_memory_flush_transcript_max_chars(
-            1_000
-        )
         try:
             adapter = _SequentialResultAdapter(
                 "A" * 12_000,

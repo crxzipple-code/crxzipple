@@ -1,7 +1,7 @@
 """tool run surface and call refs
 
 Revision ID: 0075_tool_run_surface_call_refs
-Revises: 0074_context_render_snapshot_refs
+Revises: 0074_context_snapshot_refs
 Create Date: 2026-06-12 00:00:00
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "0075_tool_run_surface_call_refs"
-down_revision = "0074_context_render_snapshot_refs"
+down_revision = "0074_context_snapshot_refs"
 branch_labels = None
 depends_on = None
 

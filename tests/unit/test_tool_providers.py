@@ -176,7 +176,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
         self.assertEqual(
             [len(namespace.local_bindings) for namespace in namespaces],
-            [0, 65, 2, 9, 1, 0, 1, 4, 9, 0, 0, 2, 8, 7, 2, 6],
+            [0, 63, 2, 13, 1, 0, 1, 4, 9, 0, 0, 2, 8, 7, 2, 6],
         )
         self.assertEqual(
             [len(namespace.remote_bindings) for namespace in namespaces],
@@ -193,14 +193,14 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [plan.namespace for plan in plans],
             [ns.name for ns in namespaces],
         )
-        self.assertTrue(all(plan.prompt for plan in plans))
+        self.assertTrue(all(plan.runtime_request for plan in plans))
         command_plan = next(plan for plan in plans if plan.namespace == "command")
-        self.assertEqual(command_plan.prompt["title"], "Command Execution")
-        self.assertIn("shell commands", command_plan.prompt["summary"])
+        self.assertEqual(command_plan.runtime_request["title"], "Command Execution")
+        self.assertIn("shell commands", command_plan.runtime_request["summary"])
         sessions_plan = next(plan for plan in plans if plan.namespace == "sessions")
-        sessions_prompt_groups = sessions_plan.prompt["groups"]
+        sessions_runtime_request_groups = sessions_plan.runtime_request["groups"]
         self.assertEqual(
-            list(sessions_prompt_groups),
+            list(sessions_runtime_request_groups),
             [
                 "state_history",
                 "delegation",
@@ -210,23 +210,23 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
         self.assertIn(
             "session-local execution history",
-            sessions_prompt_groups["state_history"]["summary"],
+            sessions_runtime_request_groups["state_history"]["summary"],
         )
         self.assertIn(
             "delegated work should be cancelled",
-            sessions_prompt_groups["session_tree"]["summary"],
+            sessions_runtime_request_groups["session_tree"]["summary"],
         )
         self.assertEqual(
             sorted(
                 function_id
-                for group in sessions_prompt_groups.values()
+                for group in sessions_runtime_request_groups.values()
                 for function_id in group["function_ids"]
             ),
             sorted(handler.tool.id for handler in sessions_plan.local_handlers),
         )
         browser_plan = next(plan for plan in plans if plan.namespace == "browser")
-        self.assertEqual(browser_plan.prompt["title"], "Browser Automation")
-        self.assertEqual(len(browser_plan.local_handlers), 65)
+        self.assertEqual(browser_plan.runtime_request["title"], "Browser Automation")
+        self.assertEqual(len(browser_plan.local_handlers), 63)
         mobile_plan = next(plan for plan in plans if plan.namespace == "mobile")
         self.assertEqual(
             [dependency.id for dependency in mobile_plan.local_handlers[0].dependencies],
@@ -320,8 +320,8 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     "context_tree_service": self.container.require(
                         AppKey.CONTEXT_TREE_SERVICE,
                     ),
-                    "context_render_service": self.container.require(
-                        AppKey.CONTEXT_RENDER_SERVICE,
+                    "context_observation_snapshot_service": self.container.require(
+                        AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE,
                     ),
                     "credential_provider": self.access_service,
                     "memory_runtime_service": self.memory_runtime_service,
@@ -344,13 +344,17 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             sorted(
                 [
                     "echo",
+                    "capability.search",
                     "context_tree.collapse",
+                    "context_tree.diff_since",
                     "context_tree.disable_tool_schema",
                     "context_tree.enable_tool_schema",
                     "context_tree.estimate",
                     "context_tree.expand",
                     "context_tree.list",
                     "context_tree.pin",
+                    "context_tree.read_snapshot",
+                    "context_tree.render_current",
                     "context_tree.update_plan",
                     "context_tree.unpin",
                     "apply_patch",
@@ -441,10 +445,10 @@ local_tools:
 
         self.assertEqual(plan.namespace, "browser")
         self.assertEqual(plan.kind, "local_package")
-        self.assertEqual(len(plan.local_bindings), 65)
+        self.assertEqual(len(plan.local_bindings), 63)
         self.assertEqual(
-            plan.prompt["groups"]["navigation"]["default_tool_schema_source"],
-            "bundled.local_package.browser.prompt_group.navigation",
+            plan.runtime_request["groups"]["navigation"]["default_tool_schema_source"],
+            "bundled.local_package.browser.runtime_request_group.navigation",
         )
 
     def test_mobile_tool_package_fails_fast_without_required_runtime_services(self) -> None:
@@ -676,44 +680,44 @@ local_tools:
         self.assertEqual(source.config["source"], "bundled_tool_package")
         self.assertEqual(source.config["namespace"], "browser")
         self.assertEqual(source.config["package_kind"], "local_package")
-        prompt = source.config["prompt"]
-        self.assertEqual(prompt["title"], "Browser Automation")
-        self.assertIn("not just a DOM snapshot tool", prompt["summary"])
-        self.assertIn("verifiable browser evidence", prompt["summary"])
-        self.assertIn("Avoid repeated tab inventory", prompt["summary"])
-        self.assertIn("groups", prompt)
-        prompt_groups = prompt["groups"]
-        self.assertIn("navigation", prompt_groups)
-        self.assertIn("network", prompt_groups)
+        runtime_request = source.config["runtime_request"]
+        self.assertEqual(runtime_request["title"], "Browser Automation")
+        self.assertIn("not just a DOM snapshot tool", runtime_request["summary"])
+        self.assertIn("verifiable browser facts", runtime_request["summary"])
+        self.assertIn("Avoid repeated tab inventory", runtime_request["summary"])
+        self.assertIn("groups", runtime_request)
+        runtime_request_groups = runtime_request["groups"]
+        self.assertIn("navigation", runtime_request_groups)
+        self.assertIn("network", runtime_request_groups)
         self.assertEqual(
-            prompt_groups["navigation"]["default_tool_schema_ids"],
+            runtime_request_groups["navigation"]["default_tool_schema_ids"],
             ["browser.navigate"],
         )
-        self.assertEqual(prompt_groups["navigation"]["default_tool_schema_max_count"], 1)
+        self.assertEqual(runtime_request_groups["navigation"]["default_tool_schema_max_count"], 1)
         self.assertIn(
             "not a repeated pre-flight check",
-            prompt_groups["navigation"]["summary"],
+            runtime_request_groups["navigation"]["summary"],
         )
-        self.assertIn("date/calendar pickers", prompt_groups["forms_overlays"]["summary"])
-        self.assertIn("live frontend scripts", prompt_groups["code_insight"]["summary"])
-        self.assertIn("script/code search as an index", prompt_groups["code_insight"]["summary"])
-        self.assertIn("browser.evaluate", prompt_groups["code_insight"]["summary"])
-        self.assertIn("observable evidence", prompt_groups["diagnostics"]["summary"])
+        self.assertIn("date/calendar pickers", runtime_request_groups["forms_overlays"]["summary"])
+        self.assertIn("live frontend scripts", runtime_request_groups["code_insight"]["summary"])
+        self.assertIn("script/code search as an index", runtime_request_groups["code_insight"]["summary"])
+        self.assertIn("browser.evaluate", runtime_request_groups["code_insight"]["summary"])
+        self.assertIn("observable evidence", runtime_request_groups["diagnostics"]["summary"])
         self.assertEqual(
-            prompt_groups["observation"]["default_tool_schema_ids"],
+            runtime_request_groups["observation"]["default_tool_schema_ids"],
             ["browser.observe"],
         )
-        self.assertEqual(prompt_groups["network"]["default_tool_schema_max_count"], 6)
+        self.assertEqual(runtime_request_groups["network"]["default_tool_schema_max_count"], 6)
         self.assertNotIn(
             "browser.evaluate",
-            prompt_groups["page_interaction"]["function_ids"],
+            runtime_request_groups["page_interaction"]["function_ids"],
         )
-        self.assertIn("browser.evaluate", prompt_groups["code_insight"]["function_ids"])
+        self.assertIn("browser.evaluate", runtime_request_groups["code_insight"]["function_ids"])
         self.assertIn(
             "browser.evaluate",
-            prompt_groups["code_insight"]["default_tool_schema_ids"],
+            runtime_request_groups["code_insight"]["default_tool_schema_ids"],
         )
-        self.assertEqual(prompt_groups["code_insight"]["default_tool_schema_max_count"], 8)
+        self.assertEqual(runtime_request_groups["code_insight"]["default_tool_schema_max_count"], 6)
 
         source_ids = {item.source_id for item in source_query.list_sources()}
         self.assertIn("bundled.local_package.browser", source_ids)
@@ -767,9 +771,7 @@ local_tools:
                 "browser.performance.metrics",
                 "browser.permissions.clear",
                 "browser.permissions.grant",
-                "browser.runtime.call_client",
                 "browser.runtime.inspect",
-                "browser.runtime.probe_client",
                 "browser.screenshot",
                 "browser.script.extract_request",
                 "browser.script.find_request",
@@ -845,24 +847,8 @@ local_tools:
             "endpoint, HTTP method",
             functions_by_id["browser.script.extract_request"].description,
         )
-        probe_schema = functions_by_id["browser.runtime.probe_client"].input_schema[
-            "properties"
-        ]
-        self.assertEqual(probe_schema["limit"]["maximum"], 80)
-        self.assertEqual(probe_schema["preview_chars"]["maximum"], 4000)
-        self.assertIn(
-            "Read-only probe",
-            functions_by_id["browser.runtime.probe_client"].description,
-        )
-        call_schema = functions_by_id["browser.runtime.call_client"].input_schema[
-            "properties"
-        ]
-        self.assertEqual(call_schema["max_result_chars"]["maximum"], 200000)
-        self.assertIn("arguments", call_schema)
-        self.assertIn(
-            "Call a resolved page-context client method",
-            functions_by_id["browser.runtime.call_client"].description,
-        )
+        self.assertNotIn("browser.runtime.probe_client", functions_by_id)
+        self.assertNotIn("browser.runtime.call_client", functions_by_id)
         for function in functions:
             self.assertEqual(function.runtime_kind, ToolFunctionRuntimeKind.LOCAL)
             self.assertEqual(function.source_id, "bundled.local_package.browser")
@@ -891,13 +877,13 @@ local_tools:
         for runtime_key in function_ids:
             self.assertIsNotNone(registry.get_handler(runtime_key))
         self.assertIsNone(registry.get_handler("browser_snapshot"))
-        prompt_group_function_ids = sorted(
+        runtime_request_group_function_ids = sorted(
             function_id
-            for group in prompt_groups.values()
+            for group in runtime_request_groups.values()
             for function_id in group["function_ids"]
         )
-        self.assertEqual(prompt_group_function_ids, function_ids)
-        bundles = source_query.list_prompt_bundles(tuple(function_ids))
+        self.assertEqual(runtime_request_group_function_ids, function_ids)
+        bundles = source_query.list_runtime_request_bundles(tuple(function_ids))
         self.assertEqual(len(bundles), 1)
         self.assertEqual(bundles[0].title, "Browser Automation")
         self.assertEqual(
@@ -1028,12 +1014,6 @@ local_tools:
             "browser.emulation.set": {"width": 390, "height": 844},
             "browser.diagnostics.collect": {},
             "browser.runtime.inspect": {},
-            "browser.runtime.probe_client": {"object_path": "$nuxt.$http.shopping"},
-            "browser.runtime.call_client": {
-                "object_path": "$nuxt.$http.shopping",
-                "method_name": "getShopping",
-                "arguments": [{"depCityCode": "KMG"}],
-            },
             "browser.script.list": {},
             "browser.script.find_request": {"path": "/api/flights/search"},
             "browser.code.search": {"query": "fetch"},
@@ -1108,7 +1088,7 @@ local_tools:
         result = asyncio.run(handlers["browser.click"]({"target_id": "tab-1", "ref": "r1"}))
 
         self.assertEqual(result.metadata["tool"], "browser.click")
-        self.assertEqual(len(result.blocks), 2)
+        self.assertEqual(len(result.blocks), 1)
         text = result.blocks[0]["text"]
         self.assertIn("Browser click completed.", text)
         self.assertIn("- Tool: ok", text)
@@ -1118,11 +1098,8 @@ local_tools:
             "- Next: use browser.action.trace or browser.observe to verify the next step",
             text,
         )
-        self.assertIn("Evidence path: stateful_interaction", result.blocks[1]["text"])
-        self.assertEqual(
-            result.metadata["browser_evidence"]["evidence_path_key"],
-            "stateful_interaction",
-        )
+        self.assertNotIn("Evidence path:", text)
+        self.assertNotIn("evidence_path_key", result.metadata["browser_evidence"])
 
     def test_browser_action_trace_handler_normalizes_wrapped_action_payload(self) -> None:
         class _Store:
@@ -1271,10 +1248,7 @@ local_tools:
             "- Suggested tools: browser.observe, browser.dom.clickability, browser.dom.inspect",
             result.blocks[0]["text"],
         )
-        self.assertIn(
-            "- Evidence path: observe again",
-            result.blocks[0]["text"],
-        )
+        self.assertNotIn("Evidence path:", result.blocks[0]["text"])
         self.assertEqual(len(result.blocks), 2)
         artifact_block = result.blocks[1]
         self.assertEqual(artifact_block["type"], "file_ref")

@@ -198,7 +198,7 @@ Codex 源码参考：
 落点：
 
 - `src/crxzipple/modules/orchestration/application/prompt_transcript.py`
-- `src/crxzipple/modules/orchestration/application/provider_request.py`
+- `src/crxzipple/modules/orchestration/application/runtime_llm_request.py`
 - `src/crxzipple/app/integration/context_workspace_session.py`
 
 2026-06-09 收口状态：
@@ -920,7 +920,7 @@ PYTHONPATH=src pytest -q tests/unit/test_context_workspace_tool_adapter.py::test
 PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_prompt_transcript.py
 PYTHONPATH=src pytest -q tests/unit/test_context_workspace_session_adapter.py tests/unit/test_orchestration_context.py
 PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py -k "preview or recorded_run_snapshot" tests/unit/test_turns_http.py
-PYTHONPATH=src pytest -q tests/unit/test_orchestration_provider_request_builder.py::test_request_metadata_carries_budget_fields_from_snapshot_metadata tests/unit/test_orchestration_provider_request_builder.py::test_browser_investigation_affordance_flags_dom_form_only_schema_surface tests/unit/test_orchestration_provider_request_builder.py::test_browser_investigation_affordance_accepts_runtime_network_schema_surface
+PYTHONPATH=src pytest -q tests/unit/test_orchestration_runtime_llm_request_builder.py::test_request_metadata_carries_budget_fields_from_snapshot_metadata tests/unit/test_orchestration_runtime_llm_request_builder.py::test_browser_investigation_affordance_flags_dom_form_only_schema_surface tests/unit/test_orchestration_runtime_llm_request_builder.py::test_browser_investigation_affordance_accepts_runtime_network_schema_surface
 PYTHONPATH=src pytest -q tests/unit/test_browser_tool_http.py::BrowserToolHttpTestCase::test_browser_investigation_fixture_supports_runtime_script_network_route
 PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py::BrowserPlaywrightRuntimeActionsTestCase::test_network_inspect_returns_performance_entries_and_cdp_facts tests/unit/test_browser_playwright_runtime_actions.py::BrowserPlaywrightRuntimeActionsTestCase::test_network_inspect_summarizes_large_cdp_resource_tree
 PYTHONPATH=src pytest -q tests/unit/test_browser_tool_application.py tests/unit/test_browser_observation.py
@@ -942,13 +942,13 @@ PYTHONPATH=src pytest -q tests/integration/test_browser_investigation_route.py
 2026-06-09 追加收口已执行：
 
 ```bash
-PYTHONPATH=src pytest -q tests/unit/test_context_snapshot_metadata.py tests/unit/test_orchestration_provider_request_builder.py tests/unit/test_orchestration_context_workspace_snapshot.py::test_context_workspace_snapshot_metadata_locates_session_message_nodes tests/unit/test_orchestration_context_workspace_snapshot.py::test_context_workspace_adapter_records_tree_snapshot_for_run_prompt
-PYTHONPATH=src pytest -q tests/unit/test_context_tree_tool.py tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_workspace_root_nodes.py tests/unit/test_context_snapshot_metadata.py tests/unit/test_orchestration_provider_request_builder.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_prompt_transcript.py tests/unit/test_context_workspace_session_adapter.py
+PYTHONPATH=src pytest -q tests/unit/test_context_snapshot_metadata.py tests/unit/test_orchestration_runtime_llm_request_builder.py tests/unit/test_orchestration_context_workspace_snapshot.py::test_context_workspace_snapshot_metadata_locates_session_message_nodes tests/unit/test_orchestration_context_workspace_snapshot.py::test_context_workspace_adapter_records_tree_snapshot_for_run_prompt
+PYTHONPATH=src pytest -q tests/unit/test_context_tree_tool.py tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_workspace_root_nodes.py tests/unit/test_context_snapshot_metadata.py tests/unit/test_orchestration_runtime_llm_request_builder.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_prompt_transcript.py tests/unit/test_context_workspace_session_adapter.py
 PYTHONPATH=src pytest -q tests/unit/test_browser_observation.py tests/unit/test_app_assembly_targets.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_tool_providers.py
-PYTHONPATH=src pytest -q tests/unit/test_browser_tool_http.py::BrowserToolHttpTestCase::test_browser_investigation_fixture_supports_runtime_script_network_route tests/unit/test_orchestration_provider_request_builder.py tests/unit/test_context_provider_mirror.py
-PYTHONPATH=src pytest -q tests/unit/test_app_assembly_targets.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_browser_observation.py tests/unit/test_browser_tool_http.py tests/unit/test_tool_providers.py tests/unit/test_orchestration_provider_request_builder.py tests/unit/test_context_provider_mirror.py
+PYTHONPATH=src pytest -q tests/unit/test_browser_tool_http.py::BrowserToolHttpTestCase::test_browser_investigation_fixture_supports_runtime_script_network_route tests/unit/test_orchestration_runtime_llm_request_builder.py tests/unit/test_context_provider_mirror.py
+PYTHONPATH=src pytest -q tests/unit/test_app_assembly_targets.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_browser_observation.py tests/unit/test_browser_tool_http.py tests/unit/test_tool_providers.py tests/unit/test_orchestration_runtime_llm_request_builder.py tests/unit/test_context_provider_mirror.py
 PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_tool_providers.py tests/unit/test_context_workspace_root_nodes.py
-PYTHONPATH=src pytest -q tests/unit/test_app_assembly_targets.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_browser_observation.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_tool_providers.py tests/unit/test_orchestration_provider_request_builder.py tests/unit/test_context_provider_mirror.py tests/unit/test_context_workspace_root_nodes.py
+PYTHONPATH=src pytest -q tests/unit/test_app_assembly_targets.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_browser_observation.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_tool_providers.py tests/unit/test_orchestration_runtime_llm_request_builder.py tests/unit/test_context_provider_mirror.py tests/unit/test_context_workspace_root_nodes.py
 PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py
 PYTHONPATH=src pytest -q tests/unit/test_tool_providers.py tests/unit/test_app_assembly_targets.py tests/unit/test_context_workspace_tool_adapter.py
 python -m py_compile src/crxzipple/modules/browser/infrastructure/script_insight.py tools/browser/local.py src/crxzipple/app/assembly/tool_sources/browser.py src/crxzipple/app/assembly/tool_handlers/browser.py

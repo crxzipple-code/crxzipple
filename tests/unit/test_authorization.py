@@ -120,6 +120,14 @@ class AuthorizationTestCase(unittest.TestCase):
                 context=AuthorizationContext(attrs={"interface": "http"}),
             ),
         )
+        llm_warmup_decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="llm.warmup",
+                resource=AuthorizationResource(kind="llm_profile", id="writer"),
+                context=AuthorizationContext(attrs={"interface": "http"}),
+            ),
+        )
         denied_decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="cli"),
@@ -135,6 +143,11 @@ class AuthorizationTestCase(unittest.TestCase):
 
         self.assertTrue(llm_decision.allowed)
         self.assertIn("allow_llm_invocation", llm_decision.matched_policy_ids)
+        self.assertTrue(llm_warmup_decision.allowed)
+        self.assertIn(
+            "allow_llm_invocation",
+            llm_warmup_decision.matched_policy_ids,
+        )
         self.assertFalse(denied_decision.allowed)
         self.assertEqual(denied_decision.matched_policy_ids, ())
 
@@ -856,7 +869,7 @@ class AuthorizationTestCase(unittest.TestCase):
                     attrs={
                         "interface": "http",
                         "agent_id": "assistant",
-                        "prompt_mode": "heartbeat",
+                        "runtime_request_mode": "heartbeat",
                         "surface": "maintenance",
                     },
                 ),
@@ -946,7 +959,7 @@ class AuthorizationTestCase(unittest.TestCase):
                     attrs={
                         "interface": "http",
                         "agent_id": "assistant",
-                        "prompt_mode": "memory_flush",
+                        "runtime_request_mode": "memory_flush",
                         "surface": "maintenance_write",
                         "surface_contract": "declared_only",
                     },
@@ -1000,7 +1013,7 @@ class AuthorizationTestCase(unittest.TestCase):
                     attrs={
                         "interface": "http",
                         "agent_id": "assistant",
-                        "prompt_mode": "memory_flush",
+                        "runtime_request_mode": "memory_flush",
                         "surface": "maintenance_write",
                         "surface_contract": "declared_only",
                     },

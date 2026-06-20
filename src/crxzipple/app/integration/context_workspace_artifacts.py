@@ -64,7 +64,6 @@ class ArtifactContextNodeProvider:
                 ListSessionItemsInput(
                     session_key=request.workspace.session_key,
                     active_session_only=False,
-                    trace_visible=True,
                     limit=self._item_limit,
                 ),
             )

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crxzipple.app.integration.skill_prompt_resolution import (
+from crxzipple.app.integration.skill_runtime_request_resolution import (
     SkillAuthorizationServiceAdapter,
 )
 from crxzipple.modules.authorization.application import AuthorizationApplicationService
@@ -19,8 +19,8 @@ from crxzipple.modules.skills.application import (
     SkillDraftCreateRequest,
     SkillDraftIntent,
     SkillManager,
-    SkillPromptResolutionContext,
-    SkillPromptResolver,
+    SkillRuntimeRequestResolutionContext,
+    SkillRuntimeRequestResolver,
 )
 from crxzipple.modules.skills.application.events import (
     SKILL_DRAFT_APPLY_FAILED_EVENT,
@@ -156,7 +156,7 @@ class _FakeOwnerCatalogRepository:
 
 
 class SkillsContextTestCase(unittest.TestCase):
-    def test_manager_builds_prompt_catalog_from_available_skills(self) -> None:
+    def test_manager_builds_runtime_request_catalog_from_available_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             workspace = root / "workspace"
@@ -177,7 +177,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 ),
             )
 
-            catalog = manager.build_prompt_catalog(
+            catalog = manager.build_runtime_request_catalog(
                 workspace_dir=str(workspace),
                 surface="interactive",
             )
@@ -197,7 +197,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 ["git_status", "git_diff"],
             )
 
-    def test_prompt_catalog_projects_normalized_requirements(self) -> None:
+    def test_runtime_request_catalog_projects_normalized_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -226,7 +226,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 ),
             )
 
-            catalog = manager.build_prompt_catalog(workspace_dir=None, surface=None)
+            catalog = manager.build_runtime_request_catalog(workspace_dir=None, surface=None)
 
             self.assertIsNotNone(catalog)
             assert catalog is not None
@@ -313,7 +313,7 @@ class SkillsContextTestCase(unittest.TestCase):
             ):
                 repository.validate(path=str(skill_root))
 
-    def test_prompt_catalog_stays_summary_only_until_skill_read(self) -> None:
+    def test_runtime_request_catalog_stays_summary_only_until_skill_read(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -341,7 +341,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 ),
             )
 
-            catalog = manager.build_prompt_catalog(workspace_dir=None, surface="")
+            catalog = manager.build_runtime_request_catalog(workspace_dir=None, surface="")
             read_result = manager.read(
                 workspace_dir=None,
                 skill_name="release-ops",
@@ -415,7 +415,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 "chat-skill",
             )
 
-    def test_prompt_resolver_blocks_unsupported_platform(self) -> None:
+    def test_runtime_request_resolver_blocks_unsupported_platform(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -432,10 +432,10 @@ class SkillsContextTestCase(unittest.TestCase):
             )
             package = repository.get(workspace_dir=None, skill_name="mac-only")
 
-            resolution = SkillPromptResolver().resolve(
+            resolution = SkillRuntimeRequestResolver().resolve(
                 (package,),
                 available_tool_ids=(),
-                context=SkillPromptResolutionContext(
+                context=SkillRuntimeRequestResolutionContext(
                     surface="interactive",
                     platform="linux",
                 ),
@@ -449,7 +449,7 @@ class SkillsContextTestCase(unittest.TestCase):
             )
             self.assertEqual(resolution.ready_skills, ())
 
-    def test_resolved_prompt_catalog_blocks_missing_access_and_effects(self) -> None:
+    def test_resolved_runtime_request_catalog_blocks_missing_access_and_effects(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -475,7 +475,7 @@ class SkillsContextTestCase(unittest.TestCase):
                     global_root=root / "global",
                     system_root=system_root,
                 ),
-                prompt_resolver=SkillPromptResolver(
+                runtime_request_resolver=SkillRuntimeRequestResolver(
                     access_port=_FakeSkillAccessPort(
                         (
                             "github:oauth_connector(repo_read)",
@@ -485,7 +485,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 ),
             )
 
-            resolution = manager.resolve_prompt_catalog(
+            resolution = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=("git_diff",),
@@ -500,14 +500,14 @@ class SkillsContextTestCase(unittest.TestCase):
                 ("github-review-binding",),
             )
             self.assertEqual(readiness.missing_effects, ("network",))
-            self.assertIsNotNone(resolution.prompt_catalog)
-            assert resolution.prompt_catalog is not None
+            self.assertIsNotNone(resolution.runtime_request_catalog)
+            assert resolution.runtime_request_catalog is not None
             self.assertEqual(
-                resolution.prompt_catalog.metadata["available_skill_names"],
+                resolution.runtime_request_catalog.metadata["available_skill_names"],
                 [],
             )
 
-    def test_resolved_prompt_catalog_allows_ready_runtime_requirements(self) -> None:
+    def test_resolved_runtime_request_catalog_allows_ready_runtime_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -533,7 +533,7 @@ class SkillsContextTestCase(unittest.TestCase):
                     global_root=root / "global",
                     system_root=system_root,
                 ),
-                prompt_resolver=SkillPromptResolver(
+                runtime_request_resolver=SkillRuntimeRequestResolver(
                     access_port=_FakeSkillAccessPort(
                         (
                             "github:oauth_connector(repo_read)",
@@ -544,7 +544,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 ),
             )
 
-            resolution = manager.resolve_prompt_catalog(
+            resolution = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=("git_diff",),
@@ -604,7 +604,7 @@ class SkillsContextTestCase(unittest.TestCase):
                     system_root=root / "system",
                 ),
                 owner_catalog_repository=_FakeOwnerCatalogRepository(),
-                prompt_resolver=SkillPromptResolver(
+                runtime_request_resolver=SkillRuntimeRequestResolver(
                     access_port=_FakeSkillAccessPort(("github-ready",)),
                     authorization_port=_FakeSkillAuthorizationPort(()),
                 ),
@@ -787,7 +787,7 @@ class SkillsContextTestCase(unittest.TestCase):
             self.assertEqual(events[-1][1]["draft_id"], draft.draft_id)
             self.assertEqual(events[-1][1]["status"], "failed")
 
-    def test_resolved_prompt_catalog_uses_authorization_effect_grants(self) -> None:
+    def test_resolved_runtime_request_catalog_uses_authorization_effect_grants(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -812,14 +812,14 @@ class SkillsContextTestCase(unittest.TestCase):
                     global_root=root / "global",
                     system_root=system_root,
                 ),
-                prompt_resolver=SkillPromptResolver(
+                runtime_request_resolver=SkillRuntimeRequestResolver(
                     authorization_port=SkillAuthorizationServiceAdapter(
                         auth_service,
                     ),
                 ),
             )
 
-            blocked = manager.resolve_prompt_catalog(
+            blocked = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=(),
@@ -833,7 +833,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 agent_id="assistant",
                 effect_id="network",
             )
-            allowed = manager.resolve_prompt_catalog(
+            allowed = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=(),
@@ -845,7 +845,7 @@ class SkillsContextTestCase(unittest.TestCase):
             self.assertTrue(allowed.skills[0].ready)
             self.assertEqual(allowed.ready_skills[0].name, "repo-review")
 
-    def test_resolved_prompt_catalog_persists_readiness_changed_events(self) -> None:
+    def test_resolved_runtime_request_catalog_persists_readiness_changed_events(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             system_root = root / "system"
@@ -867,7 +867,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 event_emitter=lambda name, payload: events.append((name, payload)),
             )
 
-            blocked = manager.resolve_prompt_catalog(
+            blocked = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=(),
@@ -875,7 +875,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 agent_id="assistant",
                 run_id="run-blocked",
             )
-            repeated = manager.resolve_prompt_catalog(
+            repeated = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=(),
@@ -883,7 +883,7 @@ class SkillsContextTestCase(unittest.TestCase):
                 agent_id="assistant",
                 run_id="run-repeated",
             )
-            ready = manager.resolve_prompt_catalog(
+            ready = manager.resolve_runtime_request_catalog(
                 workspace_dir=None,
                 surface="interactive",
                 available_tool_ids=("git_diff",),

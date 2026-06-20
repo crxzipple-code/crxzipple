@@ -21,14 +21,14 @@ class ContextActionNotAllowedError(ContextWorkspaceError, PermissionError):
     """Raised when a context tree action is not supported by the node."""
 
 
-class ContextRenderSnapshotNotFoundError(ContextWorkspaceError, LookupError):
-    """Raised when a render snapshot cannot be found."""
+class ContextSnapshotNotFoundError(ContextWorkspaceError, LookupError):
+    """Raised when a snapshot cannot be found."""
 
 
 __all__ = [
     "ContextActionNotAllowedError",
     "ContextNodeNotFoundError",
-    "ContextRenderSnapshotNotFoundError",
+    "ContextSnapshotNotFoundError",
     "ContextWorkspaceError",
     "ContextWorkspaceNotFoundError",
     "ContextWorkspaceValidationError",

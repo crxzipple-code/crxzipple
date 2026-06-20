@@ -13,7 +13,6 @@ from crxzipple.modules.session.domain.value_objects import (
     SessionItem,
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
     SessionKind,
     SessionOrigin,
     SessionReply,
@@ -196,10 +195,6 @@ class SqlAlchemySessionItemRepository:
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
-        model_visible: bool | None = None,
-        user_visible: bool | None = None,
-        chat_visible: bool | None = None,
-        trace_visible: bool | None = None,
         after_sequence_no: int | None = None,
         before_sequence_no: int | None = None,
     ) -> list[SessionItem]:
@@ -212,14 +207,6 @@ class SqlAlchemySessionItemRepository:
             statement = statement.where(SessionItemModel.sequence_no > after_sequence_no)
         if before_sequence_no is not None and before_sequence_no > 0:
             statement = statement.where(SessionItemModel.sequence_no < before_sequence_no)
-        if model_visible is not None:
-            statement = statement.where(SessionItemModel.model_visible.is_(model_visible))
-        if user_visible is not None:
-            statement = statement.where(SessionItemModel.user_visible.is_(user_visible))
-        if chat_visible is not None:
-            statement = statement.where(SessionItemModel.chat_visible.is_(chat_visible))
-        if trace_visible is not None:
-            statement = statement.where(SessionItemModel.trace_visible.is_(trace_visible))
         statement = statement.order_by(
             SessionItemModel.created_at.desc(),
             SessionItemModel.sequence_no.desc(),
@@ -245,10 +232,6 @@ class SqlAlchemySessionItemRepository:
             "role": item.role,
             "phase": item.phase.value,
             "content_payload": dict(item.content_payload),
-            "model_visible": item.visibility.model_visible,
-            "user_visible": item.visibility.user_visible,
-            "chat_visible": item.visibility.chat_visible,
-            "trace_visible": item.visibility.trace_visible,
             "source_module": item.source_module,
             "source_kind": item.source_kind,
             "source_id": item.source_id,
@@ -256,6 +239,10 @@ class SqlAlchemySessionItemRepository:
             "provider_item_type": item.provider_item_type,
             "call_id": item.call_id,
             "tool_name": item.tool_name,
+            "model_visible": item.model_visible,
+            "user_visible": item.user_visible,
+            "chat_visible": item.chat_visible,
+            "trace_visible": item.trace_visible,
             "metadata_payload": dict(item.metadata),
             "created_at": item.created_at,
         }
@@ -275,12 +262,6 @@ class SqlAlchemySessionItemRepository:
                 if isinstance(model.content_payload, dict)
                 else {}
             ),
-            visibility=SessionItemVisibility(
-                model_visible=bool(model.model_visible),
-                user_visible=bool(model.user_visible),
-                chat_visible=bool(model.chat_visible),
-                trace_visible=bool(model.trace_visible),
-            ),
             source_module=model.source_module,
             source_kind=model.source_kind,
             source_id=model.source_id,
@@ -288,6 +269,10 @@ class SqlAlchemySessionItemRepository:
             provider_item_type=model.provider_item_type,
             call_id=model.call_id,
             tool_name=model.tool_name,
+            model_visible=bool(model.model_visible),
+            user_visible=bool(model.user_visible),
+            chat_visible=bool(model.chat_visible),
+            trace_visible=bool(model.trace_visible),
             metadata=(
                 dict(model.metadata_payload)
                 if isinstance(model.metadata_payload, dict)

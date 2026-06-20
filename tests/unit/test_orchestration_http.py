@@ -148,7 +148,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
             self.assertEqual(due_response.status_code, 200)
             payload = due_response.json()
             self.assertEqual(len(payload), 1)
-            self.assertEqual(payload[0]["metadata"]["prompt_flow_hint"]["mode"], "heartbeat")
+            self.assertEqual(payload[0]["metadata"]["runtime_request_flow_hint"]["mode"], "heartbeat")
             self.assertEqual(payload[0]["metadata"]["heartbeat_request"]["basis"], "idle_session")
 
     def test_orchestration_intake_endpoint_accepts_prepares_and_enqueues_run(self) -> None:

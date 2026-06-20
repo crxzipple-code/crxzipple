@@ -1235,6 +1235,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                 (
                     "worker:orchestration-scheduler",
                     "worker:orchestration",
+                    "worker:event-outbox",
                     "worker:event-relay",
                     "worker:operations-observer",
                     "worker:tool-scheduler",

@@ -9,10 +9,10 @@ from crxzipple.modules.skills.application.models import (
     SkillReadinessStatus,
 )
 from crxzipple.modules.skills.application.owner_state import SkillOwnerStateService
-from crxzipple.modules.skills.application.prompt_resolver import (
+from crxzipple.modules.skills.application.runtime_request_resolver import (
     ResolvedSkillReadiness,
-    SkillPromptResolutionContext,
-    SkillPromptResolver,
+    SkillRuntimeRequestResolutionContext,
+    SkillRuntimeRequestResolver,
     SkillToolReadinessPort,
 )
 
@@ -21,7 +21,7 @@ from crxzipple.modules.skills.application.prompt_resolver import (
 class SkillReadinessService:
     catalog_service: SkillCatalogService
     owner_state: SkillOwnerStateService
-    prompt_resolver: SkillPromptResolver = field(default_factory=SkillPromptResolver)
+    runtime_request_resolver: SkillRuntimeRequestResolver = field(default_factory=SkillRuntimeRequestResolver)
     tool_readiness_port: SkillToolReadinessPort | None = None
 
     def readiness(
@@ -75,10 +75,10 @@ class SkillReadinessService:
                 ready=False,
                 setup_hints=package.requirements.setup_hints,
             )
-        resolution = self.prompt_resolver.resolve(
+        resolution = self.runtime_request_resolver.resolve(
             (package,),
             available_tool_ids=self.tool_readiness_port.list_available_tool_ids(),
-            context=SkillPromptResolutionContext(),
+            context=SkillRuntimeRequestResolutionContext(),
         )
         return _skill_readiness_from_resolved(
             resolution.skills[0].readiness,
@@ -112,11 +112,11 @@ class SkillReadinessService:
                 setup_hints=package.requirements.setup_hints,
             )
 
-        context = SkillPromptResolutionContext(
+        context = SkillRuntimeRequestResolutionContext(
             workspace_dir=workspace_dir,
             surface=surface,
         )
-        resolution = self.prompt_resolver.resolve(
+        resolution = self.runtime_request_resolver.resolve(
             tuple(enabled_packages),
             available_tool_ids=self.tool_readiness_port.list_available_tool_ids(),
             context=context,
@@ -130,7 +130,7 @@ class SkillReadinessService:
         }
         readiness.update(disabled_readiness)
         if enabled_packages:
-            self.owner_state.persist_prompt_readiness_snapshots(
+            self.owner_state.persist_runtime_request_readiness_snapshots(
                 packages=tuple(enabled_packages),
                 resolution=resolution,
                 context=context,

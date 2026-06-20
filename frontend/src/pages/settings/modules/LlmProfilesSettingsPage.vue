@@ -25,9 +25,11 @@ import {
   setLlmProfileEnabled,
   testLlmProfile,
   updateLlmProfile,
+  warmupLlmProfile,
   type LlmInvocationApiPayload,
   type LlmProfileApiPayload,
   type LlmProfileWritePayload,
+  type LlmWarmupApiPayload,
 } from "../ownerApis/llmProfiles";
 
 const PROVIDER_OPTIONS = ["openai", "openai_codex", "openai_compatible", "anthropic", "google", "ollama"];
@@ -63,9 +65,12 @@ const actionError = ref<string | null>(null);
 const isSaving = ref(false);
 const isToggling = ref(false);
 const isTesting = ref(false);
+const isWarming = ref(false);
 const testPrompt = ref("Reply with a short readiness check.");
 const testError = ref<string | null>(null);
 const testResult = ref<LlmInvocationApiPayload | null>(null);
+const warmupError = ref<string | null>(null);
+const warmupResult = ref<LlmWarmupApiPayload | null>(null);
 const editProfileId = ref("");
 const editProvider = ref("");
 const editApiFamily = ref("");
@@ -175,6 +180,11 @@ const canRunProfileProbe = computed(() =>
   && Boolean(editApiFamily.value.trim())
   && Boolean(editModelName.value.trim()),
 );
+const canWarmupProfile = computed(() =>
+  Boolean(selectedProfile.value)
+  && !isCreatingProfile.value
+  && !credentialBindingSelectionError.value,
+);
 const selectedTitle = computed(() => {
   if (isCreatingProfile.value) return "New LLM profile";
   const profile = selectedProfile.value;
@@ -189,7 +199,10 @@ const selectedSubtitle = computed(() => {
 });
 const probeStatusLabel = computed(() => {
   if (isTesting.value) return "Running";
+  if (isWarming.value) return "Warming";
+  if (warmupResult.value?.status) return `warmup ${warmupResult.value.status}`;
   if (testResult.value?.status) return testResult.value.status;
+  if (warmupError.value) return "warmup failed";
   if (testError.value) return "request failed";
   return "idle";
 });
@@ -200,6 +213,16 @@ const probeResultText = computed(() => {
 const probeUsageLabel = computed(() => formatUsage(testResult.value?.result?.usage ?? null));
 const probeFinishLabel = computed(() => testResult.value?.result?.finish_reason ?? "-");
 const probeRequestLabel = computed(() => testResult.value?.provider_request_id ?? testResult.value?.id ?? "-");
+const warmupResultText = computed(() => {
+  const result = warmupResult.value;
+  if (!result) return "";
+  const transport = stringDetail(result.details.transport);
+  const endpoint = stringDetail(result.details.endpoint);
+  const reused = typeof result.details.reused_connection === "boolean"
+    ? `reused: ${result.details.reused_connection ? "yes" : "no"}`
+    : "";
+  return [transport, endpoint, reused].filter(Boolean).join(" · ");
+});
 const credentialBindingNote = computed(() => {
   if (credentialBindingsLoading.value) return "Loading credential bindings from Access...";
   if (credentialBindingSelectionError.value) return credentialBindingSelectionError.value;
@@ -267,6 +290,8 @@ async function selectProfile(profileId: string): Promise<void> {
   detailError.value = null;
   testError.value = null;
   testResult.value = null;
+  warmupError.value = null;
+  warmupResult.value = null;
   detailLoading.value = true;
   try {
     const profile = await getLlmProfile(profileId);
@@ -339,6 +364,8 @@ async function runProfileProbe(): Promise<void> {
   isTesting.value = true;
   testError.value = null;
   testResult.value = null;
+  warmupError.value = null;
+  warmupResult.value = null;
   try {
     testResult.value = await testLlmProfile({
       profile: buildProfileWritePayload(),
@@ -353,6 +380,20 @@ async function runProfileProbe(): Promise<void> {
   }
 }
 
+async function runProfileWarmup(): Promise<void> {
+  if (!canWarmupProfile.value || !selectedProfileId.value) return;
+  isWarming.value = true;
+  warmupError.value = null;
+  warmupResult.value = null;
+  try {
+    warmupResult.value = await warmupLlmProfile(selectedProfileId.value);
+  } catch (error) {
+    warmupError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    isWarming.value = false;
+  }
+}
+
 function startCreateProfile(): void {
   isCreatingProfile.value = true;
   selectedProfileId.value = null;
@@ -362,6 +403,8 @@ function startCreateProfile(): void {
   actionMessage.value = null;
   testError.value = null;
   testResult.value = null;
+  warmupError.value = null;
+  warmupResult.value = null;
   seedNewProfileForm();
 }
 
@@ -399,6 +442,10 @@ function syncFormFromProfile(profile = selectedProfile.value): void {
   editReasoningEffort.value = profile?.default_params.reasoning_effort ?? "";
   editEnabled.value = profile?.enabled ?? true;
   editorError.value = null;
+}
+
+function stringDetail(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
 function seedNewProfileForm(): void {
@@ -858,15 +905,41 @@ function formatCredentialBindingMeta(binding: AccessCredentialBindingPayload): s
             <span>POST /llms/test</span>
           </div>
           <textarea v-model="testPrompt" spellcheck="false" />
-          <UiButton
-            size="sm"
-            variant="primary"
-            :disabled="!canRunProfileProbe || isTesting || isToggling || isSaving"
-            @click="runProfileProbe"
-          >
-            <Play :size="13" /> {{ isTesting ? "Running" : "Run" }}
-          </UiButton>
+          <div class="llm-probe-actions">
+            <UiButton
+              size="sm"
+              variant="secondary"
+              :disabled="!canWarmupProfile || isWarming || isTesting || isToggling || isSaving"
+              @click="runProfileWarmup"
+            >
+              <Zap :size="13" /> {{ isWarming ? "Warming" : "Warmup" }}
+            </UiButton>
+            <UiButton
+              size="sm"
+              variant="primary"
+              :disabled="!canRunProfileProbe || isTesting || isWarming || isToggling || isSaving"
+              @click="runProfileProbe"
+            >
+              <Play :size="13" /> {{ isTesting ? "Running" : "Run" }}
+            </UiButton>
+          </div>
           <section class="llm-test-output">
+            <p v-if="warmupError" class="llm-inline-error">{{ warmupError }}</p>
+            <div v-else-if="warmupResult" class="llm-probe-result">
+              <div>
+                <span>Warmup</span>
+                <strong>{{ warmupResult.status }}</strong>
+              </div>
+              <div>
+                <span>Profile</span>
+                <strong>{{ warmupResult.llm_id }}</strong>
+              </div>
+              <div class="llm-probe-result--wide">
+                <span>Transport</span>
+                <strong>{{ stringDetail(warmupResult.details.transport) || "-" }}</strong>
+              </div>
+              <p v-if="warmupResultText">{{ warmupResultText }}</p>
+            </div>
             <p v-if="testError" class="llm-inline-error">{{ testError }}</p>
             <div v-else-if="testResult" class="llm-probe-result">
               <div>
@@ -890,7 +963,7 @@ function formatCredentialBindingMeta(binding: AccessCredentialBindingPayload): s
             <div v-else class="llm-probe-empty">
               <Play :size="18" />
               <strong>{{ canRunProfileProbe ? "Run a prompt against the current form." : "Complete provider, model, and credential fields before testing." }}</strong>
-              <span>Results stay in this panel; profile changes are saved only when you click Save.</span>
+              <span>Warmup checks the saved profile transport; Run tests the current form payload.</span>
             </div>
           </section>
         </article>
@@ -1379,6 +1452,17 @@ function formatCredentialBindingMeta(binding: AccessCredentialBindingPayload): s
   color: var(--text-primary);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.llm-probe-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.llm-probe-actions :deep(button) {
+  width: 100%;
+  min-width: 0;
 }
 
 .llm-test-output {

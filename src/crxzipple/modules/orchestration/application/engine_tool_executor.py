@@ -52,6 +52,7 @@ class ToolRunLink:
     mode: str
     strategy: str
     environment: str
+    call_session_item_id: str | None = None
     result_session_item_id: str | None = None
     background: bool = False
     tool_execution_plan: dict[str, object] = field(default_factory=dict)
@@ -67,6 +68,7 @@ class ToolRunLink:
             "mode": self.mode,
             "strategy": self.strategy,
             "environment": self.environment,
+            "call_session_item_id": self.call_session_item_id,
             "result_session_item_id": self.result_session_item_id,
             "background": self.background,
         }
@@ -132,7 +134,6 @@ class ToolExecutionBatchOutcome:
     background_runs: tuple[tuple[ToolCallIntent, ToolRun], ...] = field(default_factory=tuple)
     tool_run_links: tuple[ToolRunLink, ...] = field(default_factory=tuple)
     tool_execution_plans: tuple[ToolExecutionPlan, ...] = field(default_factory=tuple)
-    evidence_frontier_items: tuple[dict[str, object], ...] = field(default_factory=tuple)
     pending_approval_request: PendingApprovalRequest | None = None
     yield_requested: bool = False
     yield_reason: str | None = None
@@ -210,6 +211,7 @@ class OrchestrationEngineToolExecutor:
         tool_calls: tuple[ToolCallIntent, ...],
         append_tool_call_messages: bool,
         append_tool_call_session_items: bool = False,
+        tool_call_session_item_ids_by_call_id: dict[str, str] | None = None,
         append_tool_result_messages: bool = True,
         invocation_id: str | None = None,
         extra_context_attrs: dict[str, object] | None = None,
@@ -227,6 +229,9 @@ class OrchestrationEngineToolExecutor:
                     tool_calls=tool_calls,
                     append_tool_call_messages=append_tool_call_messages,
                     append_tool_call_session_items=append_tool_call_session_items,
+                    tool_call_session_item_ids_by_call_id=(
+                        tool_call_session_item_ids_by_call_id
+                    ),
                     append_tool_result_messages=append_tool_result_messages,
                     invocation_id=invocation_id,
                     extra_context_attrs=extra_context_attrs,
@@ -248,6 +253,7 @@ class OrchestrationEngineToolExecutor:
         tool_calls: tuple[ToolCallIntent, ...],
         append_tool_call_messages: bool,
         append_tool_call_session_items: bool = False,
+        tool_call_session_item_ids_by_call_id: dict[str, str] | None = None,
         append_tool_result_messages: bool = True,
         invocation_id: str | None = None,
         extra_context_attrs: dict[str, object] | None = None,
@@ -259,9 +265,11 @@ class OrchestrationEngineToolExecutor:
         background_runs: list[tuple[ToolCallIntent, ToolRun]] = []
         tool_run_links: list[ToolRunLink] = []
         tool_execution_plans: list[ToolExecutionPlan] = []
-        evidence_frontier_items: list[dict[str, object]] = []
         prepared_executions: list[_PreparedToolExecution] = []
         pending_tool_call_messages: list[ToolCallIntent] = []
+        tool_call_session_item_id_by_call_id: dict[str, str] = dict(
+            tool_call_session_item_ids_by_call_id or {},
+        )
         yield_requested = False
         yield_reason: str | None = None
         stop_remaining_batches = False
@@ -292,6 +300,9 @@ class OrchestrationEngineToolExecutor:
                     append_session_items=append_tool_call_session_items,
                 )
                 tool_call_session_item_ids.extend(record.item_ids)
+                for tool_call, item_id in zip(tool_call_batch, record.item_ids):
+                    if item_id:
+                        tool_call_session_item_id_by_call_id[tool_call.id] = item_id
 
         async def _flush_tool_call_messages() -> None:
             if not pending_tool_call_messages:
@@ -341,7 +352,6 @@ class OrchestrationEngineToolExecutor:
                 background_runs=tuple(background_runs),
                 tool_run_links=tuple(tool_run_links),
                 tool_execution_plans=tuple(tool_execution_plans),
-                evidence_frontier_items=tuple(evidence_frontier_items),
                 pending_approval_request=pending_approval_request,
                 yield_requested=yield_requested,
                 yield_reason=yield_reason,
@@ -475,6 +485,11 @@ class OrchestrationEngineToolExecutor:
                                 prepared,
                                 tool_run,
                                 background=True,
+                                call_session_item_id=(
+                                    tool_call_session_item_id_by_call_id.get(
+                                        tool_call.id,
+                                    )
+                                ),
                             ),
                         )
                         continue
@@ -484,18 +499,16 @@ class OrchestrationEngineToolExecutor:
                             (tool_call, tool_run, "tool_run", tool_run.id),
                         )
                     inline_runs.append(tool_run)
-                    evidence_frontier_items.append(
-                        tool_run_evidence_frontier_item(
-                            tool_call=tool_call,
-                            tool_run=tool_run,
-                            source_run_id=run.id,
-                        ),
-                    )
                     tool_run_links.append(
                         self._tool_run_link(
                             prepared,
                             tool_run,
                             background=False,
+                            call_session_item_id=(
+                                tool_call_session_item_id_by_call_id.get(
+                                    tool_call.id,
+                                )
+                            ),
                         ),
                     )
                     tool_run_yield_requested, tool_run_yield_reason = self._yield_control(
@@ -801,7 +814,7 @@ class OrchestrationEngineToolExecutor:
         for key in (
             "tool_surface_id",
             "tool_surface_snapshot_id",
-            "context_render_snapshot_id",
+            "request_render_snapshot_id",
         ):
             value = _optional_context_text(batch_context.context_attrs.get(key))
             if value is not None:
@@ -822,6 +835,7 @@ class OrchestrationEngineToolExecutor:
         tool_run: ToolRun,
         *,
         background: bool,
+        call_session_item_id: str | None = None,
     ) -> ToolRunLink:
         return ToolRunLink(
             tool_call_id=prepared.tool_call.id,
@@ -832,6 +846,7 @@ class OrchestrationEngineToolExecutor:
             mode=prepared.target.mode.value,
             strategy=prepared.target.strategy.value,
             environment=prepared.target.environment.value,
+            call_session_item_id=call_session_item_id,
             background=background,
             tool_execution_plan=(
                 prepared.plan.to_payload() if prepared.plan is not None else {}
@@ -1016,101 +1031,6 @@ def _tool_lifecycle_sources(tool_run: ToolRun) -> tuple[dict[str, object], ...]:
             if isinstance(browser_evidence, dict):
                 sources.append(browser_evidence)
     return tuple(sources)
-
-
-def tool_run_evidence_frontier_item(
-    *,
-    tool_call: ToolCallIntent,
-    tool_run: ToolRun,
-    source_run_id: str,
-) -> dict[str, object]:
-    envelope = _dict_payload(getattr(tool_run, "result_envelope_payload", None))
-    summary = (
-        _optional_context_text(envelope.get("summary"))
-        or _tool_run_error_summary(tool_run)
-        or _tool_run_result_summary(tool_run)
-        or f"Tool {tool_call.name} completed with status {tool_run.status.value}."
-    )
-    item: dict[str, object] = {
-        "id": f"tool-run:{tool_run.id}",
-        "kind": "tool_result",
-        "status": _tool_run_evidence_status(tool_run, envelope=envelope),
-        "summary": _truncate_text(summary, limit=360),
-        "source_kind": "tool_run",
-        "source_id": tool_run.id,
-        "confidence": "observed",
-        "metadata": {
-            "tool_call_id": tool_call.id,
-            "tool_name": tool_call.name,
-            "tool_run_id": tool_run.id,
-            "tool_status": tool_run.status.value,
-            "orchestration_run_id": source_run_id,
-        },
-    }
-    read_handles = _list_of_dict_payloads(envelope.get("read_handles"))
-    if read_handles:
-        item["metadata"]["read_handles"] = read_handles
-    return item
-
-
-def _tool_run_evidence_status(
-    tool_run: ToolRun,
-    *,
-    envelope: dict[str, object],
-) -> str:
-    envelope_status = _optional_context_text(envelope.get("status"))
-    if envelope_status in {"failed", "error", "timed_out", "cancelled"}:
-        return "failed"
-    if tool_run.status is ToolRunStatus.SUCCEEDED:
-        return "success"
-    if tool_run.status in {ToolRunStatus.FAILED, ToolRunStatus.TIMED_OUT}:
-        return "failed"
-    if tool_run.status is ToolRunStatus.CANCELLED:
-        return "blocked"
-    return "unknown"
-
-
-def _tool_run_error_summary(tool_run: ToolRun) -> str | None:
-    error = tool_run.error
-    if error is None:
-        return None
-    return _optional_context_text(getattr(error, "message", None))
-
-
-def _tool_run_result_summary(tool_run: ToolRun) -> str | None:
-    result = tool_run.result
-    if result is None:
-        return None
-    details = result.details
-    if isinstance(details, dict):
-        for key in ("summary", "message", "error"):
-            value = _optional_context_text(details.get(key))
-            if value is not None:
-                return value
-    content = result.content
-    if isinstance(content, str):
-        return _optional_context_text(content)
-    try:
-        return _optional_context_text(json.dumps(content, ensure_ascii=False))
-    except TypeError:
-        return _optional_context_text(content)
-
-
-def _truncate_text(value: str, *, limit: int) -> str:
-    normalized = value.strip()
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: max(limit - 1, 0)].rstrip() + "…"
-
-
-def _dict_payload(value: object) -> dict[str, object]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _list_of_dict_payloads(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list | tuple):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def _is_terminal_plan_control_tool(prepared: _PreparedToolExecution) -> bool:

@@ -49,9 +49,11 @@ Source map:
 - `/Users/crxzy/Documents/Codex/codex-rs/core/src/session/turn.rs:970` builds
   the internal `Prompt`.
 
-CRXZipple implication: Context Tree XML can remain the visible prompt body, but
-provider-specific mirrors for tools, images, files, and output schemas should be
-treated as protocol attachments. They should not mutate the semantic prompt tree.
+CRXZipple implication: Context Tree / Context Snapshot should remain the
+runtime canonical context, but not a default provider prompt body. Context Slice
+is projected into neutral runtime input items and active Tool Surface; provider
+renderers then emit provider-native input, tool schemas, images/files, output
+schemas, and render reports.
 
 ## Base Instructions
 
@@ -331,37 +333,32 @@ Source map:
 - `/Users/crxzy/Documents/Codex/codex-rs/core/src/prompt_debug.rs:99` returns
   formatted input.
 
-CRXZipple implication: a "show prompt" UI must display all final request layers:
-runtime contract / tree XML, provider-native messages, mirrored tool schemas,
-artifact/image attachments, output schema, and context snapshot metadata.
+CRXZipple implication: a "show request" UI must display all final request layers:
+runtime contract refs, Context Slice summary, provider-native messages/input
+items, active tool schemas, selected file/image attachments, output schema,
+context snapshot metadata, and render/loss reports. It must not imply that the
+debug tree XML is the provider prompt body.
 
 ## CRXZipple Current Cross-Check
 
 The current CRXZipple implementation already has the same broad separation as
-Codex: collection, tree rendering, provider mirror, and final provider request
-are different steps.
+Codex: runtime draft collection, Context Snapshot / Context Slice, provider
+request rendering, and response parsing are different steps.
 
 Source map:
 
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:115`
-  defines `RunPromptInputCollector`; its docstring says it collects run inputs and
-  does not render the final prompt body.
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:167`
-  reads agent profile and `:169` reads the active session bundle.
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:189`
-  builds provider input transcript for the current run.
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:201`
-  resolves the LLM profile, and `:245` resolves the skill prompt catalog.
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:331`
-  carries initially resolved tool schemas, but this is later narrowed by Context
-  Workspace visibility.
-- `src/crxzipple/modules/orchestration/application/engine.py:535` records the
-  Context Workspace render snapshot for a run.
-- `src/crxzipple/modules/orchestration/application/engine.py:579` merges the
-  context snapshot back into the prompt surface.
-- `src/crxzipple/modules/orchestration/application/engine.py:631` mirrors visible
-  tool schemas, `:645` inserts Context Workspace XML as a system message, and
-  `:668` mirrors opened artifact attachments as user content blocks.
+- `src/crxzipple/modules/orchestration/application/runtime_llm_request_draft.py`
+  defines `RuntimeLlmRequestDraftCollector`; it gathers routing/session/runtime
+  facts and does not render provider wire input.
+- `src/crxzipple/modules/orchestration/application/runtime_llm_request.py`
+  projects Context Slice items into neutral `LlmInputItem` records and builds the
+  request envelope.
+- `src/crxzipple/modules/llm/infrastructure/adapters/*_renderer.py` renders the
+  envelope into provider-specific wire payloads.
+- `src/crxzipple/app/integration/context_workspace_orchestration/adapter.py`
+  records Context Snapshot / Context Slice refs for a run.
+- `src/crxzipple/modules/orchestration/application/engine.py` carries Context
+  Snapshot / Tool Surface refs through the run and invocation metadata.
 - `src/crxzipple/modules/context_workspace/application/services.py:537` builds
   the `runtime.contract` tree node from the file-backed runtime contract.
 - `src/crxzipple/modules/llm/application/services.py:436` stores each

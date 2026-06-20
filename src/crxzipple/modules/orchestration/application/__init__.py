@@ -1,7 +1,7 @@
 from crxzipple.modules.orchestration.application.engine import (
     EngineAdvanceOutcome,
     OrchestrationEngine,
-    RunPromptInputPreview,
+    RuntimeLlmRequestPreview,
 )
 from crxzipple.modules.orchestration.application.engine_llm_invoker import (
     OrchestrationEngineLlmInvoker,
@@ -48,7 +48,6 @@ from crxzipple.modules.orchestration.application.ports import (
     SessionRecorderPort,
     SessionResolutionPort,
     SessionTranscriptPort,
-    SkillCatalogPort,
     ToolCatalogPort,
     ToolExecutionPort,
 )
@@ -68,9 +67,9 @@ from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
     ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
     ORCHESTRATION_TURN_MAINTENANCE_DISPATCH_OWNER_KIND,
 )
-from crxzipple.modules.orchestration.application.prompt_input import (
-    RunPromptInputCollector,
-    RunPromptInput,
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft import (
+    RuntimeLlmRequestDraftCollector,
+    RuntimeLlmRequestDraft,
 )
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
@@ -99,6 +98,8 @@ from crxzipple.modules.orchestration.application.runtime_events import (
     OrchestrationRuntimeEventSubscription,
 )
 from crxzipple.modules.orchestration.application.query import (
+    ExecutionWaitingItemRef,
+    ExecutionWaitingStatus,
     OrchestrationRunQueryService,
 )
 from crxzipple.modules.orchestration.application.ingress_submission import (
@@ -170,6 +171,8 @@ __all__ = [
     "EventPublishPort",
     "EventSubscriptionStreamPort",
     "EventTopicWaitPort",
+    "ExecutionWaitingItemRef",
+    "ExecutionWaitingStatus",
     "FailAssignmentInput",
     "LlmPort",
     "LlmResolver",
@@ -228,9 +231,9 @@ __all__ = [
     "SubmitBoundOrchestrationTurnInput",
     "ResolvedLlmSelection",
     "SubmitOrchestrationTurnInput",
-    "RunPromptInputCollector",
-    "RunPromptInput",
-    "RunPromptInputPreview",
+    "RuntimeLlmRequestDraftCollector",
+    "RuntimeLlmRequestDraft",
+    "RuntimeLlmRequestPreview",
     "ResolvedTool",
     "ResolvedToolSet",
     "ResumeOrchestrationRunInput",
@@ -241,7 +244,6 @@ __all__ = [
     "fail_run_record",
     "release_executor_assignment_capacity",
     "RunExecutionService",
-    "SkillCatalogPort",
     "SessionsSpawnFollowupService",
     "ToolCatalogPort",
     "ToolExecutionPort",

@@ -415,7 +415,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
                 preview_result = self.runner.invoke(
                     app,
-                    ["orchestration", "prompt-preview", "run-cli-process"],
+                    ["orchestration", "llm-request-preview", "run-cli-process"],
                     env=self.env,
                 )
                 self.assertEqual(preview_result.exit_code, 0)
@@ -423,7 +423,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 self.assertEqual(preview_payload["run_id"], "run-cli-process")
                 self.assertEqual(preview_payload["llm_id"], "local-chat")
                 self.assertEqual(preview_payload["mode"], "normal_turn")
-                self.assertIsNotNone(preview_payload["prompt_report"])
+                self.assertIsNotNone(preview_payload["runtime_request_report"])
                 self.assertTrue(
                     any(
                         item["role"] == "user"

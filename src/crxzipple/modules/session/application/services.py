@@ -22,7 +22,6 @@ from crxzipple.modules.session.domain.value_objects import (
     SessionItem,
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
     SessionKeyResolution,
     SessionOrigin,
     SessionReply,
@@ -51,7 +50,10 @@ def _session_item_fact_payload(item: SessionItem) -> dict[str, object]:
         "provider_item_type": item.provider_item_type,
         "call_id": item.call_id,
         "tool_name": item.tool_name,
-        "visibility": item.visibility.to_payload(),
+        "model_visible": item.model_visible,
+        "user_visible": item.user_visible,
+        "chat_visible": item.chat_visible,
+        "trace_visible": item.trace_visible,
         "item": item.to_payload(),
     }
 
@@ -77,7 +79,6 @@ class AppendSessionItemInput:
     content_payload: dict[str, object] = field(default_factory=dict)
     role: str | None = None
     phase: SessionItemPhase = SessionItemPhase.UNKNOWN
-    visibility: SessionItemVisibility = field(default_factory=SessionItemVisibility)
     source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
@@ -85,6 +86,10 @@ class AppendSessionItemInput:
     provider_item_type: str | None = None
     call_id: str | None = None
     tool_name: str | None = None
+    model_visible: bool = True
+    user_visible: bool = True
+    chat_visible: bool = True
+    trace_visible: bool = True
     metadata: dict[str, object] = field(default_factory=dict)
     session_id: str | None = None
 
@@ -99,12 +104,42 @@ class ListSessionItemsInput:
     session_key: str
     limit: int | None = None
     active_session_only: bool = False
-    model_visible: bool | None = None
-    user_visible: bool | None = None
-    chat_visible: bool | None = None
-    trace_visible: bool | None = None
     after_sequence_no: int | None = None
     before_sequence_no: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BuildSessionReplayWindowInput:
+    session_key: str
+    limit: int | None = None
+    active_session_only: bool = False
+    after_sequence_no: int | None = None
+    before_sequence_no: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BuildSessionMaintenanceWindowInput:
+    session_key: str
+    limit: int | None = None
+    active_session_only: bool = False
+    after_sequence_no: int | None = None
+    before_sequence_no: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ListSessionItemRangeInput:
+    session_key: str
+    session_id: str
+    from_sequence_no: int | None = None
+    to_sequence_no: int | None = None
+    limit: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ListSessionSegmentHandlesInput:
+    session_key: str
+    include_active: bool = True
+    limit: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +178,68 @@ class GetSessionItemBySourceInput:
 class SessionItemsBundle:
     session: Session
     items: tuple[SessionItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionReplayWindow:
+    session: Session
+    items: tuple[SessionItem, ...]
+    active_session_only: bool = False
+    from_sequence_no: int | None = None
+    to_sequence_no: int | None = None
+    item_count: int = 0
+    protocol_call_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SessionItemRange:
+    session: Session
+    session_id: str
+    items: tuple[SessionItem, ...]
+    from_sequence_no: int | None = None
+    to_sequence_no: int | None = None
+    item_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSegmentHandle:
+    session_id: str
+    sequence_no: int
+    kind: str
+    status: str
+    summary_text: str | None = None
+    summary_item_id: str | None = None
+    archived_item_count: int | None = None
+    archived_through_item_sequence_no: int | None = None
+    opened_at: str | None = None
+    closed_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSegmentHandles:
+    session: Session
+    active_session_id: str
+    handles: tuple[SessionSegmentHandle, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GetSessionContextFrontierInput:
+    session_key: str
+    active_item_limit: int | None = None
+    historical_instance_limit: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionContextFrontier:
+    session: Session
+    active_instance: SessionInstance
+    instances: tuple[SessionInstance, ...]
+    active_items: tuple[SessionItem, ...]
+    from_sequence_no: int | None = None
+    to_sequence_no: int | None = None
+    active_item_count: int = 0
+    protocol_call_ids: tuple[str, ...] = ()
+    segment_handles: tuple[SessionSegmentHandle, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +651,155 @@ class SessionApplicationService:
                 )
             return uow.session_instances.list(session_key=session.id)
 
+    def list_item_range(
+        self,
+        data: ListSessionItemRangeInput,
+    ) -> SessionItemRange:
+        from_sequence_no = data.from_sequence_no
+        to_sequence_no = data.to_sequence_no
+        if from_sequence_no is not None and from_sequence_no <= 0:
+            raise SessionValidationError("from_sequence_no must be greater than zero.")
+        if to_sequence_no is not None and to_sequence_no <= 0:
+            raise SessionValidationError("to_sequence_no must be greater than zero.")
+        if (
+            from_sequence_no is not None
+            and to_sequence_no is not None
+            and from_sequence_no > to_sequence_no
+        ):
+            raise SessionValidationError(
+                "from_sequence_no cannot be greater than to_sequence_no.",
+            )
+        with self.uow_factory() as uow:
+            session = uow.sessions.get(data.session_key)
+            if session is None:
+                raise SessionNotFoundError(
+                    f"Session '{data.session_key}' was not found.",
+                )
+            if uow.session_instances.get(data.session_id) is None:
+                raise SessionInstanceNotFoundError(
+                    f"Session instance '{data.session_id}' was not found.",
+                )
+            items = tuple(
+                uow.session_items.list(
+                    session_key=session.id,
+                    session_id=data.session_id,
+                    limit=data.limit,
+                    after_sequence_no=(
+                        from_sequence_no - 1
+                        if from_sequence_no is not None
+                        else None
+                    ),
+                    before_sequence_no=(
+                        to_sequence_no + 1 if to_sequence_no is not None else None
+                    ),
+                ),
+            )
+            sequence_numbers = [item.sequence_no for item in items]
+            return SessionItemRange(
+                session=session,
+                session_id=data.session_id,
+                items=items,
+                from_sequence_no=(
+                    min(sequence_numbers)
+                    if sequence_numbers
+                    else from_sequence_no
+                ),
+                to_sequence_no=(
+                    max(sequence_numbers)
+                    if sequence_numbers
+                    else to_sequence_no
+                ),
+                item_count=len(items),
+            )
+
+    def list_segment_handles(
+        self,
+        data: ListSessionSegmentHandlesInput,
+    ) -> SessionSegmentHandles:
+        if data.limit is not None and data.limit <= 0:
+            raise SessionValidationError("limit must be greater than zero.")
+        with self.uow_factory() as uow:
+            session = uow.sessions.get(data.session_key)
+            if session is None:
+                raise SessionNotFoundError(
+                    f"Session '{data.session_key}' was not found.",
+                )
+            instances = tuple(uow.session_instances.list(session_key=session.id))
+            selected_instances = tuple(
+                instance
+                for instance in instances
+                if data.include_active or instance.id != session.active_session_id
+            )
+            if data.limit is not None:
+                selected_instances = selected_instances[-data.limit:]
+            return SessionSegmentHandles(
+                session=session,
+                active_session_id=session.active_session_id,
+                handles=tuple(_segment_handle(instance) for instance in selected_instances),
+            )
+
+    def get_context_frontier(
+        self,
+        data: GetSessionContextFrontierInput,
+    ) -> SessionContextFrontier:
+        active_item_limit = data.active_item_limit
+        historical_instance_limit = data.historical_instance_limit
+        if active_item_limit is not None and active_item_limit <= 0:
+            raise SessionValidationError("active_item_limit must be greater than zero.")
+        if historical_instance_limit is not None and historical_instance_limit <= 0:
+            raise SessionValidationError(
+                "historical_instance_limit must be greater than zero.",
+            )
+        with self.uow_factory() as uow:
+            session = uow.sessions.get(data.session_key)
+            if session is None:
+                raise SessionNotFoundError(
+                    f"Session '{data.session_key}' was not found.",
+                )
+            active_instance = uow.session_instances.get(session.active_session_id)
+            if active_instance is None:
+                raise SessionInstanceNotFoundError(
+                    f"Session instance '{session.active_session_id}' was not found.",
+                )
+            instances = tuple(uow.session_instances.list(session_key=session.id))
+            active_items = tuple(
+                uow.session_items.list(
+                    session_key=session.id,
+                    session_id=active_instance.id,
+                    limit=active_item_limit,
+                ),
+            )
+            sequence_numbers = [item.sequence_no for item in active_items]
+            protocol_call_ids = tuple(
+                dict.fromkeys(
+                    item.call_id
+                    for item in active_items
+                    if item.call_id
+                    and item.kind
+                    in {SessionItemKind.TOOL_CALL, SessionItemKind.TOOL_RESULT}
+                ),
+            )
+            historical_instances = tuple(
+                instance for instance in instances if instance.id != active_instance.id
+            )
+            if historical_instance_limit is not None:
+                historical_instances = historical_instances[-historical_instance_limit:]
+            segment_handles = tuple(
+                _segment_handle(instance)
+                for instance in (*historical_instances, active_instance)
+            )
+            return SessionContextFrontier(
+                session=session,
+                active_instance=active_instance,
+                instances=instances,
+                active_items=active_items,
+                from_sequence_no=min(sequence_numbers) if sequence_numbers else None,
+                to_sequence_no=max(sequence_numbers) if sequence_numbers else None,
+                active_item_count=len(active_items),
+                protocol_call_ids=protocol_call_ids,
+                segment_handles=segment_handles,
+            )
+
     def get_instance(self, instance_id: str) -> SessionInstance:
         with self.uow_factory() as uow:
             instance = uow.session_instances.get(instance_id)
@@ -685,7 +931,6 @@ class SessionApplicationService:
             kind=data.kind,
             role=data.role,
             phase=data.phase,
-            visibility=data.visibility,
             content_payload=dict(data.content_payload),
             source_module=data.source_module,
             source_kind=data.source_kind,
@@ -694,6 +939,10 @@ class SessionApplicationService:
             provider_item_type=data.provider_item_type,
             call_id=data.call_id,
             tool_name=data.tool_name,
+            model_visible=data.model_visible,
+            user_visible=data.user_visible,
+            chat_visible=data.chat_visible,
+            trace_visible=data.trace_visible,
             metadata=dict(data.metadata),
         )
 
@@ -845,23 +1094,69 @@ class SessionApplicationService:
     ) -> list[SessionItem]:
         return list(self.get_session_with_items(data).items)
 
-    def list_model_visible_items(
+    def build_replay_window(
         self,
-        data: ListSessionItemsInput,
-    ) -> list[SessionItem]:
-        return self.list_items(replace(data, model_visible=True))
+        data: BuildSessionReplayWindowInput,
+    ) -> SessionReplayWindow:
+        return self._build_window(
+            session_key=data.session_key,
+            limit=data.limit,
+            active_session_only=data.active_session_only,
+            after_sequence_no=data.after_sequence_no,
+            before_sequence_no=data.before_sequence_no,
+        )
 
-    def list_chat_visible_items(
+    def build_maintenance_window(
         self,
-        data: ListSessionItemsInput,
-    ) -> list[SessionItem]:
-        return self.list_items(replace(data, chat_visible=True))
+        data: BuildSessionMaintenanceWindowInput,
+    ) -> SessionReplayWindow:
+        return self._build_window(
+            session_key=data.session_key,
+            limit=data.limit,
+            active_session_only=data.active_session_only,
+            after_sequence_no=data.after_sequence_no,
+            before_sequence_no=data.before_sequence_no,
+        )
 
-    def list_trace_visible_items(
+    def _build_window(
         self,
-        data: ListSessionItemsInput,
-    ) -> list[SessionItem]:
-        return self.list_items(replace(data, trace_visible=True))
+        *,
+        session_key: str,
+        limit: int | None,
+        active_session_only: bool,
+        after_sequence_no: int | None,
+        before_sequence_no: int | None,
+    ) -> SessionReplayWindow:
+        bundle = self.get_session_with_items(
+            ListSessionItemsInput(
+                session_key=session_key,
+                limit=limit,
+                active_session_only=active_session_only,
+                after_sequence_no=after_sequence_no,
+                before_sequence_no=before_sequence_no,
+            ),
+        )
+        sequence_numbers = [
+            item.sequence_no
+            for item in bundle.items
+        ]
+        protocol_call_ids = tuple(
+            dict.fromkeys(
+                item.call_id
+                for item in bundle.items
+                if item.call_id
+                and item.kind in {SessionItemKind.TOOL_CALL, SessionItemKind.TOOL_RESULT}
+            ),
+        )
+        return SessionReplayWindow(
+            session=bundle.session,
+            items=bundle.items,
+            active_session_only=active_session_only,
+            from_sequence_no=min(sequence_numbers) if sequence_numbers else None,
+            to_sequence_no=max(sequence_numbers) if sequence_numbers else None,
+            item_count=len(bundle.items),
+            protocol_call_ids=protocol_call_ids,
+        )
 
     def get_session_with_items(
         self,
@@ -878,10 +1173,6 @@ class SessionApplicationService:
                 session_key=session.id,
                 session_id=session_id,
                 limit=data.limit,
-                model_visible=data.model_visible,
-                user_visible=data.user_visible,
-                chat_visible=data.chat_visible,
-                trace_visible=data.trace_visible,
                 after_sequence_no=data.after_sequence_no,
                 before_sequence_no=data.before_sequence_no,
             )
@@ -1087,6 +1378,44 @@ class SessionApplicationService:
         if chat_type == SessionKind.GROUP.value:
             return SessionKind.GROUP
         return SessionKind.MAIN
+
+
+def _segment_handle(instance: SessionInstance) -> SessionSegmentHandle:
+    segment = instance.metadata.get("segment")
+    segment_payload = segment if isinstance(segment, dict) else {}
+    return SessionSegmentHandle(
+        session_id=instance.id,
+        sequence_no=instance.sequence_no,
+        kind=str(segment_payload.get("kind") or instance.kind.value),
+        status=instance.status,
+        summary_text=_optional_str(segment_payload.get("summary_text")),
+        summary_item_id=_optional_str(segment_payload.get("summary_item_id")),
+        archived_item_count=_optional_int(segment_payload.get("archived_item_count")),
+        archived_through_item_sequence_no=_optional_int(
+            segment_payload.get("archived_through_item_sequence_no"),
+        ),
+        opened_at=_format_datetime_utc(instance.opened_at),
+        closed_at=(
+            _format_datetime_utc(instance.closed_at)
+            if instance.closed_at is not None
+            else None
+        ),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _idle_expiry(updated_at: datetime, idle_minutes: int) -> datetime:

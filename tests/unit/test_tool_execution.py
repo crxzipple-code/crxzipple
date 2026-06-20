@@ -324,10 +324,10 @@ class ToolExecutionTestCase(ToolTestCaseBase):
             1,
         )
         self.assertEqual(
-            envelope["model_visible_payload"]["artifact_refs"],
+            envelope["provider_replay_payload"]["artifact_refs"],
             artifact_ids,
         )
-        self.assertEqual(envelope["user_visible_payload"]["artifact_count"], 1)
+        self.assertEqual(envelope["user_summary_payload"]["artifact_count"], 1)
         self.assertEqual(
             envelope["trace_payload"]["externalized_text_artifacts"][0]["artifact_id"],
             artifact_ids[0],
@@ -341,7 +341,7 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertIsNotNone(tool_run.result_envelope_payload)
         assert tool_run.result_envelope_payload is not None
         self.assertEqual(
-            tool_run.result_envelope_payload["model_visible_payload"]["artifact_refs"],
+            tool_run.result_envelope_payload["provider_replay_payload"]["artifact_refs"],
             artifact_ids,
         )
         with self.uow_factory() as uow:

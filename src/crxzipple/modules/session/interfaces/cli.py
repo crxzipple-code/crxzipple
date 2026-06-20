@@ -15,7 +15,6 @@ from crxzipple.modules.session.domain import (
     DirectSessionScope,
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
     SessionInstanceNotFoundError,
     SessionNotFoundError,
 )
@@ -237,10 +236,6 @@ def build_cli() -> typer.Typer:
             None,
             help="Optional structured content JSON object.",
         ),
-        visibility: str | None = typer.Option(
-            None,
-            help="Optional visibility JSON object.",
-        ),
         source_module: str | None = typer.Option(
             None,
             help="Optional provenance source module.",
@@ -284,9 +279,6 @@ def build_cli() -> typer.Typer:
                         content_payload,
                         option_name="--content-payload",
                     ),
-                    visibility=SessionItemVisibility.from_payload(
-                        _parse_json_option(visibility, option_name="--visibility"),
-                    ),
                     source_module=source_module,
                     source_kind=source_kind,
                     source_id=source_id,
@@ -312,26 +304,6 @@ def build_cli() -> typer.Typer:
             "--active-only/--all",
             help="Only show items for the active session instance.",
         ),
-        model_visible: bool | None = typer.Option(
-            None,
-            "--model-visible/--not-model-visible",
-            help="Filter by model visibility.",
-        ),
-        user_visible: bool | None = typer.Option(
-            None,
-            "--user-visible/--not-user-visible",
-            help="Filter by user visibility.",
-        ),
-        chat_visible: bool | None = typer.Option(
-            None,
-            "--chat-visible/--not-chat-visible",
-            help="Filter by chat visibility.",
-        ),
-        trace_visible: bool | None = typer.Option(
-            None,
-            "--trace-visible/--not-trace-visible",
-            help="Filter by trace visibility.",
-        ),
         before_sequence_no: int | None = typer.Option(
             None,
             min=1,
@@ -345,10 +317,6 @@ def build_cli() -> typer.Typer:
                     session_key=session_key,
                     limit=limit,
                     active_session_only=active_only,
-                    model_visible=model_visible,
-                    user_visible=user_visible,
-                    chat_visible=chat_visible,
-                    trace_visible=trace_visible,
                     before_sequence_no=before_sequence_no,
                 ),
             )

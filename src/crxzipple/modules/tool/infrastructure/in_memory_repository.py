@@ -38,6 +38,17 @@ class InMemoryToolRunRepository:
     def list_for_tool(self, tool_id: str) -> list[ToolRun]:
         return [run for run in self._items.values() if run.tool_id == tool_id]
 
+    def list_for_orchestration_runs(self, run_ids: tuple[str, ...]) -> list[ToolRun]:
+        normalized_ids = {run_id for run_id in run_ids if run_id.strip()}
+        if not normalized_ids:
+            return []
+        return [
+            run
+            for run in self._items.values()
+            if str(run.metadata.get("orchestration_run_id", "")).strip()
+            in normalized_ids
+        ]
+
 
 class InMemoryToolRunAssignmentRepository:
     def __init__(self) -> None:

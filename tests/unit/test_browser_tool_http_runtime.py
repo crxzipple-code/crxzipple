@@ -18,6 +18,7 @@ from tests.unit.support import (
     SqliteTestHarness,
 )
 from tests.unit.http_test_support import HttpModuleTestCase
+from tests.unit.http_test_support import _fake_cdp_control_engine
 
 
 def _mark_browser_profiles_ready(client: TestClient, *profile_names: str, endpoint: str) -> None:
@@ -59,12 +60,16 @@ class BrowserToolHttpRuntimeTestCase(HttpModuleTestCase):
         )
 
         harness.initialize_schema(settings=settings)
-        client = TestClient(
-            create_app(
-                settings=settings,
-                database_url=harness.database_url,
+        with patch(
+            "crxzipple.app.assembly.browser.CdpControlEngine",
+            _fake_cdp_control_engine,
+        ):
+            client = TestClient(
+                create_app(
+                    settings=settings,
+                    database_url=harness.database_url,
+                )
             )
-        )
 
         try:
             _mark_browser_profiles_ready(
@@ -123,17 +128,10 @@ class BrowserToolHttpRuntimeTestCase(HttpModuleTestCase):
                 payload["result"]["metadata"]["browser_target_id"],
                 target_id,
             )
-            self.assertEqual(payload["output_payload"]["command"]["kind"], "open-tab")
-            self.assertTrue(
-                payload["output_payload"]["value"]["url"].startswith("https://example.com")
-            )
-            navigate_envelope = payload["output_payload"]["value"]["action_envelope"]
-            self.assertTrue(navigate_envelope["tool_ok"])
-            self.assertTrue(navigate_envelope["page_effect_ok"])
-            self.assertEqual(navigate_envelope["page_effect_status"], "observed_change")
-            self.assertEqual(navigate_envelope["after"]["target_id"], target_id)
-            self.assertTrue(
-                navigate_envelope["after"]["url"].startswith("https://example.com"),
+            self.assertEqual(payload["output_payload"]["command"]["kind"], "navigate")
+            self.assertEqual(
+                payload["output_payload"]["command"]["payload"]["url"],
+                "https://example.com",
             )
             self.assertEqual(
                 payload["output_payload"]["value"]["ws_url"],
@@ -217,6 +215,9 @@ class BrowserToolHttpRuntimeTestCase(HttpModuleTestCase):
         with patch(
             "crxzipple.app.assembly.browser.PlaywrightCdpSessionPool",
             FakePlaywrightCdpSessionPool,
+        ), patch(
+            "crxzipple.app.assembly.browser.CdpControlEngine",
+            _fake_cdp_control_engine,
         ):
             client = TestClient(
                 create_app(
@@ -323,12 +324,16 @@ class BrowserToolHttpRuntimeTestCase(HttpModuleTestCase):
         )
 
         harness.initialize_schema(settings=settings)
-        client = TestClient(
-            create_app(
-                settings=settings,
-                database_url=harness.database_url,
+        with patch(
+            "crxzipple.app.assembly.browser.CdpControlEngine",
+            _fake_cdp_control_engine,
+        ):
+            client = TestClient(
+                create_app(
+                    settings=settings,
+                    database_url=harness.database_url,
+                )
             )
-        )
 
         try:
             _mark_browser_profiles_ready(

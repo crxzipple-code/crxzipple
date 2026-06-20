@@ -352,7 +352,7 @@ PYTHONPATH=src pytest -q \
   tests/unit/test_context_workspace_tree_service.py \
   tests/unit/test_context_tree_tool.py \
   tests/unit/test_orchestration_context_workspace_snapshot.py \
-  tests/unit/test_orchestration_provider_request_builder.py \
+  tests/unit/test_orchestration_runtime_llm_request_builder.py \
   tests/unit/test_turn_submission_prompt_bootstrap.py
 ```
 
@@ -512,7 +512,7 @@ npm run build
 验证：
 
 ```bash
-PYTHONPATH=src pytest -q tests/unit/test_tool_capabilities.py tests/unit/test_tool_providers.py tests/unit/test_app_assembly_targets.py tests/unit/test_app_assembly_module_local.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_context_provider_mirror.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_turn_submission_prompt_bootstrap.py tests/unit/test_orchestration_provider_request_builder.py tests/unit/test_operations_tool_read_model.py tests/unit/test_module_lifecycle_architecture.py
+PYTHONPATH=src pytest -q tests/unit/test_tool_capabilities.py tests/unit/test_tool_providers.py tests/unit/test_app_assembly_targets.py tests/unit/test_app_assembly_module_local.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_context_provider_mirror.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_turn_submission_prompt_bootstrap.py tests/unit/test_orchestration_runtime_llm_request_builder.py tests/unit/test_operations_tool_read_model.py tests/unit/test_module_lifecycle_architecture.py
 
 PYTHONPATH=src pytest -q tests/unit/test_browser_tool_source_migration.py
 

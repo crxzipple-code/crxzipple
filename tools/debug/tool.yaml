@@ -1,6 +1,6 @@
 kind: local_package
 namespace: debug
-prompt:
+runtime_request:
   title: Debug Utilities
   summary: Local diagnostic tools for echo, timing, and runtime verification.
 capabilities:

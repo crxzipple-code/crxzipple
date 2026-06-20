@@ -28,10 +28,14 @@ Behavior:
 
 - Runs the command through a local POSIX shell from the bound workspace.
 - Keeps the current working directory inside the workspace.
+- Can be used for environment probes, dependency checks, short Node/Python
+  scripts, downloaded resource inspection, and HTTP/API request reproduction.
 - Reports `stdout`, `stderr`, and `exit_code`.
 - When `background=true`, starts the command and returns a `process_id` immediately.
 - Non-zero exit codes are returned in the result instead of failing the tool call.
 - Times out when the command runs too long.
+- Treat command output as evidence for the next step; if a probe adds no new
+  fact, change strategy instead of repeating it.
 
 Example:
 

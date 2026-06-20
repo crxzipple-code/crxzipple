@@ -30,6 +30,8 @@ from crxzipple.app import (
     UnknownApplicationError,
     build_app_container,
 )
+from crxzipple.interfaces.runtime_container import build_runtime_container
+from tests.unit.support import SqliteTestHarness
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,61 @@ def test_runs_activation_tasks_after_required_applications_exist() -> None:
     build_app_container(plan, target="test")
 
     assert activated == ["settings"]
+
+
+def test_can_build_read_only_container_without_activation_tasks() -> None:
+    activated: list[str] = []
+    plan = AssemblyPlan(
+        module_local_factories=(
+            ApplicationFactory(
+                key="settings",
+                provides=("settings.service",),
+                build=lambda _ctx: PlainApplication("settings"),
+            ),
+        ),
+        activation_tasks=(
+            ActivationTask(
+                key="seed-settings",
+                requires=("settings.service",),
+                run=lambda ctx: activated.append(
+                    ctx.require("settings.service").value
+                ),
+            ),
+        ),
+    )
+
+    container = build_app_container(
+        plan,
+        target="test",
+        run_activation_tasks=False,
+    )
+
+    assert container.require("settings.service") == PlainApplication("settings")
+    assert activated == []
+
+
+def test_request_preview_runtime_container_uses_lightweight_plan() -> None:
+    harness = SqliteTestHarness()
+    try:
+        settings = harness._resolved_settings(None)
+        harness.initialize_schema(settings=settings)
+
+        container = build_runtime_container(
+            settings,
+            target=AssemblyTarget.CLI_ADMIN,
+            run_activation_tasks=False,
+            plan_kind="request_preview",
+        )
+        try:
+            assert container.has(AppKey.ORCHESTRATION_INSPECTION_SERVICE)
+            assert container.has(AppKey.TOOL_ORCHESTRATION_PORT)
+            assert not container.has(AppKey.DAEMON_SERVICE)
+            assert not container.has(AppKey.PROCESS_SERVICE)
+            assert not container.has(AppKey.OPERATIONS_PROJECTION_STORE)
+        finally:
+            container.close()
+    finally:
+        harness.close()
 
 
 def test_overrides_supply_fakes_without_module_code_changes() -> None:

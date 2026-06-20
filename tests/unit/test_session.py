@@ -6,10 +6,15 @@ import unittest
 from crxzipple.modules.session.application import (
     AppendSessionItemInput,
     AppendSessionItemsInput,
+    BuildSessionReplayWindowInput,
+    CompactSessionSegmentInput,
     EnsureSessionInput,
+    GetSessionContextFrontierInput,
     GetSessionItemBySourceInput,
+    ListSessionItemRangeInput,
     ListSessionInstancesInput,
     ListSessionItemsInput,
+    ListSessionSegmentHandlesInput,
     MergeSessionItemMetadataInput,
     ResolveSessionInput,
     SessionApplicationService,
@@ -19,7 +24,6 @@ from crxzipple.modules.session.domain import (
     DirectSessionScope,
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
     SessionReply,
     SessionResetPolicy,
     SessionRouteContext,
@@ -96,7 +100,7 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(listed[0].sequence_no, 1)
         self.assertEqual(listed[0].kind.value, "main")
 
-    def test_session_items_support_model_chat_and_trace_visible_views(self) -> None:
+    def test_session_items_return_complete_fact_history(self) -> None:
         self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
@@ -112,12 +116,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 role="assistant",
                 phase=SessionItemPhase.COMMENTARY,
                 content_payload={"text": "I will inspect the page."},
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=True,
-                    chat_visible=False,
-                    trace_visible=True,
-                ),
                 source_module="llm",
                 source_kind="llm_response_item",
                 source_id="llm-1:item:0",
@@ -130,12 +128,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 role="assistant",
                 phase=SessionItemPhase.FINAL_ANSWER,
                 content_payload={"text": "Done."},
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=True,
-                    chat_visible=True,
-                    trace_visible=True,
-                ),
             ),
         )
         tool_call = self.service.append_item(
@@ -143,12 +135,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 session_key="agent:assistant:main",
                 kind=SessionItemKind.TOOL_CALL,
                 content_payload={"arguments": {"format": "text"}},
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=False,
-                    chat_visible=False,
-                    trace_visible=True,
-                ),
                 source_module="llm",
                 source_kind="llm_response_item",
                 source_id="llm-1:item:1",
@@ -158,23 +144,12 @@ class SessionServiceTestCase(unittest.TestCase):
             ),
         )
 
-        model_items = self.service.list_model_visible_items(
-            ListSessionItemsInput(session_key="agent:assistant:main"),
-        )
-        chat_items = self.service.list_chat_visible_items(
-            ListSessionItemsInput(session_key="agent:assistant:main"),
-        )
-        trace_items = self.service.list_trace_visible_items(
+        items = self.service.list_items(
             ListSessionItemsInput(session_key="agent:assistant:main"),
         )
 
         self.assertEqual(
-            [item.id for item in model_items],
-            [commentary.id, final_answer.id, tool_call.id],
-        )
-        self.assertEqual([item.id for item in chat_items], [final_answer.id])
-        self.assertEqual(
-            [item.id for item in trace_items],
+            [item.id for item in items],
             [commentary.id, final_answer.id, tool_call.id],
         )
         self.assertEqual(tool_call.call_id, "call-browser-snapshot")
@@ -195,12 +170,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 kind=SessionItemKind.USER_MESSAGE,
                 role="user",
                 content_payload={"text": "search"},
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=True,
-                    chat_visible=True,
-                    trace_visible=True,
-                ),
                 source_module="orchestration",
                 source_kind="orchestration_run",
                 source_id="run-user-input",
@@ -240,12 +209,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 kind=SessionItemKind.USER_MESSAGE,
                 role="user",
                 content_payload={"text": "hello"},
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=True,
-                    chat_visible=True,
-                    trace_visible=True,
-                ),
             ),
         )
 
@@ -343,12 +306,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 kind=SessionItemKind.USER_MESSAGE,
                 role="user",
                 content_payload={"text": "hello"},
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=True,
-                    chat_visible=True,
-                    trace_visible=True,
-                ),
             ),
         )
         second = self.service.append_item(
@@ -359,12 +316,6 @@ class SessionServiceTestCase(unittest.TestCase):
                 source_module="tool",
                 source_kind="tool_run",
                 source_id="run-1",
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=False,
-                    chat_visible=False,
-                    trace_visible=True,
-                ),
             ),
         )
 
@@ -382,7 +333,6 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(second.source_module, "tool")
         self.assertEqual(second.source_kind, "tool_run")
         self.assertEqual(second.source_id, "run-1")
-        self.assertFalse(second.visibility.user_visible)
         self.assertEqual([item.sequence_no for item in history], [1, 2])
 
     def test_append_items_batches_sequence_assignment(self) -> None:
@@ -455,6 +405,275 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(bundle.session.id, session.id)
         self.assertEqual([session_item.id for session_item in bundle.items], [item.id])
 
+    def test_build_replay_window_returns_session_fact_window(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        visible_user = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "look up flights"},
+            ),
+        )
+        progress = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                content_payload={"text": "UI only"},
+            ),
+        )
+        tool_call = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_CALL,
+                role="assistant",
+                content_payload={"name": "command.exec"},
+                call_id="call-flight-1",
+                tool_name="command.exec",
+            ),
+        )
+        tool_result = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_RESULT,
+                role="tool",
+                content_payload={"output": "ok"},
+                call_id="call-flight-1",
+                tool_name="command.exec",
+            ),
+        )
+
+        window = self.service.build_replay_window(
+            BuildSessionReplayWindowInput(session_key=session.id),
+        )
+
+        self.assertEqual(window.session.id, session.id)
+        self.assertEqual(
+            [item.id for item in window.items],
+            [visible_user.id, progress.id, tool_call.id, tool_result.id],
+        )
+        self.assertEqual(window.from_sequence_no, visible_user.sequence_no)
+        self.assertEqual(window.to_sequence_no, tool_result.sequence_no)
+        self.assertEqual(window.item_count, 4)
+        self.assertEqual(window.protocol_call_ids, ("call-flight-1",))
+
+    def test_session_item_range_query_uses_instance_and_inclusive_sequence_bounds(
+        self,
+    ) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        first = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "first"},
+            ),
+        )
+        second = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                content_payload={"text": "hidden"},
+            ),
+        )
+        third = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                content_payload={"text": "third"},
+            ),
+        )
+
+        item_range = self.service.list_item_range(
+            ListSessionItemRangeInput(
+                session_key=session.id,
+                session_id=session.active_session_id,
+                from_sequence_no=first.sequence_no,
+                to_sequence_no=third.sequence_no,
+            ),
+        )
+
+        self.assertEqual(item_range.session.id, session.id)
+        self.assertEqual(item_range.session_id, session.active_session_id)
+        self.assertEqual(
+            [item.id for item in item_range.items],
+            [first.id, second.id, third.id],
+        )
+        self.assertEqual(item_range.from_sequence_no, first.sequence_no)
+        self.assertEqual(item_range.to_sequence_no, third.sequence_no)
+        self.assertEqual(item_range.item_count, 3)
+
+    def test_session_context_frontier_exposes_active_instance_and_segment_handles(
+        self,
+    ) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        old_session_id = session.active_session_id
+        old_item = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "old request"},
+            ),
+        )
+        summary = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.CONTEXT_COMPACTION,
+                role="assistant",
+                content_payload={"text": "Old segment summary."},
+            ),
+        )
+        compacted = self.service.compact_active_segment(
+            CompactSessionSegmentInput(
+                session_key=session.id,
+                session_id=old_session_id,
+                summary_text="Old segment summary.",
+                summary_item_id=summary.id,
+                archived_through_item_sequence_no=old_item.sequence_no,
+                compaction_run_id="run-compact-frontier",
+            ),
+        )
+        active_user = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "current request"},
+            ),
+        )
+        hidden_progress = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                content_payload={"text": "ui progress"},
+            ),
+        )
+        tool_call = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_CALL,
+                role="assistant",
+                content_payload={"name": "command.exec"},
+                call_id="call-frontier-1",
+                tool_name="command.exec",
+            ),
+        )
+
+        frontier = self.service.get_context_frontier(
+            GetSessionContextFrontierInput(session_key=session.id),
+        )
+
+        self.assertEqual(frontier.session.id, session.id)
+        self.assertEqual(frontier.active_instance.id, compacted.active_session_id)
+        self.assertEqual([item.id for item in frontier.active_items], [
+            active_user.id,
+            hidden_progress.id,
+            tool_call.id,
+        ])
+        self.assertEqual(frontier.from_sequence_no, active_user.sequence_no)
+        self.assertEqual(frontier.to_sequence_no, tool_call.sequence_no)
+        self.assertEqual(frontier.active_item_count, 3)
+        self.assertEqual(frontier.protocol_call_ids, ("call-frontier-1",))
+        handles = {handle.session_id: handle for handle in frontier.segment_handles}
+        self.assertEqual(handles[old_session_id].kind, "compacted")
+        self.assertEqual(handles[old_session_id].summary_text, "Old segment summary.")
+        self.assertEqual(handles[old_session_id].summary_item_id, summary.id)
+        self.assertEqual(handles[old_session_id].archived_item_count, 1)
+        self.assertEqual(handles[compacted.active_session_id].kind, "main")
+        self.assertEqual(handles[compacted.active_session_id].status, "active")
+
+    def test_session_segment_handles_query_exposes_compacted_summary_without_items(
+        self,
+    ) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        old_session_id = session.active_session_id
+        old_item = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "old request"},
+            ),
+        )
+        summary = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.CONTEXT_COMPACTION,
+                role="assistant",
+                content_payload={"text": "Compacted segment summary."},
+            ),
+        )
+        compacted = self.service.compact_active_segment(
+            CompactSessionSegmentInput(
+                session_key=session.id,
+                session_id=old_session_id,
+                summary_text="Compacted segment summary.",
+                summary_item_id=summary.id,
+                archived_through_item_sequence_no=old_item.sequence_no,
+                compaction_run_id="run-segment-handle-query",
+            ),
+        )
+
+        historical = self.service.list_segment_handles(
+            ListSessionSegmentHandlesInput(
+                session_key=session.id,
+                include_active=False,
+            ),
+        )
+        all_handles = self.service.list_segment_handles(
+            ListSessionSegmentHandlesInput(
+                session_key=session.id,
+                include_active=True,
+                limit=1,
+            ),
+        )
+
+        self.assertEqual(historical.session.id, session.id)
+        self.assertEqual(historical.active_session_id, compacted.active_session_id)
+        self.assertEqual([handle.session_id for handle in historical.handles], [
+            old_session_id,
+        ])
+        self.assertEqual(historical.handles[0].kind, "compacted")
+        self.assertEqual(
+            historical.handles[0].summary_text,
+            "Compacted segment summary.",
+        )
+        self.assertEqual(historical.handles[0].summary_item_id, summary.id)
+        self.assertEqual(historical.handles[0].archived_item_count, 1)
+        self.assertEqual(
+            historical.handles[0].archived_through_item_sequence_no,
+            old_item.sequence_no,
+        )
+        self.assertEqual(
+            [handle.session_id for handle in all_handles.handles],
+            [compacted.active_session_id],
+        )
+
     def test_merge_item_metadata_keeps_item_inside_session_service(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
@@ -465,7 +684,7 @@ class SessionServiceTestCase(unittest.TestCase):
         item = self.service.append_item(
             AppendSessionItemInput(
                 session_key=session.id,
-                kind=SessionItemKind.COMPACTION,
+                kind=SessionItemKind.CONTEXT_COMPACTION,
                 role="assistant",
                 content_payload={"text": "summary"},
                 metadata={"kind": "summary"},

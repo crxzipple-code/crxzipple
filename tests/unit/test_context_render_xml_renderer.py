@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from crxzipple.modules.context_workspace.application.rendering.xml_renderer import (
     render_context_tree,
-    tree_prompt_visible_nodes,
+    tree_snapshot_visible_nodes,
 )
 from crxzipple.modules.context_workspace.domain import (
     ContextNode,
@@ -49,7 +49,29 @@ def test_render_context_tree_outputs_xml_like_tree_with_escaped_content() -> Non
     assert "Hidden while parent is visible." not in rendered
 
 
-def test_tree_prompt_visible_nodes_keeps_pinned_descendant_under_collapsed_parent() -> None:
+def test_render_context_tree_suppresses_handle_only_owner_content() -> None:
+    workspace = ContextWorkspace.new(
+        session_key="session:xml",
+        agent_id="assistant",
+    )
+    node = ContextNode(
+        id="workspace.file.AGENTS.md",
+        workspace_id=workspace.id,
+        owner="workspace",
+        kind="workspace_file",
+        title="AGENTS.md",
+        summary="Workspace file handle.",
+        content="Raw workspace file body must not render.",
+        state=ContextNodeState(collapsed=False, pinned=True),
+    )
+
+    rendered = render_context_tree(workspace, (node,))
+
+    assert "Workspace file handle." in rendered
+    assert "Raw workspace file body must not render." not in rendered
+
+
+def test_tree_snapshot_visible_nodes_keeps_pinned_descendant_under_collapsed_parent() -> None:
     workspace = ContextWorkspace.new(
         session_key="session:xml",
         agent_id="assistant",
@@ -81,7 +103,7 @@ def test_tree_prompt_visible_nodes_keeps_pinned_descendant_under_collapsed_paren
         state=ContextNodeState(collapsed=True),
     )
 
-    visible = tree_prompt_visible_nodes((root, hidden_child, pinned_child))
+    visible = tree_snapshot_visible_nodes((root, hidden_child, pinned_child))
 
     assert tuple(node.id for node in visible) == ("root", "child")
 

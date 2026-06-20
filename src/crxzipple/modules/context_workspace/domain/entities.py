@@ -171,12 +171,12 @@ class ContextTreeOperation(Entity[str]):
 
 
 @dataclass(kw_only=True)
-class ContextRenderSnapshot(AggregateRoot[str]):
+class ContextSnapshot(AggregateRoot[str]):
     workspace_id: str
     session_key: str
     run_id: str
     tree_revision: int
-    prompt_body: str
+    debug_body: str
     provider_attachments: JsonObject = field(default_factory=dict)
     estimate: ContextEstimate = field(default_factory=ContextEstimate)
     included_node_ids: tuple[str, ...] = ()
@@ -220,11 +220,76 @@ class ContextRenderSnapshot(AggregateRoot[str]):
         self.created_at = normalize_timestamp(self.created_at)
 
 
+@dataclass(kw_only=True)
+class ContextRequestRenderSnapshot(AggregateRoot[str]):
+    workspace_id: str
+    session_key: str
+    run_id: str
+    tree_revision: int
+    turn_id: str | None = None
+    step_id: str | None = None
+    llm_invocation_id: str | None = None
+    provider: str | None = None
+    transport: str | None = None
+    model: str | None = None
+    renderer_id: str | None = None
+    renderer_version: str | None = None
+    session_frontier_revision: str | None = None
+    input_item_refs: tuple[JsonObject, ...] = ()
+    projected_input_items: tuple[JsonObject, ...] = ()
+    tool_schema_refs: tuple[JsonObject, ...] = ()
+    resource_refs: tuple[JsonObject, ...] = ()
+    request_hash: str | None = None
+    estimated_tokens: int | None = None
+    render_report: JsonObject = field(default_factory=dict)
+    timings: JsonObject = field(default_factory=dict)
+    metadata: JsonObject = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        _require_text(self.id, "request render snapshot id")
+        self.workspace_id = _require_text(self.workspace_id, "workspace_id")
+        self.session_key = _require_text(self.session_key, "session_key")
+        self.run_id = _require_text(self.run_id, "run_id")
+        if int(self.tree_revision) <= 0:
+            raise ContextWorkspaceValidationError("tree_revision must be positive.")
+        self.tree_revision = int(self.tree_revision)
+        self.turn_id = _normalize_optional_text(self.turn_id)
+        self.step_id = _normalize_optional_text(self.step_id)
+        self.llm_invocation_id = _normalize_optional_text(self.llm_invocation_id)
+        self.provider = _normalize_optional_text(self.provider)
+        self.transport = _normalize_optional_text(self.transport)
+        self.model = _normalize_optional_text(self.model)
+        self.renderer_id = _normalize_optional_text(self.renderer_id)
+        self.renderer_version = _normalize_optional_text(self.renderer_version)
+        self.session_frontier_revision = _normalize_optional_text(
+            self.session_frontier_revision,
+        )
+        self.input_item_refs = _normalize_ref_tuple(self.input_item_refs)
+        self.projected_input_items = _normalize_ref_tuple(self.projected_input_items)
+        self.tool_schema_refs = _normalize_ref_tuple(self.tool_schema_refs)
+        self.resource_refs = _normalize_ref_tuple(self.resource_refs)
+        self.request_hash = _normalize_optional_text(self.request_hash)
+        if self.estimated_tokens is not None:
+            self.estimated_tokens = max(0, int(self.estimated_tokens))
+        self.render_report = dict(self.render_report)
+        self.timings = dict(self.timings)
+        self.metadata = dict(self.metadata)
+        self.created_at = normalize_timestamp(self.created_at)
+
+
 def _require_text(value: str, label: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ContextWorkspaceValidationError(f"{label} cannot be blank.")
     return normalized
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _normalize_ref_tuple(refs: tuple[JsonObject, ...]) -> tuple[JsonObject, ...]:
@@ -233,7 +298,8 @@ def _normalize_ref_tuple(refs: tuple[JsonObject, ...]) -> tuple[JsonObject, ...]
 
 __all__ = [
     "ContextNode",
-    "ContextRenderSnapshot",
+    "ContextRequestRenderSnapshot",
+    "ContextSnapshot",
     "ContextTreeOperation",
     "ContextWorkspace",
 ]

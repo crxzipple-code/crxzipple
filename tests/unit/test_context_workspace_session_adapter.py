@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from types import SimpleNamespace
 from typing import Any
 
 from crxzipple.app.integration.context_workspace_session import (
@@ -12,18 +11,19 @@ from crxzipple.app.integration.context_workspace_session import (
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     ContextOwnerRegistry,
-    ContextRenderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
-    RecordContextRenderSnapshotInput,
-    RenderContextPromptInput,
+    RecordContextSnapshotInput,
+    ContextObservationRenderInput,
+    ContextSliceBuilderService,
 )
 from crxzipple.modules.context_workspace.domain import ContextAction
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
 from crxzipple.modules.session.application import (
@@ -44,7 +44,6 @@ from crxzipple.modules.session.infrastructure import (
 from crxzipple.modules.session.domain import (
     SessionItem,
     SessionItemKind,
-    SessionItemVisibility,
 )
 from crxzipple.modules.tool.application.result_envelope import (
     TOOL_RESULT_ENVELOPE_METADATA_KEY,
@@ -110,13 +109,18 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
     tree = services["tree"].list_tree("session:tree")
 
     assert {node.id for node in tree.nodes} >= {
-        "session.segment.current",
+        "session.instance.active",
+        "session.segments.active",
+        "session.segment.active",
         "session.items.current",
     }
-    current_segment = next(node for node in tree.nodes if node.id == "session.segment.current")
-    assert current_segment.parent_id == "session.current"
+    active_instance = next(node for node in tree.nodes if node.id == "session.instance.active")
+    assert active_instance.parent_id == "session.current"
+    assert active_instance.kind == "session_instance"
+    current_segment = next(node for node in tree.nodes if node.id == "session.segment.active")
+    assert current_segment.parent_id == "session.segments.active"
     messages_node = next(node for node in tree.nodes if node.id == "session.items.current")
-    assert messages_node.parent_id == "session.segment.current"
+    assert messages_node.parent_id == "session.segment.active"
     assert messages_node.owner_ref["from_sequence_no"] == 1
     assert messages_node.owner_ref["to_sequence_no"] == 2
     assert messages_node.state.collapsed is False
@@ -142,6 +146,302 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
     assert message_nodes[0].metadata["content_block_types"] == ["text"]
 
 
+def test_session_adapter_exposes_current_turn_and_execution_step_refs() -> None:
+    session_service = _session_service()
+    session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:turn-tree",
+            agent_id="assistant",
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:turn-tree",
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "check weather"}]},
+            source_kind="orchestration_run",
+            source_id="run-turn-tree",
+        ),
+    )
+    services = _context_services(
+        session_service,
+        execution_query=_FakeExecutionQuery(
+            turn_id="run-turn-tree",
+            summary_payload={
+                "llm_invocation_id": "llm-invocation-1",
+                "tool_call_names": ["open_meteo_weather.forecast_weather"],
+            },
+        ),
+    )
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:turn-tree",
+            agent_id="assistant",
+            metadata={"last_run_id": "run-turn-tree"},
+        ),
+    )
+    tree = services["tree"].list_tree("session:turn-tree")
+    nodes = {node.id: node for node in tree.nodes}
+
+    assert "session.turn.current" in nodes
+    assert nodes["session.turn.current"].kind == "session_turn"
+    assert nodes["session.turn.current"].parent_id == "session.segment.active"
+    assert "session.steps.current" in nodes
+    assert nodes["session.steps.current"].kind == "session_steps_root"
+    assert nodes["session.steps.current"].parent_id == "session.turn.current"
+    assert "session.step.step-1" in nodes
+    assert nodes["session.step.step-1"].kind == "session_step"
+    assert nodes["session.step.step-1"].owner_ref["step_id"] == "step-1"
+    assert "session.step.item.item-1" in nodes
+    assert nodes["session.step.item.item-1"].kind == "runtime_llm_invocation"
+    assert (
+        nodes["session.step.item.item-1"].owner_ref["llm_invocation_id"]
+        == "llm-invocation-1"
+    )
+
+
+def test_session_adapter_projects_execution_item_runtime_semantic_kind() -> None:
+    session_service = _session_service()
+    session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:semantic-step",
+            agent_id="assistant",
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:semantic-step",
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "continue"}]},
+            source_kind="orchestration_run",
+            source_id="run-semantic-step",
+        ),
+    )
+    services = _context_services(
+        session_service,
+        execution_query=_FakeExecutionQuery(
+            turn_id="run-semantic-step",
+            summary_payload={
+                "runtime_semantic_kind": "runtime.assistant_progress",
+                "llm_invocation_id": "llm-invocation-progress",
+                "llm_response_item_id": "llm-response-progress",
+                "session_item_id": "session-item-progress",
+            },
+        ),
+    )
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:semantic-step",
+            agent_id="assistant",
+            metadata={"last_run_id": "run-semantic-step"},
+        ),
+    )
+    nodes = {
+        node.id: node
+        for node in services["tree"].list_tree("session:semantic-step").nodes
+    }
+    item_node = nodes["session.step.item.item-1"]
+
+    assert item_node.kind == "runtime_assistant_progress"
+    assert item_node.owner_ref["runtime_semantic_kind"] == "runtime.assistant_progress"
+    assert item_node.owner_ref["llm_response_item_id"] == "llm-response-progress"
+    assert item_node.owner_ref["session_item_id"] == "session-item-progress"
+    assert item_node.metadata["runtime_semantic_kind"] == "runtime.assistant_progress"
+    assert "runtime_semantic_kind" in item_node.summary
+
+
+def test_session_adapter_projects_final_and_blocked_runtime_semantic_nodes() -> None:
+    session_service = _session_service()
+    session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:terminal-semantics",
+            agent_id="assistant",
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:terminal-semantics",
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "continue"}]},
+            source_kind="orchestration_run",
+            source_id="run-terminal-semantics",
+        ),
+    )
+    services = _context_services(
+        session_service,
+        execution_query=_FakeExecutionQueryWithSteps(
+            turn_id="run-terminal-semantics",
+            steps=[
+                _FakeExecutionEntity(
+                    id="step-final",
+                    kind="llm",
+                    status="completed",
+                    step_index=1,
+                ),
+            ],
+            items_by_step_id={
+                "step-final": [
+                    _FakeExecutionEntity(
+                        id="item-final-answer",
+                        kind="llm_invocation",
+                        status="completed",
+                        summary_payload={
+                            "runtime_semantic_kind": "runtime.final_answer",
+                            "llm_invocation_id": "llm-final",
+                            "llm_response_item_id": "response-final",
+                            "session_item_id": "session-final",
+                        },
+                    ),
+                    _FakeExecutionEntity(
+                        id="item-blocked",
+                        kind="continuation_decision",
+                        status="completed",
+                        summary_payload={
+                            "runtime_semantic_kind": "runtime.blocked_state",
+                            "run_status": "blocked",
+                        },
+                    ),
+                ],
+            },
+        ),
+    )
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:terminal-semantics",
+            agent_id="assistant",
+            metadata={"last_run_id": "run-terminal-semantics"},
+        ),
+    )
+    nodes = {
+        node.id: node
+        for node in services["tree"].list_tree("session:terminal-semantics").nodes
+    }
+
+    final_node = nodes["session.step.item.item-final-answer"]
+    blocked_node = nodes["session.step.item.item-blocked"]
+
+    assert final_node.kind == "runtime_final_answer"
+    assert final_node.owner_ref["runtime_semantic_kind"] == "runtime.final_answer"
+    assert final_node.owner_ref["session_item_id"] == "session-final"
+    assert blocked_node.kind == "runtime_blocked_state"
+    assert blocked_node.owner_ref["runtime_semantic_kind"] == "runtime.blocked_state"
+
+
+def test_session_adapter_projects_tool_batch_runtime_ref_nodes() -> None:
+    session_service = _session_service()
+    session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:tool-batch-step",
+            agent_id="assistant",
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:tool-batch-step",
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "use tool"}]},
+            source_kind="orchestration_run",
+            source_id="run-tool-batch-step",
+        ),
+    )
+    services = _context_services(
+        session_service,
+        execution_query=_FakeExecutionQueryWithSteps(
+            turn_id="run-tool-batch-step",
+            steps=[
+                _FakeExecutionEntity(
+                    id="step-llm",
+                    kind="llm",
+                    status="completed",
+                    step_index=1,
+                ),
+                _FakeExecutionEntity(
+                    id="step-tool-batch",
+                    kind="tool_batch",
+                    status="completed",
+                    step_index=2,
+                ),
+            ],
+            items_by_step_id={
+                "step-llm": [
+                    _FakeExecutionEntity(
+                        id="item-tool-call",
+                        kind="tool_call",
+                        status="completed",
+                        summary_payload={
+                            "runtime_semantic_kind": "runtime.assistant_tool_call",
+                            "llm_invocation_id": "llm-invocation-tools",
+                            "llm_response_item_id": "llm-response-tool-call",
+                            "tool_call_id": "call-weather",
+                            "tool_call_names": ["weather.forecast"],
+                        },
+                    ),
+                ],
+                "step-tool-batch": [
+                    _FakeExecutionEntity(
+                        id="item-tool-run",
+                        kind="tool_run",
+                        status="completed",
+                        summary_payload={
+                            "tool_call_id": "call-weather",
+                            "tool_run_id": "tool-run-weather",
+                        },
+                    ),
+                    _FakeExecutionEntity(
+                        id="item-tool-result",
+                        kind="tool_result",
+                        status="completed",
+                        summary_payload={
+                            "runtime_semantic_kind": "runtime.tool_result",
+                            "tool_call_id": "call-weather",
+                            "tool_run_id": "tool-run-weather",
+                            "session_item_id": "session-item-tool-result",
+                        },
+                    ),
+                ],
+            },
+        ),
+    )
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:tool-batch-step",
+            agent_id="assistant",
+            metadata={"last_run_id": "run-tool-batch-step"},
+        ),
+    )
+    nodes = {
+        node.id: node
+        for node in services["tree"].list_tree("session:tool-batch-step").nodes
+    }
+
+    tool_batch_step = nodes["session.step.step-tool-batch"]
+    assert tool_batch_step.kind == "session_step"
+    assert tool_batch_step.owner_ref["kind"] == "tool_batch"
+    assert tool_batch_step.owner_ref["status"] == "completed"
+
+    tool_run = nodes["session.step.item.item-tool-run"]
+    assert tool_run.parent_id == "session.step.step-tool-batch"
+    assert tool_run.kind == "runtime_tool_run"
+    assert tool_run.owner_ref["tool_call_id"] == "call-weather"
+    assert tool_run.owner_ref["tool_run_id"] == "tool-run-weather"
+
+    tool_result = nodes["session.step.item.item-tool-result"]
+    assert tool_result.parent_id == "session.step.step-tool-batch"
+    assert tool_result.kind == "runtime_tool_result"
+    assert tool_result.owner_ref["runtime_semantic_kind"] == "runtime.tool_result"
+    assert tool_result.owner_ref["session_item_id"] == "session-item-tool-result"
+
+    tool_call = nodes["session.step.item.item-tool-call"]
+    assert tool_call.parent_id == "session.step.step-llm"
+    assert tool_call.kind == "runtime_assistant_tool_call"
+    assert tool_call.owner_ref["llm_response_item_id"] == "llm-response-tool-call"
+    assert tool_call.owner_ref["tool_call_id"] == "call-weather"
+
+
 def test_session_adapter_keeps_assistant_item_source_refs_when_collapsed() -> None:
     session_service = _session_service()
     session_service.ensure_session(
@@ -156,7 +456,6 @@ def test_session_adapter_keeps_assistant_item_source_refs_when_collapsed() -> No
             kind=SessionItemKind.USER_MESSAGE,
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "continue"}]},
-            visibility=SessionItemVisibility(model_visible=True),
             source_module="orchestration",
             source_kind="orchestration_run",
             source_id="run-item-commentary",
@@ -175,7 +474,6 @@ def test_session_adapter_keeps_assistant_item_source_refs_when_collapsed() -> No
                     },
                 ],
             },
-            visibility=SessionItemVisibility(model_visible=True),
             source_module="llm",
             source_kind="llm_response_item",
             source_id="llm-item-commentary-1",
@@ -224,7 +522,7 @@ def test_session_adapter_keeps_assistant_item_source_refs_when_collapsed() -> No
     assert collapsed_node.metadata["source_id"] == "llm-item-commentary-1"
 
 
-def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
+def test_session_adapter_renders_expanded_messages_as_context_debug_xml() -> None:
     session_service = _session_service()
     session_service.ensure_session(
         EnsureSessionInput(
@@ -288,27 +586,27 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
         ),
     )
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:render"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:render"),
     )
 
-    assert '<item role="user" sequence="1" kind="message"' in rendered.prompt_body
-    assert "render me" in rendered.prompt_body
-    assert '<tool_interaction tool_name="echo"' in rendered.prompt_body
+    assert '<item role="user" sequence="1" kind="message"' in rendered.debug_body
+    assert "render me" in rendered.debug_body
+    assert '<tool_interaction tool_name="echo"' in rendered.debug_body
     tool_interaction_line = next(
         line
-        for line in rendered.prompt_body.splitlines()
+        for line in rendered.debug_body.splitlines()
         if '<tool_interaction tool_name="echo"' in line
     )
-    assert 'status="succeeded"' in rendered.prompt_body
-    assert 'sequence="2-3"' in rendered.prompt_body
+    assert 'status="succeeded"' in rendered.debug_body
+    assert 'sequence="2-3"' in rendered.debug_body
     assert 'call_id="call-1"' not in tool_interaction_line
     assert 'frontier="false"' not in tool_interaction_line
     assert 'consumed="true"' not in tool_interaction_line
     assert 'superseded="false"' not in tool_interaction_line
-    assert "<refs " not in rendered.prompt_body
-    assert "<arguments>" not in rendered.prompt_body
-    assert "<result>" not in rendered.prompt_body
+    assert "<refs " not in rendered.debug_body
+    assert "<arguments>" not in rendered.debug_body
+    assert "<result>" not in rendered.debug_body
 
     tree = services["tree"].list_tree("session:render")
     tool_node = next(node for node in tree.nodes if node.kind == "tool_interaction")
@@ -316,7 +614,7 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
     assert tool_node.state.consumed is True
     assert tool_node.metadata["superseded"] is False
     assert tool_node.owner_ref["superseded"] is False
-    assert tool_node.metadata["prompt_visibility_status"] == "folded_consumed_history"
+    assert tool_node.metadata["snapshot_visibility_status"] == "folded_consumed_history"
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:render",
@@ -324,13 +622,13 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
             action=ContextAction.EXPAND,
         ),
     )
-    expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:render"),
+    expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:render"),
     )
 
-    assert "<arguments>" not in expanded_render.prompt_body
-    assert "<result>" not in expanded_render.prompt_body
-    assert "content_omitted" in expanded_render.prompt_body
+    assert "<arguments>" not in expanded_render.debug_body
+    assert "<result>" not in expanded_render.debug_body
+    assert "content_omitted" in expanded_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -339,14 +637,14 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
             action=ContextAction.PIN,
         ),
     )
-    pinned_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:render"),
+    pinned_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:render"),
     )
 
-    assert "<arguments>" in pinned_render.prompt_body
-    assert "&quot;message&quot;: &quot;render me&quot;" in pinned_render.prompt_body
-    assert "<result>" in pinned_render.prompt_body
-    assert "echoed" in pinned_render.prompt_body
+    assert "<arguments>" in pinned_render.debug_body
+    assert "&quot;message&quot;: &quot;render me&quot;" in pinned_render.debug_body
+    assert "<result>" in pinned_render.debug_body
+    assert "echoed" in pinned_render.debug_body
 
 
 def test_session_adapter_renders_assistant_progress_before_tool_interaction() -> None:
@@ -433,17 +731,17 @@ def test_session_adapter_renders_assistant_progress_before_tool_interaction() ->
         ),
     )
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:assistant-progress"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:assistant-progress"),
     )
 
-    assert '<item role="assistant" sequence="2" kind="message"' in rendered.prompt_body
-    assert "我先检查页面状态。" in rendered.prompt_body
-    assert '<tool_interaction tool_name="browser.snapshot"' in rendered.prompt_body
-    assert 'sequence="3-4"' in rendered.prompt_body
+    assert '<item role="assistant" sequence="2" kind="message"' in rendered.debug_body
+    assert "我先检查页面状态。" in rendered.debug_body
+    assert '<tool_interaction tool_name="browser.snapshot"' in rendered.debug_body
+    assert 'sequence="3-4"' in rendered.debug_body
 
 
-def test_session_adapter_expands_current_run_frontier_tool_interactions_by_default() -> None:
+def test_session_adapter_does_not_infer_current_run_frontier_without_execution_fact() -> None:
     session_service = _session_service()
     session = session_service.ensure_session(
         EnsureSessionInput(
@@ -519,33 +817,30 @@ def test_session_adapter_expands_current_run_frontier_tool_interactions_by_defau
             action=ContextAction.EXPAND,
         ),
     )
-    frontier_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:current-tool-tail"),
+    frontier_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:current-tool-tail"),
     )
 
-    assert '<tool_interaction tool_name="browser.observe"' in frontier_render.prompt_body
-    assert 'call_id="call-current"' in frontier_render.prompt_body
-    assert 'lifecycle="frontier"' in frontier_render.prompt_body
-    assert 'frontier="true"' in frontier_render.prompt_body
-    assert 'consumed="false"' in frontier_render.prompt_body
-    assert 'superseded="false"' in frontier_render.prompt_body
-    assert 'verified="true"' in frontier_render.prompt_body
-    assert "<refs " in frontier_render.prompt_body
-    assert "<arguments>" in frontier_render.prompt_body
-    assert "<result>" in frontier_render.prompt_body
-    assert "SECRET_TAIL" in frontier_render.prompt_body
+    assert '<tool_interaction tool_name="browser.observe"' in frontier_render.debug_body
+    assert 'call_id="call-current"' not in frontier_render.debug_body
+    assert 'lifecycle="frontier"' not in frontier_render.debug_body
+    assert 'frontier="true"' not in frontier_render.debug_body
+    assert 'consumed="false"' not in frontier_render.debug_body
+    assert "<arguments>" not in frontier_render.debug_body
+    assert "<result>" not in frontier_render.debug_body
+    assert "SECRET_TAIL" not in frontier_render.debug_body
 
     tree = services["tree"].list_tree("session:current-tool-tail")
     tool_node = next(node for node in tree.nodes if node.kind == "tool_interaction")
-    assert tool_node.state.collapsed is False
-    assert tool_node.state.consumed is False
-    assert tool_node.metadata["lifecycle_status"] == "frontier"
-    assert tool_node.metadata["frontier"] is True
-    assert tool_node.metadata["consumed"] is False
-    assert tool_node.metadata["verified"] is True
+    assert tool_node.state.collapsed is True
+    assert tool_node.state.consumed is True
+    assert tool_node.metadata["lifecycle_status"] == "observed"
+    assert tool_node.metadata["frontier"] is False
+    assert tool_node.metadata["consumed"] is True
+    assert tool_node.metadata["observed"] is True
     assert tool_node.metadata["superseded"] is False
-    assert tool_node.metadata["prompt_visibility_status"] == "frontier_protocol_tail"
-    assert tool_node.metadata["collapsed_by_default"] is False
+    assert tool_node.metadata["snapshot_visibility_status"] == "folded_consumed_history"
+    assert tool_node.metadata["collapsed_by_default"] is True
     assert session.active_session_id in tool_node.id
 
 
@@ -641,7 +936,7 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
         turn_id="run-execution-consumed",
         summary_payload={
             "llm_transcript_consumption": {
-                "direct_transcript_sequence_range": {
+                "draft_input_sequence_range": {
                     "sessions": [
                         {
                             "session_id": session.active_session_id,
@@ -670,8 +965,8 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:execution-consumed"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:execution-consumed"),
     )
     tree = services["tree"].list_tree("session:execution-consumed")
     consumed_node = next(
@@ -694,48 +989,48 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
     assert consumed_node.metadata["consumed"] is True
     assert consumed_node.metadata["opened_by_default"] is False
     assert consumed_node.metadata["consumed_through_sequence_no"] == 3
-    assert consumed_node.metadata["prompt_visibility_status"] == "folded_consumed_history"
+    assert consumed_node.metadata["snapshot_visibility_status"] == "folded_consumed_history"
     assert frontier_node.state.collapsed is False
     assert frontier_node.state.consumed is False
     assert frontier_node.metadata["frontier"] is True
     assert frontier_node.metadata["consumed"] is False
     assert frontier_node.metadata["consumed_through_sequence_no"] == 3
-    assert frontier_node.metadata["prompt_visibility_status"] == "frontier_protocol_tail"
-    assert 'call_id="call-consumed"' not in rendered.prompt_body
-    assert 'call_id="call-frontier"' in rendered.prompt_body
+    assert frontier_node.metadata["snapshot_visibility_status"] == "frontier_protocol_tail"
+    assert 'call_id="call-consumed"' not in rendered.debug_body
+    assert 'call_id="call-frontier"' in rendered.debug_body
     consumed_line = next(
         line
-        for line in rendered.prompt_body.splitlines()
+        for line in rendered.debug_body.splitlines()
         if '<tool_interaction tool_name="context_tree.expand"' in line
     )
     assert "current-turn result_sha256=" in consumed_line
     assert "consumed preview" not in consumed_line
-    assert "CONSUMED_SECRET_TAIL" not in rendered.prompt_body
-    assert "FRONTIER_VISIBLE" in rendered.prompt_body
+    assert "CONSUMED_SECRET_TAIL" not in rendered.debug_body
+    assert "FRONTIER_VISIBLE" in rendered.debug_body
 
 
-def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_result_frontier() -> None:
+def test_session_adapter_without_execution_fact_does_not_infer_tool_frontier() -> None:
     session_service = _session_service()
     session_service.ensure_session(
         EnsureSessionInput(
-            key="session:legacy-frontier",
+            key="session:no-inferred-frontier",
             agent_id="assistant",
         ),
     )
     session_service.append_item_fixture(
         AppendSessionItemFixtureInput(
-            session_key="session:legacy-frontier",
+            session_key="session:no-inferred-frontier",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "continue browser task"}]},
             source_kind="orchestration_run",
-            source_id="run-legacy-frontier",
+            source_id="run-no-inferred-frontier",
         ),
     )
     for index in range(1, 4):
         call_id = f"call-legacy-{index}"
         session_service.append_item_fixture(
             AppendSessionItemFixtureInput(
-                session_key="session:legacy-frontier",
+                session_key="session:no-inferred-frontier",
                 role="assistant",
                 content_payload={
                     "type": "function_call",
@@ -751,7 +1046,7 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
         )
         session_service.append_item_fixture(
             AppendSessionItemFixtureInput(
-                session_key="session:legacy-frontier",
+                session_key="session:no-inferred-frontier",
                 role="tool",
                 kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
@@ -775,24 +1070,24 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
 
     services["workspace"].ensure_workspace(
         EnsureContextWorkspaceInput(
-            session_key="session:legacy-frontier",
+            session_key="session:no-inferred-frontier",
             agent_id="assistant",
-            metadata={"last_run_id": "run-legacy-frontier"},
+            metadata={"last_run_id": "run-no-inferred-frontier"},
         ),
     )
     services["tree"].apply_action(
         ContextActionInput(
-            session_key="session:legacy-frontier",
+            session_key="session:no-inferred-frontier",
             node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:legacy-frontier"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:no-inferred-frontier"),
     )
     tool_nodes = {
         node.metadata["tool_call_id"]: node
-        for node in services["tree"].list_tree("session:legacy-frontier").nodes
+        for node in services["tree"].list_tree("session:no-inferred-frontier").nodes
         if node.kind == "tool_interaction"
     }
 
@@ -800,28 +1095,28 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
     assert tool_nodes["call-legacy-1"].metadata["consumed"] is True
     assert tool_nodes["call-legacy-2"].metadata["frontier"] is False
     assert tool_nodes["call-legacy-2"].metadata["consumed"] is True
-    assert tool_nodes["call-legacy-3"].metadata["frontier"] is True
-    assert tool_nodes["call-legacy-3"].metadata["consumed"] is False
-    assert "SECRET_1" not in rendered.prompt_body
-    assert "SECRET_2" not in rendered.prompt_body
-    assert "SECRET_3" in rendered.prompt_body
+    assert tool_nodes["call-legacy-3"].metadata["frontier"] is False
+    assert tool_nodes["call-legacy-3"].metadata["consumed"] is True
+    assert "SECRET_1" not in rendered.debug_body
+    assert "SECRET_2" not in rendered.debug_body
+    assert "SECRET_3" not in rendered.debug_body
 
 
-def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_frontier() -> None:
+def test_session_adapter_without_execution_fact_does_not_infer_llm_tool_batch_frontier() -> None:
     session_service = _session_service()
     session_service.ensure_session(
         EnsureSessionInput(
-            key="session:latest-source-frontier",
+            key="session:no-inferred-batch-frontier",
             agent_id="assistant",
         ),
     )
     session_service.append_item_fixture(
         AppendSessionItemFixtureInput(
-            session_key="session:latest-source-frontier",
+            session_key="session:no-inferred-batch-frontier",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "continue browser task"}]},
             source_kind="orchestration_run",
-            source_id="run-latest-source-frontier",
+            source_id="run-no-inferred-batch-frontier",
         ),
     )
     batches = (
@@ -832,7 +1127,7 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
         for call_id in call_ids:
             session_service.append_item_fixture(
                 AppendSessionItemFixtureInput(
-                    session_key="session:latest-source-frontier",
+                    session_key="session:no-inferred-batch-frontier",
                     role="assistant",
                     content_payload={
                         "type": "function_call",
@@ -851,7 +1146,7 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
         for call_id in call_ids:
             session_service.append_item_fixture(
                 AppendSessionItemFixtureInput(
-                    session_key="session:latest-source-frontier",
+                    session_key="session:no-inferred-batch-frontier",
                     role="tool",
                     kind=SessionItemFixtureKind.TOOL_RESULT,
                     content_payload={
@@ -870,36 +1165,36 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
 
     services["workspace"].ensure_workspace(
         EnsureContextWorkspaceInput(
-            session_key="session:latest-source-frontier",
+            session_key="session:no-inferred-batch-frontier",
             agent_id="assistant",
-            metadata={"last_run_id": "run-latest-source-frontier"},
+            metadata={"last_run_id": "run-no-inferred-batch-frontier"},
         ),
     )
     services["tree"].apply_action(
         ContextActionInput(
-            session_key="session:latest-source-frontier",
+            session_key="session:no-inferred-batch-frontier",
             node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
-    services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:latest-source-frontier"),
+    services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:no-inferred-batch-frontier"),
     )
     tool_nodes = {
         node.metadata["tool_call_id"]: node
-        for node in services["tree"].list_tree("session:latest-source-frontier").nodes
+        for node in services["tree"].list_tree("session:no-inferred-batch-frontier").nodes
         if node.kind == "tool_interaction"
     }
 
     assert tool_nodes["call-old"].metadata["frontier"] is False
     assert tool_nodes["call-old"].metadata["consumed"] is True
-    assert tool_nodes["call-latest-a"].metadata["frontier"] is True
-    assert tool_nodes["call-latest-a"].metadata["consumed"] is False
-    assert tool_nodes["call-latest-b"].metadata["frontier"] is True
-    assert tool_nodes["call-latest-b"].metadata["consumed"] is False
+    assert tool_nodes["call-latest-a"].metadata["frontier"] is False
+    assert tool_nodes["call-latest-a"].metadata["consumed"] is True
+    assert tool_nodes["call-latest-b"].metadata["frontier"] is False
+    assert tool_nodes["call-latest-b"].metadata["consumed"] is True
 
 
-def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> None:
+def test_session_adapter_keeps_long_browser_tool_chain_under_context_budget() -> None:
     session_service = _session_service()
     session = session_service.ensure_session(
         EnsureSessionInput(
@@ -993,7 +1288,7 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
         turn_id="run-long-browser-chain",
         summary_payload={
             "llm_transcript_consumption": {
-                "direct_transcript_sequence_range": {
+                "draft_input_sequence_range": {
                     "sessions": [
                         {
                             "session_id": session.active_session_id,
@@ -1022,8 +1317,8 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:long-browser-chain"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:long-browser-chain"),
     )
     tree = services["tree"].list_tree("session:long-browser-chain")
     tool_nodes = [node for node in tree.nodes if node.kind == "tool_interaction"]
@@ -1049,12 +1344,13 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
     ]
     assert rendered.estimate.text_chars < 50_000
     assert rendered.estimate.text_tokens < 13_000
-    assert "OLD_BROWSER_SECRET_1" not in rendered.prompt_body
-    assert "OLD_BROWSER_SECRET_54" not in rendered.prompt_body
-    assert "OLD_BROWSER_SECRET_55" not in rendered.prompt_body
-    assert "result_body: omitted_from_prompt" in rendered.prompt_body
-    assert "artifact-browser-body-55" in rendered.prompt_body
-    assert 'frontier="true"' in rendered.prompt_body
+    assert "OLD_BROWSER_SECRET_1" not in rendered.debug_body
+    assert "OLD_BROWSER_SECRET_54" not in rendered.debug_body
+    assert "OLD_BROWSER_SECRET_55" not in rendered.debug_body
+    assert "tool_result_ref:" in rendered.debug_body
+    assert "body_storage: externalized" in rendered.debug_body
+    assert "artifact-browser-body-55" in rendered.debug_body
+    assert 'frontier="true"' in rendered.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -1106,7 +1402,7 @@ def test_session_adapter_keeps_plain_tool_history_results_compact_by_default() -
         turn_id="run-plain-tool-history",
         summary_payload={
             "llm_transcript_consumption": {
-                "direct_transcript_sequence_range": {
+                "draft_input_sequence_range": {
                     "sessions": [
                         {
                             "session_id": session.active_session_id,
@@ -1135,8 +1431,8 @@ def test_session_adapter_keeps_plain_tool_history_results_compact_by_default() -
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:plain-tool-history"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:plain-tool-history"),
     )
     tree = services["tree"].list_tree("session:plain-tool-history")
     tool_nodes = [node for node in tree.nodes if node.kind == "tool_interaction"]
@@ -1145,10 +1441,10 @@ def test_session_adapter_keeps_plain_tool_history_results_compact_by_default() -
     assert [node.metadata["tool_call_id"] for node in frontier_nodes] == [
         "call-plain-50",
     ]
-    assert "SECRET_PLAIN_1" not in rendered.prompt_body
-    assert "SECRET_PLAIN_49" not in rendered.prompt_body
-    assert "SECRET_PLAIN_50" in rendered.prompt_body
-    assert rendered.prompt_body.count("<result>") == 1
+    assert "SECRET_PLAIN_1" not in rendered.debug_body
+    assert "SECRET_PLAIN_49" not in rendered.debug_body
+    assert "SECRET_PLAIN_50" in rendered.debug_body
+    assert rendered.debug_body.count("<result>") == 1
 
 
 def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results() -> None:
@@ -1242,13 +1538,6 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
                     "browser_target_id": "tab-east",
                     "artifact_ids": ["artifact-network-body"],
                     "browser_evidence": {
-                        "evidence_path_key": "network_truth",
-                        "evidence_path_title": "Trace Network Truth",
-                        "evidence_path_tools": [
-                            "browser.network.inspect",
-                            "browser.network.fetch_as_page",
-                            "browser.network.replay_request",
-                        ],
                         "payload_shape": {
                             "depCityCode": "str",
                             "arrCityCode": "str",
@@ -1291,88 +1580,17 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
     )
 
     tree = services["tree"].list_tree("session:evidence")
-    ledger = next(node for node in tree.nodes if node.id == "session.evidence.current")
-    evidence = next(node for node in tree.nodes if node.kind == "session_evidence")
+    assert not any(node.id == "session.evidence.current" for node in tree.nodes)
+    assert not any(node.kind == "session_evidence" for node in tree.nodes)
 
-    assert ledger.parent_id == "session.segment.current"
-    assert ledger.metadata["evidence_count"] == 1
-    assert evidence.parent_id == "session.evidence.current"
-    assert evidence.metadata["evidence_type"] == "api_endpoint"
-    assert evidence.metadata["evidence_lifecycle_status"] == "verified"
-    assert evidence.metadata["verified"] is True
-    assert evidence.metadata["failed"] is False
-    assert evidence.metadata["superseded"] is False
-    assert evidence.owner_ref["evidence_type"] == "api_endpoint"
-    assert evidence.owner_ref["evidence_lifecycle_status"] == "verified"
-    assert evidence.owner_ref["verified"] is True
-    assert evidence.metadata["facts"]["endpoint"] == "/portal/v3/shopping/briefInfo"
-    assert evidence.metadata["facts"]["method"] == "POST"
-    assert evidence.metadata["facts"]["profile"] == "crxzipple"
-    assert evidence.metadata["facts"]["target_id"] == "tab-east"
-    assert evidence.metadata["facts"]["host_service_key"] == "host:browser:crxzipple"
-    assert evidence.metadata["facts"]["request_id"] == "req-east-1"
-    assert evidence.metadata["facts"]["artifact_ids"] == ["artifact-network-body"]
-    assert evidence.metadata["facts"]["evidence_path"] == "network_truth"
-    assert evidence.metadata["facts"]["evidence_path_title"] == "Trace Network Truth"
-    assert evidence.metadata["facts"]["evidence_path_tools"] == [
-        "browser.network.inspect",
-        "browser.network.fetch_as_page",
-        "browser.network.replay_request",
-    ]
-    assert evidence.metadata["facts"]["payload_shape"]["depCityCode"] == "str"
-    assert evidence.metadata["facts"]["result_shape"]["data"]["flightItems"]["count"] == 35
-    assert evidence.metadata["facts"]["runtime_globals"] == ["$nuxt", "__NUXT__"]
-    assert evidence.metadata["facts"]["ref"] == "ref-flight-date"
-    read_hints = evidence.metadata["read_hints"]
-    assert any(hint["owner"] == "tool" and hint["http"] == "/tools/runs/tool-run-network" for hint in read_hints)
-    assert any(hint["owner"] == "session" and "/sessions/session:evidence/items" in hint["http"] for hint in read_hints)
-    assert any(hint["owner"] == "artifact" and hint["http"] == "/artifacts/artifact-network-body/download" for hint in read_hints)
-    assert any(
-        hint["owner"] == "browser"
-        and hint["tool"] == "browser.network.get_response_body"
-        and hint["arguments"]["request_id"] == "req-east-1"
-        for hint in read_hints
-    )
-    assert evidence.owner_ref["tool_run_id"] == "tool-run-network"
-    assert evidence.state.collapsed is True
-    assert "briefInfo" in evidence.summary
-    assert "owner_read_hints" in evidence.content
-    assert "/artifacts/artifact-network-body/download" in evidence.content
-    assert "SECRET_BODY" not in evidence.content
-
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:evidence"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:evidence"),
     )
 
-    assert "Current Evidence Ledger" in rendered.prompt_body
-    assert '<evidence ' in rendered.prompt_body
-    assert 'type="api_endpoint"' in rendered.prompt_body
-    assert 'lifecycle="verified"' in rendered.prompt_body
-    assert 'verified="true"' in rendered.prompt_body
-    assert "network_truth" in rendered.prompt_body
-    assert "/portal/v3/shopping/briefInfo" in rendered.prompt_body
-    assert "owner_read_hints" not in rendered.prompt_body
-    assert "browser.network.get_response_body" not in rendered.prompt_body
-    assert "SECRET_BODY" not in rendered.prompt_body
-
-    services["tree"].apply_action(
-        ContextActionInput(
-            session_key="session:evidence",
-            node_id=evidence.id,
-            action=ContextAction.EXPAND,
-        ),
-    )
-    expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:evidence"),
-    )
-
-    assert "payload_shape" in expanded_render.prompt_body
-    assert "evidence_path: network_truth" in expanded_render.prompt_body
-    assert "evidence_lifecycle: verified" in expanded_render.prompt_body
-    assert "$nuxt" in expanded_render.prompt_body
-    assert "browser.network.get_response_body" in expanded_render.prompt_body
-    assert "tool-run-network" in expanded_render.prompt_body
-    assert "SECRET_BODY" not in expanded_render.prompt_body
+    assert "Current Evidence Ledger" not in rendered.debug_body
+    assert '<evidence ' not in rendered.debug_body
+    assert 'type="api_endpoint"' not in rendered.debug_body
+    assert "SECRET_BODY" not in rendered.debug_body
 
 
 def test_session_adapter_renders_tool_result_envelope_refs() -> None:
@@ -1411,14 +1629,7 @@ def test_session_adapter_renders_tool_result_envelope_refs() -> None:
                 "content": [{"type": "text", "text": "short preview"}],
                 "metadata": {
                     "artifact_ids": ["artifact-large-result"],
-                    "browser_evidence": {
-                        "evidence_path_key": "network_truth",
-                        "evidence_path_title": "Trace Network Truth",
-                        "evidence_path_tools": [
-                            "browser.network.inspect",
-                            "browser.network.replay_request",
-                        ],
-                    },
+                    "browser_evidence": {},
                     TOOL_RESULT_ENVELOPE_METADATA_KEY: {
                         "status": "ok",
                         "summary": "Large result was externalized.",
@@ -1468,22 +1679,22 @@ def test_session_adapter_renders_tool_result_envelope_refs() -> None:
         ),
     )
 
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:tool-result-envelope"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:tool-result-envelope"),
     )
 
-    assert '<result_summary source="tool_result_envelope"' in rendered.prompt_body
-    assert 'truncated="true"' in rendered.prompt_body
-    assert 'omitted_chars="22400"' in rendered.prompt_body
-    assert "<summary>" in rendered.prompt_body
-    assert "Large result was externalized." in rendered.prompt_body
-    assert "<evidence_path>" in rendered.prompt_body
-    assert "network_truth (Trace Network Truth)" in rendered.prompt_body
-    assert "<artifact_refs>" in rendered.prompt_body
-    assert "artifact-large-result" in rendered.prompt_body
-    assert "<read_handles>" in rendered.prompt_body
-    assert "short preview" not in rendered.prompt_body
-    assert "<result>" not in rendered.prompt_body
+    assert '<result_summary source="tool_result_envelope"' in rendered.debug_body
+    assert 'truncated="true"' in rendered.debug_body
+    assert 'omitted_chars="22400"' in rendered.debug_body
+    assert "<summary>" in rendered.debug_body
+    assert "Large result was externalized." in rendered.debug_body
+    assert "<evidence_path>" not in rendered.debug_body
+    assert "network_truth (Trace Network Truth)" not in rendered.debug_body
+    assert "<artifact_refs>" in rendered.debug_body
+    assert "artifact-large-result" in rendered.debug_body
+    assert "<read_handles>" in rendered.debug_body
+    assert "short preview" not in rendered.debug_body
+    assert "<result>" not in rendered.debug_body
 
 
 def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None:
@@ -1517,7 +1728,7 @@ def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None
             status="succeeded",
             facts={"selector": "#submit"},
         )
-        == "verified_fact"
+        == "observation"
     )
     assert (
         _evidence_type(
@@ -1602,20 +1813,13 @@ def test_evidence_ledger_honors_explicit_superseded_lifecycle() -> None:
     )
 
     tree = services["tree"].list_tree("session:evidence-superseded")
-    evidence = next(node for node in tree.nodes if node.kind == "session_evidence")
+    assert not any(node.kind == "session_evidence" for node in tree.nodes)
 
-    assert evidence.metadata["evidence_lifecycle_status"] == "superseded"
-    assert evidence.metadata["superseded"] is True
-    assert evidence.metadata["verified"] is False
-    assert evidence.owner_ref["evidence_lifecycle_status"] == "superseded"
-    assert evidence.owner_ref["superseded"] is True
-
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:evidence-superseded"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:evidence-superseded"),
     )
 
-    assert 'lifecycle="superseded"' in rendered.prompt_body
-    assert 'superseded="true"' in rendered.prompt_body
+    assert '<evidence ' not in rendered.debug_body
 
 
 def test_session_adapter_keeps_orphan_function_call_as_message_node() -> None:
@@ -1650,14 +1854,14 @@ def test_session_adapter_keeps_orphan_function_call_as_message_node() -> None:
             agent_id="assistant",
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:orphan-call"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:orphan-call"),
     )
 
-    assert '<item role="assistant" sequence="1" kind="message"' in rendered.prompt_body
-    assert "tool_call:" in rendered.prompt_body
-    assert "name: slow_tool" in rendered.prompt_body
-    assert "tool_interaction" not in rendered.prompt_body
+    assert '<item role="assistant" sequence="1" kind="message"' in rendered.debug_body
+    assert "tool_call:" in rendered.debug_body
+    assert "name: slow_tool" in rendered.debug_body
+    assert "tool_interaction" not in rendered.debug_body
 
 
 def test_session_adapter_renders_failed_tool_interaction_error_details() -> None:
@@ -1718,25 +1922,25 @@ def test_session_adapter_renders_failed_tool_interaction_error_details() -> None
             agent_id="assistant",
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:failed-tool"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:failed-tool"),
     )
 
-    assert '<tool_interaction tool_name="browser.snapshot"' in rendered.prompt_body
-    assert 'status="failed"' in rendered.prompt_body
-    assert 'lifecycle="failed"' in rendered.prompt_body
-    assert 'frontier="false"' not in rendered.prompt_body
-    assert 'consumed="true"' not in rendered.prompt_body
-    assert 'failed="true"' in rendered.prompt_body
+    assert '<tool_interaction tool_name="browser.snapshot"' in rendered.debug_body
+    assert 'status="failed"' in rendered.debug_body
+    assert 'lifecycle="failed"' in rendered.debug_body
+    assert 'frontier="false"' not in rendered.debug_body
+    assert 'consumed="true"' not in rendered.debug_body
+    assert 'failed="true"' in rendered.debug_body
     tool_interaction_line = next(
         line
-        for line in rendered.prompt_body.splitlines()
+        for line in rendered.debug_body.splitlines()
         if '<tool_interaction tool_name="browser.snapshot"' in line
     )
     assert 'superseded="false"' not in tool_interaction_line
-    assert "<error>" not in rendered.prompt_body
-    assert "&quot;code&quot;: &quot;setup_needed&quot;" in rendered.prompt_body
-    assert "Browser profile is not ready." in rendered.prompt_body
+    assert "<error>" not in rendered.debug_body
+    assert "&quot;code&quot;: &quot;setup_needed&quot;" in rendered.debug_body
+    assert "Browser profile is not ready." in rendered.debug_body
     tree = services["tree"].list_tree("session:failed-tool")
     tool_node = next(node for node in tree.nodes if node.kind == "tool_interaction")
     assert tool_node.state.collapsed is True
@@ -1752,10 +1956,10 @@ def test_session_adapter_renders_failed_tool_interaction_error_details() -> None
             action=ContextAction.EXPAND,
         ),
     )
-    expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:failed-tool"),
+    expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:failed-tool"),
     )
-    assert "<error>" not in expanded_render.prompt_body
+    assert "<error>" not in expanded_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -1764,11 +1968,11 @@ def test_session_adapter_renders_failed_tool_interaction_error_details() -> None
             action=ContextAction.PIN,
         ),
     )
-    pinned_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:failed-tool"),
+    pinned_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:failed-tool"),
     )
-    assert "<error>" in pinned_render.prompt_body
-    assert "&quot;code&quot;: &quot;setup_needed&quot;" in pinned_render.prompt_body
+    assert "<error>" in pinned_render.debug_body
+    assert "&quot;code&quot;: &quot;setup_needed&quot;" in pinned_render.debug_body
 
 
 def test_session_adapter_renders_explicit_superseded_tool_interaction_lifecycle() -> None:
@@ -1836,13 +2040,13 @@ def test_session_adapter_renders_explicit_superseded_tool_interaction_lifecycle(
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:superseded-tool"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:superseded-tool"),
     )
 
-    assert '<tool_interaction tool_name="browser.network.inspect"' in rendered.prompt_body
-    assert 'lifecycle="superseded"' in rendered.prompt_body
-    assert 'superseded="true"' in rendered.prompt_body
+    assert '<tool_interaction tool_name="browser.network.inspect"' in rendered.debug_body
+    assert 'lifecycle="superseded"' in rendered.debug_body
+    assert 'superseded="true"' in rendered.debug_body
     tree = services["tree"].list_tree("session:superseded-tool")
     tool_node = next(node for node in tree.nodes if node.kind == "tool_interaction")
     assert tool_node.metadata["lifecycle_status"] == "superseded"
@@ -1912,7 +2116,7 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
         turn_id="run-execution-superseded",
         summary_payload={
             "llm_transcript_consumption": {
-                "direct_transcript_sequence_range": {
+                "draft_input_sequence_range": {
                     "sessions": [
                         {
                             "session_id": session.active_session_id,
@@ -1948,21 +2152,18 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:execution-superseded-tool"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:execution-superseded-tool"),
     )
     tree = services["tree"].list_tree("session:execution-superseded-tool")
     tool_node = next(node for node in tree.nodes if node.kind == "tool_interaction")
-    evidence_node = next(node for node in tree.nodes if node.kind == "session_evidence")
 
-    assert 'lifecycle="superseded"' in rendered.prompt_body
-    assert 'superseded="true"' in rendered.prompt_body
+    assert 'lifecycle="superseded"' in rendered.debug_body
+    assert 'superseded="true"' in rendered.debug_body
     assert tool_node.metadata["lifecycle_status"] == "superseded"
     assert tool_node.metadata["superseded"] is True
     assert tool_node.metadata["superseded_by_tool_call_id"] == "call-new-endpoint"
-    assert evidence_node.metadata["evidence_lifecycle_status"] == "superseded"
-    assert evidence_node.metadata["superseded"] is True
-    assert evidence_node.metadata["verified"] is False
+    assert not any(node.kind == "session_evidence" for node in tree.nodes)
 
 
 def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -> None:
@@ -2025,7 +2226,7 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
         turn_id="run-execution-replacement",
         summary_payload={
             "llm_transcript_consumption": {
-                "direct_transcript_sequence_range": {
+                "draft_input_sequence_range": {
                     "sessions": [
                         {
                             "session_id": session.active_session_id,
@@ -2059,23 +2260,21 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
             action=ContextAction.EXPAND,
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:execution-replacement-tool"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:execution-replacement-tool"),
     )
     tree = services["tree"].list_tree("session:execution-replacement-tool")
     tool_node = next(node for node in tree.nodes if node.kind == "tool_interaction")
-    evidence_node = next(node for node in tree.nodes if node.kind == "session_evidence")
 
-    assert 'lifecycle="superseded"' in rendered.prompt_body
-    assert 'superseded="true"' in rendered.prompt_body
+    assert 'lifecycle="superseded"' in rendered.debug_body
+    assert 'superseded="true"' in rendered.debug_body
     assert tool_node.metadata["lifecycle_status"] == "superseded"
     assert tool_node.metadata["superseded"] is True
     assert tool_node.metadata["superseded_by_tool_call_id"] == "call-new-endpoint"
-    assert evidence_node.metadata["evidence_lifecycle_status"] == "superseded"
-    assert evidence_node.metadata["superseded"] is True
+    assert not any(node.kind == "session_evidence" for node in tree.nodes)
 
 
-def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml() -> None:
+def test_session_adapter_renders_async_control_history_as_traceable_context_debug_xml() -> None:
     session_service = _session_service()
     session_service.ensure_session(
         EnsureSessionInput(
@@ -2205,17 +2404,17 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             agent_id="assistant",
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:async-control"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:async-control"),
     )
 
-    assert '<tool_interaction tool_name="sessions_yield"' in rendered.prompt_body
-    assert "wait for delegated work" not in rendered.prompt_body
-    assert '<tool_interaction tool_name="background_echo"' in rendered.prompt_body
-    assert "background hello" not in rendered.prompt_body
-    assert "approval-background-1" in rendered.prompt_body
-    assert "Approved once for this turn only" not in rendered.prompt_body
-    assert "result_sha256=" in rendered.prompt_body
+    assert '<tool_interaction tool_name="sessions_yield"' in rendered.debug_body
+    assert "wait for delegated work" not in rendered.debug_body
+    assert '<tool_interaction tool_name="background_echo"' in rendered.debug_body
+    assert "background hello" not in rendered.debug_body
+    assert "approval-background-1" in rendered.debug_body
+    assert "Approved once for this turn only" not in rendered.debug_body
+    assert "result_sha256=" in rendered.debug_body
 
 
 def test_session_adapter_renders_attachment_history_as_handles() -> None:
@@ -2262,19 +2461,19 @@ def test_session_adapter_renders_attachment_history_as_handles() -> None:
     attachment_node = next(
         node for node in tree.nodes if node.id.startswith("session.item.")
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:attachments"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:attachments"),
     )
 
     assert attachment_node.metadata["content_block_types"] == ["image_ref", "file_ref"]
     assert attachment_node.estimate.image_count == 1
     assert attachment_node.estimate.file_count == 1
-    assert "[image:screen.png]" in rendered.prompt_body
-    assert "[file:report.pdf]" in rendered.prompt_body
-    assert "artifact-image-1" not in rendered.prompt_body
-    assert "artifact-file-1" not in rendered.prompt_body
-    assert "raw-image-bytes-should-not-render" not in rendered.prompt_body
-    assert "raw file body should not render" not in rendered.prompt_body
+    assert "[image:screen.png]" in rendered.debug_body
+    assert "[file:report.pdf]" in rendered.debug_body
+    assert "artifact-image-1" not in rendered.debug_body
+    assert "artifact-file-1" not in rendered.debug_body
+    assert "raw-image-bytes-should-not-render" not in rendered.debug_body
+    assert "raw file body should not render" not in rendered.debug_body
 
 
 def test_session_adapter_renders_current_segment_without_active_pagination() -> None:
@@ -2303,14 +2502,14 @@ def test_session_adapter_renders_current_segment_without_active_pagination() -> 
             agent_id="assistant",
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:current-render"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:current-render"),
     )
 
-    assert "current render 1" in rendered.prompt_body
-    assert "current render 2" in rendered.prompt_body
-    assert "current render 3" in rendered.prompt_body
-    assert "older messages are available before" not in rendered.prompt_body
+    assert "current render 1" in rendered.debug_body
+    assert "current render 2" in rendered.debug_body
+    assert "current render 3" in rendered.debug_body
+    assert "older messages are available before" not in rendered.debug_body
 
 
 def test_session_adapter_does_not_synthesize_compacted_segment_from_active_archives() -> None:
@@ -2348,14 +2547,14 @@ def test_session_adapter_does_not_synthesize_compacted_segment_from_active_archi
     )
     tree = services["tree"].list_tree("session:archive-only")
     node_ids = {node.id for node in tree.nodes}
-    current_segment = next(node for node in tree.nodes if node.id == "session.segment.current")
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:archive-only"),
+    current_segment = next(node for node in tree.nodes if node.id == "session.segment.active")
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:archive-only"),
     )
 
     assert f"session.segment.compacted.{session.active_session_id}" not in node_ids
     assert current_segment.owner_ref["item_count"] == 0
-    assert "legacy archived body" not in rendered.prompt_body
+    assert "legacy archived body" not in rendered.debug_body
 
 
 def test_session_adapter_renders_folded_history_only_after_range_expand() -> None:
@@ -2401,14 +2600,14 @@ def test_session_adapter_renders_folded_history_only_after_range_expand() -> Non
             agent_id="assistant",
         ),
     )
-    collapsed_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:folded-render"),
+    collapsed_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:folded-render"),
     )
 
-    assert "folded render 1" not in collapsed_render.prompt_body
-    assert "folded render 2" not in collapsed_render.prompt_body
-    assert "Compacted folded render history." in collapsed_render.prompt_body
-    assert "folded render 3" in collapsed_render.prompt_body
+    assert "folded render 1" not in collapsed_render.debug_body
+    assert "folded render 2" not in collapsed_render.debug_body
+    assert "Compacted folded render history." in collapsed_render.debug_body
+    assert "folded render 3" in collapsed_render.debug_body
 
     compacted_node_id = f"session.segment.compacted.{old_session_id}"
     services["tree"].apply_action(
@@ -2418,13 +2617,13 @@ def test_session_adapter_renders_folded_history_only_after_range_expand() -> Non
             action=ContextAction.EXPAND,
         ),
     )
-    range_only_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:folded-render"),
+    range_only_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:folded-render"),
     )
 
-    assert "Messages 1-2" in range_only_render.prompt_body
-    assert "folded render 1" not in range_only_render.prompt_body
-    assert "folded render 2" not in range_only_render.prompt_body
+    assert "Messages 1-2" in range_only_render.debug_body
+    assert "folded render 1" not in range_only_render.debug_body
+    assert "folded render 2" not in range_only_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -2433,12 +2632,12 @@ def test_session_adapter_renders_folded_history_only_after_range_expand() -> Non
             action=ContextAction.EXPAND,
         ),
     )
-    expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:folded-render"),
+    expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:folded-render"),
     )
 
-    assert "folded render 1" in expanded_render.prompt_body
-    assert "folded render 2" in expanded_render.prompt_body
+    assert "folded render 1" in expanded_render.debug_body
+    assert "folded render 2" in expanded_render.debug_body
 
 
 def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand() -> None:
@@ -2537,21 +2736,21 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             agent_id="assistant",
         ),
     )
-    collapsed_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-tool-history"),
+    collapsed_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-tool-history"),
     )
 
-    assert "The old segment checked Kunming weather." in collapsed_render.prompt_body
-    assert "Continue after compaction." in collapsed_render.prompt_body
-    assert "Kunming is sunny." not in collapsed_render.prompt_body
+    assert "The old segment checked Kunming weather." in collapsed_render.debug_body
+    assert "Continue after compaction." in collapsed_render.debug_body
+    assert "Kunming is sunny." not in collapsed_render.debug_body
     assert '<tool_interaction tool_name="fetch_weather"' not in (
-        collapsed_render.prompt_body
+        collapsed_render.debug_body
     )
-    runtime_contract_index = collapsed_render.prompt_body.index("runtime.contract")
-    current_user_intent_index = collapsed_render.prompt_body.index(
+    runtime_contract_index = collapsed_render.debug_body.index("runtime.contract")
+    current_user_intent_index = collapsed_render.debug_body.index(
         "Continue after compaction.",
     )
-    folded_summary_index = collapsed_render.prompt_body.index(
+    folded_summary_index = collapsed_render.debug_body.index(
         "The old segment checked Kunming weather.",
     )
     assert runtime_contract_index < current_user_intent_index < folded_summary_index
@@ -2565,14 +2764,14 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             action=ContextAction.EXPAND,
         ),
     )
-    range_only_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-tool-history"),
+    range_only_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-tool-history"),
     )
 
-    assert "Messages 1-3" in range_only_render.prompt_body
-    assert "Kunming is sunny." not in range_only_render.prompt_body
+    assert "Messages 1-3" in range_only_render.debug_body
+    assert "Kunming is sunny." not in range_only_render.debug_body
     assert '<tool_interaction tool_name="fetch_weather"' not in (
-        range_only_render.prompt_body
+        range_only_render.debug_body
     )
 
     services["tree"].apply_action(
@@ -2582,14 +2781,14 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             action=ContextAction.EXPAND,
         ),
     )
-    expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-tool-history"),
+    expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-tool-history"),
     )
-    snapshot = services["render"].record_render_snapshot(
-        RecordContextRenderSnapshotInput(
+    snapshot = services["render"].record_snapshot(
+        RecordContextSnapshotInput(
             session_key="session:segment-tool-history",
             run_id="run-after-compaction",
-            prompt_body=expanded_render.prompt_body,
+            debug_body=expanded_render.debug_body,
             provider_attachments=expanded_render.provider_attachments,
             estimate=expanded_render.estimate,
             included_node_ids=expanded_render.included_node_ids,
@@ -2598,13 +2797,13 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
         ),
     )
 
-    assert '<tool_interaction tool_name="fetch_weather"' in expanded_render.prompt_body
-    assert 'call_id="call-weather-1"' not in expanded_render.prompt_body
-    assert "Kunming is sunny." not in expanded_render.prompt_body
-    assert "Continue after compaction." in expanded_render.prompt_body
+    assert '<tool_interaction tool_name="fetch_weather"' in expanded_render.debug_body
+    assert 'call_id="call-weather-1"' not in expanded_render.debug_body
+    assert "Kunming is sunny." not in expanded_render.debug_body
+    assert "Continue after compaction." in expanded_render.debug_body
     assert compacted_node_id in expanded_render.included_node_ids
     assert range_node_id in expanded_render.included_node_ids
-    assert snapshot.prompt_body == expanded_render.prompt_body
+    assert snapshot.debug_body == expanded_render.debug_body
     assert snapshot.included_node_ids == expanded_render.included_node_ids
 
     tool_node = next(
@@ -2619,12 +2818,12 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             action=ContextAction.EXPAND,
         ),
     )
-    tool_expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-tool-history"),
+    tool_expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-tool-history"),
     )
 
-    assert "Kunming is sunny." not in tool_expanded_render.prompt_body
-    assert "content_omitted" in tool_expanded_render.prompt_body
+    assert "Kunming is sunny." not in tool_expanded_render.debug_body
+    assert "content_omitted" in tool_expanded_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -2633,11 +2832,173 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             action=ContextAction.PIN,
         ),
     )
-    tool_pinned_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-tool-history"),
+    tool_pinned_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-tool-history"),
     )
 
-    assert "Kunming is sunny." in tool_pinned_render.prompt_body
+    assert "Kunming is sunny." in tool_pinned_render.debug_body
+
+
+def test_session_segment_compaction_slice_uses_summary_not_archived_range() -> None:
+    session_service = _session_service()
+    session = session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:segment-llm-slice",
+            agent_id="assistant",
+        ),
+    )
+    old_session_id = session.active_session_id
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:segment-llm-slice",
+            role="user",
+            content_payload={
+                "blocks": [{"type": "text", "text": "old private detail"}],
+            },
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:segment-llm-slice",
+            role="assistant",
+            content_payload={
+                "type": "function_call",
+                "call_id": "call-old-1",
+                "name": "fetch_old",
+                "arguments": {"query": "old"},
+            },
+            metadata={
+                "tool_call_id": "call-old-1",
+                "tool_name": "fetch_old",
+            },
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:segment-llm-slice",
+            role="tool",
+            kind=SessionItemFixtureKind.TOOL_RESULT,
+            content_payload={
+                "tool_name": "fetch_old",
+                "tool_call_id": "call-old-1",
+                "status": "succeeded",
+                "content": [{"type": "text", "text": "old tool payload"}],
+            },
+            metadata={
+                "tool_call_id": "call-old-1",
+                "tool_name": "fetch_old",
+            },
+        ),
+    )
+    summary = session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:segment-llm-slice",
+            role="assistant",
+            content_payload={
+                "blocks": [{"type": "text", "text": "Compacted old segment."}],
+            },
+        ),
+    )
+    session_service.compact_active_segment(
+        CompactSessionSegmentInput(
+            session_key="session:segment-llm-slice",
+            session_id=old_session_id,
+            summary_item_id=summary.id,
+            summary_text="Compacted old segment.",
+            compaction_run_id="run-compact-slice",
+            archived_through_item_sequence_no=3,
+            reason="test_compaction",
+        ),
+    )
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key="session:segment-llm-slice",
+            role="user",
+            content_payload={
+                "blocks": [{"type": "text", "text": "new active request"}],
+            },
+        ),
+    )
+    services = _context_services(session_service, recent_limit=8)
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:segment-llm-slice",
+            agent_id="assistant",
+        ),
+    )
+    compacted_node_id = f"session.segment.compacted.{old_session_id}"
+    range_node_id = f"session.segment.items.{old_session_id}.1.3"
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:segment-llm-slice",
+            node_id=compacted_node_id,
+            action=ContextAction.EXPAND,
+        ),
+    )
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:segment-llm-slice",
+            node_id=range_node_id,
+            action=ContextAction.EXPAND,
+        ),
+    )
+
+    llm_slice = services["slice"].build_slice(
+        session_key="session:segment-llm-slice",
+        run_id="run-after-compact",
+        audience="llm_request",
+        provider_profile="codex-http",
+    )
+    debug_slice = services["slice"].build_slice(
+        session_key="session:segment-llm-slice",
+        run_id="run-after-compact",
+        audience="debug_tree",
+        provider_profile="codex-http",
+    )
+
+    llm_item_ids = {item.item_id for item in llm_slice.items}
+    debug_item_ids = {item.item_id for item in debug_slice.items}
+    llm_text = "\n".join(
+        f"{item.summary}\n{item.text}" for item in llm_slice.items
+    )
+
+    assert compacted_node_id in llm_item_ids
+    assert range_node_id not in llm_item_ids
+    assert f"session.item.{old_session_id}.1" not in llm_item_ids
+    assert "old private detail" not in llm_text
+    assert "old tool payload" not in llm_text
+    assert "Compacted old segment." in llm_text
+    assert "new active request" in llm_text
+    assert range_node_id in debug_item_ids
+    assert f"session.item.{old_session_id}.1" in debug_item_ids
+    assert llm_slice.report.loss["archived_ref_count"] >= 1
+    assert any(
+        ref.get("session_item_id")
+        for ref in llm_slice.report.archived_refs
+    )
+    expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-llm-slice"),
+    )
+    snapshot = services["render"].record_snapshot(
+        RecordContextSnapshotInput(
+            session_key="session:segment-llm-slice",
+            run_id="run-after-compact",
+            debug_body=expanded_render.debug_body,
+            provider_attachments=expanded_render.provider_attachments,
+            estimate=expanded_render.estimate,
+            included_node_ids=expanded_render.included_node_ids,
+            mirrored_node_ids=expanded_render.mirrored_node_ids,
+            metadata={"source": "test"},
+        ),
+    )
+
+    assert snapshot.metadata["archived_ref_count"] >= 1
+    assert any(
+        ref.get("session_item_id")
+        for ref in snapshot.metadata["archived_refs"]
+        if isinstance(ref, dict)
+    )
 
 
 def test_session_adapter_current_segment_remains_stable_after_tool_messages() -> None:
@@ -2675,8 +3036,8 @@ def test_session_adapter_current_segment_remains_stable_after_tool_messages() ->
             agent_id="assistant",
         ),
     )
-    first_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:stable-current"),
+    first_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:stable-current"),
     )
     session_service.append_item_fixture(
         AppendSessionItemFixtureInput(
@@ -2711,17 +3072,17 @@ def test_session_adapter_current_segment_remains_stable_after_tool_messages() ->
             agent_id="assistant",
         ),
     )
-    second_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:stable-current"),
+    second_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:stable-current"),
     )
     tree = services["tree"].list_tree("session:stable-current")
     node_ids = {node.id for node in tree.nodes}
 
-    assert "message 1" in first_render.prompt_body
-    assert "message 1" in second_render.prompt_body
-    assert "message 5" in second_render.prompt_body
-    assert "check flights from Kunming" in second_render.prompt_body
-    assert "older messages are available before" not in second_render.prompt_body
+    assert "message 1" in first_render.debug_body
+    assert "message 1" in second_render.debug_body
+    assert "message 5" in second_render.debug_body
+    assert "check flights from Kunming" in second_render.debug_body
+    assert "older messages are available before" not in second_render.debug_body
     assert all(
         node.parent_id is None or node.parent_id in node_ids
         for node in tree.nodes
@@ -2769,9 +3130,9 @@ def test_session_adapter_warns_browser_investigation_no_gain_loop() -> None:
         session_service,
         session_key="session:browser-no-gain",
         call_id="call-probe-1",
-        tool_name="browser.runtime.probe_client",
-        arguments={"object_path": "$nuxt", "target_id": "tab-1"},
-        result_text="Browser runtime client probe:\n- Object path: $nuxt\n- Status: resolved",
+        tool_name="browser.evaluate",
+        arguments={"fn": "() => window.location.href", "target_id": "tab-1"},
+        result_text="Evaluate result: https://example.com",
     )
     _append_tool_pair(
         session_service,
@@ -2785,9 +3146,9 @@ def test_session_adapter_warns_browser_investigation_no_gain_loop() -> None:
         session_service,
         session_key="session:browser-no-gain",
         call_id="call-probe-2",
-        tool_name="browser.runtime.probe_client",
-        arguments={"object_path": "$nuxt", "target_id": "tab-1"},
-        result_text="Browser runtime client probe:\n- Object path: $nuxt\n- Status: resolved",
+        tool_name="browser.evaluate",
+        arguments={"fn": "() => window.location.href", "target_id": "tab-1"},
+        result_text="Evaluate result: https://example.com",
     )
     services = _context_services(session_service)
 
@@ -2800,15 +3161,16 @@ def test_session_adapter_warns_browser_investigation_no_gain_loop() -> None:
     )
     tree = services["tree"].list_tree("session:browser-no-gain")
     warnings = [node for node in tree.nodes if node.kind == "investigation_warning"]
-    warning_codes = {node.metadata["code"] for node in warnings}
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:browser-no-gain"),
+    rendered = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:browser-no-gain"),
     )
 
-    assert "browser.network_capture_no_requests" in warning_codes
-    assert "browser.endpoint_candidate_not_escalated" in warning_codes
-    assert "browser.same_probe_repeated" in warning_codes
-    assert "Trigger one concrete action or report a gap" in rendered.prompt_body
+    assert warnings == []
+    assert "browser.network_capture_no_requests" not in rendered.debug_body
+    assert "browser.endpoint_candidate_not_escalated" not in rendered.debug_body
+    assert "browser.same_probe_repeated" not in rendered.debug_body
+    assert "concrete action may be needed" not in rendered.debug_body
+    assert "possible_next_step" not in rendered.debug_body
 
 
 def test_session_adapter_exposes_folded_history_as_exact_archived_ranges() -> None:
@@ -2852,7 +3214,7 @@ def test_session_adapter_exposes_folded_history_as_exact_archived_ranges() -> No
         if node.id == f"session.segment.compacted.{old_session_id}"
     )
     assert folded_node.state.collapsed is True
-    assert folded_node.owner_ref["message_visibility"] == "archived"
+    assert folded_node.owner_ref["message_scope"] == "archived"
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -3219,13 +3581,13 @@ def test_session_adapter_uses_segment_summary_before_loading_compacted_messages(
             agent_id="assistant",
         ),
     )
-    collapsed_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-summary"),
+    collapsed_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-summary"),
     )
 
     compacted_node_id = f"session.segment.compacted.{old_session_id}"
-    assert "Condensed old segment summary." in collapsed_render.prompt_body
-    assert "secret old body" not in collapsed_render.prompt_body
+    assert "Condensed old segment summary." in collapsed_render.debug_body
+    assert "secret old body" not in collapsed_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -3234,12 +3596,12 @@ def test_session_adapter_uses_segment_summary_before_loading_compacted_messages(
             action=ContextAction.EXPAND,
         ),
     )
-    range_only_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-summary"),
+    range_only_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-summary"),
     )
 
-    assert "Messages 1-1" in range_only_render.prompt_body
-    assert "secret old body" not in range_only_render.prompt_body
+    assert "Messages 1-1" in range_only_render.debug_body
+    assert "secret old body" not in range_only_render.debug_body
 
     services["tree"].apply_action(
         ContextActionInput(
@@ -3248,11 +3610,11 @@ def test_session_adapter_uses_segment_summary_before_loading_compacted_messages(
             action=ContextAction.EXPAND,
         ),
     )
-    expanded_render = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:segment-summary"),
+    expanded_render = services["render"].render_observation(
+        ContextObservationRenderInput(session_key="session:segment-summary"),
     )
 
-    assert "secret old body" in expanded_render.prompt_body
+    assert "secret old body" in expanded_render.debug_body
 
 
 def _context_services(
@@ -3276,7 +3638,7 @@ def _context_services(
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
     operations = InMemoryContextOperationRepository()
-    snapshots = InMemoryContextRenderSnapshotRepository()
+    snapshots = InMemoryContextSnapshotRepository()
     return {
         "workspace": ContextWorkspaceService(
             workspace_repository=workspaces,
@@ -3289,10 +3651,16 @@ def _context_services(
             operation_repository=operations,
             owner_registry=registry,
         ),
-        "render": ContextRenderService(
+        "render": ContextObservationSnapshotService(
             workspace_repository=workspaces,
             node_repository=nodes,
             snapshot_repository=snapshots,
+        ),
+        "slice": ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            owner_registry=registry,
+            session_item_resolver=session_service,
         ),
     }
 
@@ -3310,12 +3678,6 @@ class _TestSessionService:
                 session_key=data.session_key,
                 role=data.role,
                 kind=_session_item_kind_from_message_input(data),
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=data.role in {"assistant", "user"},
-                    chat_visible=data.role in {"assistant", "user"},
-                    trace_visible=True,
-                ),
                 content_payload=dict(data.content_payload),
                 source_module="session",
                 source_kind=data.source_kind,
@@ -3343,18 +3705,12 @@ class _TestSessionService:
         )
         for item in items:
             if item.sequence_no <= archived_through_sequence_no:
-                self._inner.uow_factory().session_items.add(
-                    replace(
-                        item,
-                        visibility=replace(item.visibility, model_visible=False),
-                    ),
-                )
                 self._inner.merge_item_metadata(
                     MergeSessionItemMetadataInput(
                         item_id=item.id,
                         metadata={
-                        "visibility_state": "archived",
-                        "archive_reason": data.reason,
+                            "visibility_state": "archived",
+                            "archived_reason": data.reason,
                         },
                     ),
                 )
@@ -3517,12 +3873,52 @@ class _FakeExecutionQuery:
     def list_execution_steps(self, chain_id: str):  # noqa: ANN201
         if chain_id != "chain-1":
             return []
-        return [_FakeExecutionEntity(id="step-1")]
+        return [
+            _FakeExecutionEntity(
+                id="step-1",
+                kind="llm",
+                status="completed",
+                step_index=1,
+            ),
+        ]
 
     def list_execution_step_items(self, step_id: str):  # noqa: ANN201
         if step_id != "step-1":
             return []
-        return [_FakeExecutionEntity(id="item-1", summary_payload=self._summary_payload)]
+        return [
+            _FakeExecutionEntity(
+                id="item-1",
+                kind="llm_invocation",
+                status="completed",
+                summary_payload=self._summary_payload,
+            ),
+        ]
+
+
+class _FakeExecutionQueryWithSteps:
+    def __init__(
+        self,
+        *,
+        turn_id: str,
+        steps: list[_FakeExecutionEntity],
+        items_by_step_id: dict[str, list[_FakeExecutionEntity]],
+    ) -> None:
+        self._turn_id = turn_id
+        self._steps = steps
+        self._items_by_step_id = items_by_step_id
+
+    def list_execution_chains(self, turn_id: str):  # noqa: ANN201
+        if turn_id != self._turn_id:
+            return []
+        return [_FakeExecutionEntity(id="chain-1", status="completed")]
+
+    def list_execution_steps(self, chain_id: str):  # noqa: ANN201
+        if chain_id != "chain-1":
+            return []
+        return list(self._steps)
+
+    def list_execution_step_items(self, step_id: str):  # noqa: ANN201
+        return list(self._items_by_step_id.get(step_id, ()))
 
 
 class _FakeExecutionEntity:

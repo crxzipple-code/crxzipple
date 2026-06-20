@@ -6,8 +6,15 @@ from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
 
+from crxzipple.modules.llm.application.runtime_request import (
+    request_render_snapshot_preview_payload,
+    request_metadata_preview_payload,
+)
 from crxzipple.modules.llm.domain import LlmInvocation, LlmInvocationStatus, LlmProfile
 from crxzipple.modules.orchestration.domain import ExecutionOwnerReference
+from crxzipple.modules.session.application import (
+    runtime_semantic_kind_from_llm_response_item,
+)
 from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
@@ -46,14 +53,22 @@ _INVOCATION_PAGE_BASE_LIMIT = 240
 _LLM_DIRECT_EVENT_TOPICS = (
     "events.named.llm.profile_registered",
     "events.named.llm.profile_updated",
+    "events.named.llm.profile_warmup_succeeded",
+    "events.named.llm.profile_warmup_skipped",
+    "events.named.llm.profile_warmup_failed",
     "events.named.llm.invocation_started",
+    "events.named.llm.invocation_provider_request_prepared",
     "events.named.llm.invocation_succeeded",
     "events.named.llm.invocation_failed",
     "events.named.llm.stream_delta_observed",
     "events.named.orchestration.run.llm_text_delta",
     "llm.profile_registered",
     "llm.profile_updated",
+    "llm.profile_warmup_succeeded",
+    "llm.profile_warmup_skipped",
+    "llm.profile_warmup_failed",
     "llm.invocation_started",
+    "llm.invocation_provider_request_prepared",
     "llm.invocation_succeeded",
     "llm.invocation_failed",
     "llm.stream_delta_observed",
@@ -85,7 +100,12 @@ class LlmInvocationDetailModel:
     tone: str
     summary: tuple[OperationsKeyValueItemModel, ...]
     request_context: tuple[OperationsKeyValueItemModel, ...]
+    runtime_observations: OperationsKeyValueSectionModel
+    runtime_request_summary: dict[str, Any]
     request_payload: Any
+    provider_render_report: dict[str, Any]
+    provider_wire_preview: dict[str, Any]
+    provider_context_mapping: OperationsTableSectionModel
     result_payload: Any
     result_summary: str
     error: str
@@ -93,6 +113,7 @@ class LlmInvocationDetailModel:
     error_facts: OperationsKeyValueSectionModel
     policy_trace: OperationsTableSectionModel
     response_items: OperationsTableSectionModel
+    response_runtime_mapping: OperationsTableSectionModel
     response_events: OperationsTableSectionModel
     events: OperationsTableSectionModel
 
@@ -323,6 +344,9 @@ class LlmOperationsReadModelProvider:
             self.llm_service,
             detail_invocations,
         )
+        response_event_retention_policy = _response_event_retention_policy(
+            self.llm_service,
+        )
 
         return LlmOperationsPage(
             module="llm",
@@ -397,11 +421,13 @@ class LlmOperationsReadModelProvider:
                 profiles,
                 invocations=invocations,
                 access_service=self.access_service,
+                warmup_events_by_profile=_latest_warmup_events_by_profile(observed_events),
             ),
             provider_auth_blocked=_provider_auth_blocked_section(
                 profiles,
                 invocations=invocations,
                 access_service=self.access_service,
+                warmup_events_by_profile=_latest_warmup_events_by_profile(observed_events),
             ),
             model_resolver=_model_resolver_section(resolver_events),
             rate_limiter=_rate_limiter_section(
@@ -473,6 +499,7 @@ class LlmOperationsReadModelProvider:
                 resolver_events_by_run_id=resolver_events_by_run_id,
                 observed_events=observed_events,
                 response_events_by_invocation=response_events_by_invocation,
+                response_event_retention_policy=response_event_retention_policy,
             ),
         )
 
@@ -599,7 +626,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="events",
             kind="navigation",
             method="GET",
-            endpoint="/ui/trace/{trace_id}",
+            endpoint="/workbench/traces/{trace_id}",
         ),
         RuntimeActionModel(
             id="open_access",
@@ -608,6 +635,16 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             kind="navigation",
             method="GET",
             endpoint="/operations/access",
+        ),
+        RuntimeActionModel(
+            id="warmup_profile",
+            label="Warmup",
+            owner="llm",
+            kind="operation",
+            risk="controlled",
+            method="POST",
+            endpoint="/operations/llm/profiles/{llm_id}/warmup",
+            audit_event="llm.profile.warmup",
         ),
         RuntimeActionModel(
             id="view_limits",
@@ -717,6 +754,7 @@ def _provider_access_health_section(
     *,
     invocations: list[LlmInvocation],
     access_service: Any | None,
+    warmup_events_by_profile: dict[str, OperationsObservedEvent],
 ) -> OperationsTableSectionModel:
     invocation_counts = Counter(invocation.llm_id for invocation in invocations)
     latest_invocation = _latest_invocation_by_profile(invocations)
@@ -724,6 +762,7 @@ def _provider_access_health_section(
     for profile in sorted(profiles, key=lambda item: item.id):
         readiness = _profile_access_readiness(profile, access_service=access_service)
         latest = latest_invocation.get(profile.id)
+        warmup_event = warmup_events_by_profile.get(profile.id)
         rows.append(
             OperationsTableRowModel(
                 id=profile.id,
@@ -734,15 +773,20 @@ def _provider_access_health_section(
                     "api_family": profile.api_family.value,
                     "credential": _credential_label(profile.credential_binding_id),
                     "status": _availability_label(profile, readiness),
+                    "warmup": _warmup_status_label(warmup_event),
                     "invocations": str(invocation_counts[profile.id]),
                     "last_invocation": (
                         format_datetime_utc(latest.created_at)
                         if latest is not None
                         else "-"
                     ),
+                    "next_action": _warmup_next_action(
+                        warmup_event,
+                        readiness=readiness,
+                    ),
                 },
                 status=readiness["status"],
-                tone=_readiness_tone(readiness),
+                tone=_warmup_tone(warmup_event, fallback=_readiness_tone(readiness)),
             ),
         )
     return OperationsTableSectionModel(
@@ -755,8 +799,10 @@ def _provider_access_health_section(
             ("api_family", "API Family"),
             ("credential", "Credential"),
             ("status", "Status"),
+            ("warmup", "Warmup"),
             ("invocations", "Invocations"),
             ("last_invocation", "Last Invocation"),
+            ("next_action", "Next Action"),
         ),
         rows=tuple(rows),
         total=len(rows),
@@ -769,6 +815,7 @@ def _provider_auth_blocked_section(
     *,
     invocations: list[LlmInvocation],
     access_service: Any | None,
+    warmup_events_by_profile: dict[str, OperationsObservedEvent],
 ) -> OperationsTableSectionModel:
     invocation_counts = Counter(invocation.llm_id for invocation in invocations)
     rows: list[OperationsTableRowModel] = []
@@ -776,6 +823,7 @@ def _provider_auth_blocked_section(
         readiness = _profile_access_readiness(profile, access_service=access_service)
         if readiness["ready"]:
             continue
+        warmup_event = warmup_events_by_profile.get(profile.id)
         rows.append(
             OperationsTableRowModel(
                 id=profile.id,
@@ -784,11 +832,12 @@ def _provider_auth_blocked_section(
                     "provider": profile.provider.value,
                     "credential": _credential_label(profile.credential_binding_id),
                     "issue": readiness["reason"],
+                    "warmup": _warmup_status_label(warmup_event),
                     "affected_invocations": str(invocation_counts[profile.id]),
-                    "action": "Open Access",
+                    "action": _warmup_next_action(warmup_event, readiness=readiness),
                 },
                 status=readiness["status"],
-                tone=_readiness_tone(readiness),
+                tone=_warmup_tone(warmup_event, fallback=_readiness_tone(readiness)),
             ),
         )
     return OperationsTableSectionModel(
@@ -799,6 +848,7 @@ def _provider_auth_blocked_section(
             ("provider", "Provider"),
             ("credential", "Credential"),
             ("issue", "Issue"),
+            ("warmup", "Warmup"),
             ("affected_invocations", "Affected Invocations"),
             ("action", "Action"),
         ),
@@ -1077,19 +1127,19 @@ def _recent_invocations_section(
                     if invocation.id in streaming_ids
                     else "No",
                     "tokens": str(_invocation_token_total(invocation)),
-                    "provider_prompt_tokens": _metadata_int_label(
+                    "provider_input_tokens": _metadata_int_label(
                         invocation,
-                        "estimated_provider_prompt_tokens",
+                        "estimated_provider_input_tokens",
                     ),
-                    "direct_items": _metadata_int_label(
+                    "draft_input_items": _metadata_int_label(
                         invocation,
-                        "direct_session_item_count",
+                        "draft_input_session_item_count",
                     ),
-                    "direct_tokens": _metadata_int_label(
+                    "draft_input_tokens": _metadata_int_label(
                         invocation,
-                        "direct_transcript_estimated_tokens",
+                        "draft_input_estimated_tokens",
                     ),
-                    "tool_protocol": str(_direct_tool_protocol_count(invocation)),
+                    "tool_protocol": str(_tool_protocol_issue_count(invocation)),
                     "response_text": _response_text_label(invocation),
                     "tool_calls": _result_tool_calls_label(invocation),
                     "response_items": _response_item_count_label(invocation),
@@ -1128,9 +1178,9 @@ def _recent_invocations_section(
             ("duration", "Duration"),
             ("streaming", "Streaming"),
             ("tokens", "Tokens"),
-            ("provider_prompt_tokens", "Provider Prompt"),
-            ("direct_items", "Direct Items"),
-            ("direct_tokens", "Direct Tokens"),
+            ("provider_input_tokens", "Provider Input"),
+            ("draft_input_items", "Draft Input Items"),
+            ("draft_input_tokens", "Draft Input Tokens"),
             ("tool_protocol", "Tool Protocol"),
             ("response_text", "Text"),
             ("tool_calls", "Tool Calls"),
@@ -1497,7 +1547,7 @@ def _context_pressure_section(
             continue
         input_tokens = _invocation_input_tokens(invocation) or _metadata_int(
             invocation,
-            "estimated_provider_prompt_tokens",
+            "estimated_provider_input_tokens",
         )
         if input_tokens <= 0:
             continue
@@ -1635,6 +1685,9 @@ def _llm_lifecycle_events_section(
                 "entity": event.entity_id,
                 "status": event.status,
                 "trace": event.trace_id or "-",
+                "transport": _event_transport_label(event),
+                "continuation": _event_continuation_label(event),
+                "input_delta": _event_input_delta_label(event),
                 "details": _json_preview(event.payload),
             },
             status=event.status,
@@ -1652,6 +1705,9 @@ def _llm_lifecycle_events_section(
             ("entity", "Entity"),
             ("status", "Status"),
             ("trace", "Trace"),
+            ("transport", "Transport"),
+            ("continuation", "Continuation"),
+            ("input_delta", "Input Delta"),
             ("details", "Details"),
         ),
         rows=rows,
@@ -1669,6 +1725,7 @@ def _invocation_details(
     resolver_events_by_run_id: dict[str, OperationsObservedEvent],
     observed_events: tuple[OperationsObservedEvent, ...],
     response_events_by_invocation: dict[str, tuple[Any, ...]],
+    response_event_retention_policy: dict[str, object],
 ) -> tuple[LlmInvocationDetailModel, ...]:
     streaming_ids = _streaming_invocation_ids(observed_events)
     details: list[LlmInvocationDetailModel] = []
@@ -1730,29 +1787,73 @@ def _invocation_details(
                     OperationsKeyValueItemModel("Messages", str(len(invocation.messages))),
                     OperationsKeyValueItemModel("Tool Schemas", str(len(invocation.tool_schemas))),
                     OperationsKeyValueItemModel(
-                        "Provider Prompt Tokens",
+                        "Provider Wire Tokens",
                         _metadata_int_label(
                             invocation,
-                            "estimated_provider_prompt_tokens",
+                            "estimated_provider_input_tokens",
                         ),
                     ),
                     OperationsKeyValueItemModel(
-                        "Direct Transcript Items",
+                        "Draft Input Items",
                         _metadata_int_label(
                             invocation,
-                            "direct_session_item_count",
+                            "draft_input_session_item_count",
                         ),
                     ),
                     OperationsKeyValueItemModel(
-                        "Direct Transcript Tokens",
+                        "Draft Input Tokens",
                         _metadata_int_label(
                             invocation,
-                            "direct_transcript_estimated_tokens",
+                            "draft_input_estimated_tokens",
                         ),
                     ),
                     OperationsKeyValueItemModel(
                         "Tool Protocol Calls",
-                        str(_direct_tool_protocol_count(invocation)),
+                        str(_tool_protocol_issue_count(invocation)),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Replay Input Items",
+                        _replay_input_item_count_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Replay Input Mode",
+                        _metadata_text_label(invocation, "input_mode"),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Replay Input Kinds",
+                        _replay_input_item_kinds_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Replay Input Sources",
+                        _replay_input_item_sources_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Replay Protocol Items",
+                        _replay_protocol_items_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Result Items",
+                        _tool_result_stat_label(invocation, "tool_result_item_count"),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Result Excerpts",
+                        _tool_result_excerpt_count_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Result Excerpt Sample",
+                        _tool_result_excerpt_sample_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Result Compacted",
+                        _tool_result_stat_label(invocation, "compacted_result_count"),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Result Omitted",
+                        _tool_result_omitted_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Result Refs",
+                        _tool_result_refs_label(invocation),
                     ),
                     OperationsKeyValueItemModel(
                         "Artifact Tokens",
@@ -1776,18 +1877,46 @@ def _invocation_details(
                         ),
                     ),
                     OperationsKeyValueItemModel(
-                        "Direct Sequence Range",
-                        _direct_transcript_sequence_label(invocation),
+                        "Draft Sequence Range",
+                        _draft_input_sequence_label(invocation),
                     ),
                     OperationsKeyValueItemModel(
-                        "Context Snapshot",
-                        _metadata_text_label(invocation, "context_render_snapshot_id"),
+                        "Request Render Snapshot",
+                        _request_render_snapshot_label(invocation),
                     ),
                     OperationsKeyValueItemModel("Response Format", "Configured" if invocation.response_format else "-"),
                     OperationsKeyValueItemModel("Provider Request ID", invocation.provider_request_id or "-"),
                     OperationsKeyValueItemModel(
                         "Provider Continuation",
                         _provider_request_continuation_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Transport",
+                        _provider_request_transport_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Renderer",
+                        _provider_request_renderer_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Render Strategy",
+                        _provider_request_render_strategy_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Render Report",
+                        _provider_request_render_report_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Tool Mapping",
+                        _provider_tool_mapping_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Input Delta",
+                        _provider_request_input_delta_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Continuation Fallback",
+                        _provider_continuation_fallback_label(invocation),
                     ),
                     OperationsKeyValueItemModel(
                         "Provider Input Items",
@@ -1802,7 +1931,15 @@ def _invocation_details(
                         _provider_request_options_label(invocation),
                     ),
                 ),
+                runtime_observations=_runtime_observations_section(
+                    invocation,
+                    response_event_retention_policy=response_event_retention_policy,
+                ),
+                runtime_request_summary=_runtime_request_summary(invocation),
                 request_payload=_request_payload(invocation),
+                provider_render_report=_provider_render_report(invocation),
+                provider_wire_preview=_provider_wire_preview(invocation),
+                provider_context_mapping=_provider_context_mapping_table(invocation),
                 result_payload=_result_payload(invocation),
                 result_summary=_result_summary(invocation),
                 error=invocation.error.message if invocation.error is not None else "",
@@ -1814,18 +1951,17 @@ def _invocation_details(
                 error_facts=OperationsKeyValueSectionModel(
                     id="error_facts",
                     title="Error Facts",
-                    items=(
-                        OperationsKeyValueItemModel("Category", category, "danger" if category != "-" else "neutral"),
-                        OperationsKeyValueItemModel("Error Code", error_code, "danger" if error_code != "-" else "neutral"),
-                        OperationsKeyValueItemModel(
-                            "Retryable",
-                            "Yes" if _retryable_error(category, error_code) else "No",
-                            "warning" if _retryable_error(category, error_code) else "neutral",
-                        ),
+                    items=_error_fact_items(
+                        invocation,
+                        category=category,
+                        error_code=error_code,
                     ),
                 ),
                 policy_trace=_policy_trace_table_for_invocation(invocation),
                 response_items=_response_items_table_for_invocation(invocation),
+                response_runtime_mapping=_response_runtime_mapping_table_for_invocation(
+                    invocation,
+                ),
                 response_events=_response_events_table_for_invocation(
                     invocation.id,
                     response_events,
@@ -1834,6 +1970,228 @@ def _invocation_details(
             ),
         )
     return tuple(details)
+
+
+def _event_transport_label(event: OperationsObservedEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    preview = payload.get("provider_request_payload_preview")
+    preview = preview if isinstance(preview, dict) else {}
+    return _text(payload.get("transport")) or _text(preview.get("transport")) or "-"
+
+
+def _event_continuation_label(event: OperationsObservedEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    preview = payload.get("provider_request_payload_preview")
+    preview = preview if isinstance(preview, dict) else {}
+    has_previous = payload.get("has_previous_response_id")
+    if not isinstance(has_previous, bool):
+        has_previous = preview.get("has_previous_response_id")
+    previous_response_id = _text(payload.get("previous_response_id")) or _text(
+        preview.get("previous_response_id"),
+    )
+    if has_previous is True and previous_response_id:
+        return f"previous_response_id={previous_response_id}"
+    if has_previous is True:
+        return "previous_response_id present"
+    if has_previous is False:
+        return "initial request"
+    return "-"
+
+
+def _event_input_delta_label(event: OperationsObservedEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    preview = payload.get("provider_request_payload_preview")
+    preview = preview if isinstance(preview, dict) else {}
+    delta_mode = payload.get("input_delta_mode")
+    if not isinstance(delta_mode, bool):
+        delta_mode = preview.get("input_delta_mode")
+    baseline = payload.get("input_baseline_count")
+    if not isinstance(baseline, int):
+        baseline = preview.get("input_baseline_count")
+    delta = payload.get("input_delta_count")
+    if not isinstance(delta, int):
+        delta = preview.get("input_delta_count")
+    parts: list[str] = []
+    if isinstance(delta_mode, bool):
+        parts.append(f"mode={str(delta_mode).lower()}")
+    if isinstance(delta, int):
+        parts.append(f"delta={delta}")
+    if isinstance(baseline, int):
+        parts.append(f"baseline={baseline}")
+    return "; ".join(parts) if parts else "-"
+
+
+def _runtime_observations_section(
+    invocation: LlmInvocation,
+    *,
+    response_event_retention_policy: dict[str, object],
+) -> OperationsKeyValueSectionModel:
+    tool_protocol_payload = _tool_protocol_render_report(invocation)
+    observation_count = int(bool(tool_protocol_payload))
+    items = (
+        OperationsKeyValueItemModel(
+            "Runtime observations",
+            str(observation_count) if observation_count else "none",
+            "success" if observation_count else "neutral",
+        ),
+        OperationsKeyValueItemModel(
+            "Tool protocol replay",
+            _tool_protocol_replay_label(tool_protocol_payload),
+            (
+                "danger"
+                if tool_protocol_payload.get("replay_has_protocol_breaks") is True
+                else "success"
+                if tool_protocol_payload
+                else "neutral"
+            ),
+        ),
+        OperationsKeyValueItemModel(
+            "Tool protocol source",
+            _tool_protocol_source_label(tool_protocol_payload),
+            (
+                "warning"
+                if tool_protocol_payload.get("source_had_protocol_breaks") is True
+                else "success"
+                if tool_protocol_payload
+                else "neutral"
+            ),
+        ),
+        OperationsKeyValueItemModel(
+            "Tool protocol filtered",
+            _tool_protocol_filtered_label(tool_protocol_payload),
+            (
+                "warning"
+                if _tool_protocol_filtered_count(tool_protocol_payload) > 0
+                else "neutral"
+            ),
+        ),
+        OperationsKeyValueItemModel(
+            "Response event window",
+            _duration_seconds_label(
+                response_event_retention_policy.get("full_event_window_seconds"),
+            ),
+            "info",
+        ),
+        OperationsKeyValueItemModel(
+            "Response event detail limit",
+            _optional_int_label(
+                response_event_retention_policy.get("detail_event_limit"),
+            ),
+            "neutral",
+        ),
+        OperationsKeyValueItemModel(
+            "Response event durable fact",
+            _text_or_dash(response_event_retention_policy.get("durable_fact")),
+            "neutral",
+        ),
+        OperationsKeyValueItemModel(
+            "Response event overflow action",
+            _text_or_dash(response_event_retention_policy.get("overflow_action")),
+            "neutral",
+        ),
+    )
+    return OperationsKeyValueSectionModel(
+        id="runtime_observations",
+        title="Runtime Observations",
+        items=items,
+    )
+
+
+def _tool_protocol_replay_label(payload: dict[Any, Any]) -> str:
+    if not payload:
+        return "-"
+    if payload.get("replay_has_protocol_breaks") is True:
+        return (
+            "breaks: "
+            f"orphan={_int_value(payload.get('replay_orphan_tool_output_count'))}; "
+            f"missing={_int_value(payload.get('replay_missing_tool_output_count'))}; "
+            f"dup_call={_int_value(payload.get('replay_duplicate_tool_call_id_count'))}; "
+            f"dup_output={_int_value(payload.get('replay_duplicate_tool_output_id_count'))}"
+        )
+    return "clean"
+
+
+def _tool_protocol_source_label(payload: dict[Any, Any]) -> str:
+    if not payload:
+        return "-"
+    return (
+        "had breaks"
+        if payload.get("source_had_protocol_breaks") is True
+        else "clean"
+    )
+
+
+def _tool_protocol_filtered_label(payload: dict[Any, Any]) -> str:
+    if not payload:
+        return "-"
+    filtered_count = _tool_protocol_filtered_count(payload)
+    if filtered_count <= 0:
+        return "none"
+    return (
+        f"filtered={filtered_count}; "
+        f"orphan={_int_value(payload.get('dropped_orphan_tool_output_count'))}; "
+        f"missing={_int_value(payload.get('dropped_missing_tool_output_count'))}; "
+        f"dup_call={_int_value(payload.get('dropped_duplicate_tool_call_id_count'))}; "
+        f"dup_output={_int_value(payload.get('dropped_duplicate_tool_output_id_count'))}"
+    )
+
+
+def _tool_protocol_filtered_count(payload: dict[Any, Any]) -> int:
+    return sum(
+        _int_value(payload.get(key))
+        for key in (
+            "dropped_orphan_tool_output_count",
+            "dropped_missing_tool_output_count",
+            "dropped_duplicate_tool_call_id_count",
+            "dropped_duplicate_tool_output_id_count",
+        )
+    )
+
+
+def _optional_int_label(value: Any) -> str:
+    parsed = _int_value(value)
+    return str(parsed) if parsed else "-"
+
+
+def _duration_seconds_label(value: Any) -> str:
+    parsed = _int_value(value)
+    if not parsed:
+        return "-"
+    if parsed % 86_400 == 0:
+        return f"{parsed // 86_400}d"
+    if parsed % 3_600 == 0:
+        return f"{parsed // 3_600}h"
+    return f"{parsed}s"
+
+
+def _text_or_dash(value: Any) -> str:
+    text = str(value or "").strip()
+    return text or "-"
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    if isinstance(value, str):
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _string_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(
+        text
+        for item in value
+        if (text := str(item or "").strip())
+    )
 
 
 def _response_items_table_for_invocation(
@@ -1850,9 +2208,12 @@ def _response_items_table_for_invocation(
                 "provider_type": str(getattr(item, "provider_item_type", None) or "-"),
                 "tool": str(getattr(item, "tool_name", None) or "-"),
                 "call_id": str(getattr(item, "call_id", None) or "-"),
-                "model_visible": "Yes" if bool(getattr(item, "model_visible", False)) else "No",
-                "user_visible": "Yes" if bool(getattr(item, "user_visible", False)) else "No",
+                "provider_replay_candidate": "Yes" if bool(getattr(item, "provider_replay_candidate", False)) else "No",
+                "user_timeline_candidate": "Yes" if bool(getattr(item, "user_timeline_candidate", False)) else "No",
                 "content": _json_preview(getattr(item, "content_payload", {}) or {}),
+                "provider_payload": _json_preview(
+                    getattr(item, "provider_payload", {}) or {},
+                ),
             },
             status=_enum_value(getattr(item, "kind", None)),
             tone=_response_item_tone(_enum_value(getattr(item, "kind", None))),
@@ -1869,13 +2230,67 @@ def _response_items_table_for_invocation(
             ("provider_type", "Provider Type"),
             ("tool", "Tool"),
             ("call_id", "Call ID"),
-            ("model_visible", "Model Visible"),
-            ("user_visible", "User Visible"),
+            ("provider_replay_candidate", "Provider Replay Candidate"),
+            ("user_timeline_candidate", "User Timeline Candidate"),
             ("content", "Content"),
+            ("provider_payload", "Provider Payload"),
         ),
         rows=rows,
         total=len(response_items),
         empty_state="No response items recorded.",
+    )
+
+
+def _response_runtime_mapping_table_for_invocation(
+    invocation: LlmInvocation,
+) -> OperationsTableSectionModel:
+    response_items = tuple(getattr(invocation, "response_items", ()) or ())
+    rows = tuple(
+        OperationsTableRowModel(
+            id=f"{invocation.id}:response_runtime_mapping:{index}",
+            cells={
+                "provider_item": str(getattr(item, "provider_item_id", None) or "-"),
+                "provider_type": str(getattr(item, "provider_item_type", None) or "-"),
+                "response_item": str(getattr(item, "id", "") or "-"),
+                "sequence": str(getattr(item, "sequence_no", index)),
+                "response_kind": _enum_value(getattr(item, "kind", None)),
+                "phase": _enum_value(getattr(item, "phase", None)),
+                "runtime_semantic": runtime_semantic_kind_from_llm_response_item(item),
+                "role": _enum_value(getattr(item, "role", None)),
+                "tool": str(getattr(item, "tool_name", None) or "-"),
+                "call_id": str(getattr(item, "call_id", None) or "-"),
+                "provider_replay_candidate": "Yes"
+                if bool(getattr(item, "provider_replay_candidate", False))
+                else "No",
+                "user_timeline_candidate": "Yes"
+                if bool(getattr(item, "user_timeline_candidate", False))
+                else "No",
+            },
+            status=runtime_semantic_kind_from_llm_response_item(item),
+            tone=_response_item_tone(_enum_value(getattr(item, "kind", None))),
+        )
+        for index, item in enumerate(response_items[:40], start=1)
+    )
+    return OperationsTableSectionModel(
+        id=f"{invocation.id}_response_runtime_mapping",
+        title="Response Runtime Mapping",
+        columns=_columns(
+            ("provider_item", "Provider Item"),
+            ("provider_type", "Provider Type"),
+            ("response_item", "Response Item"),
+            ("sequence", "Seq"),
+            ("response_kind", "Response Kind"),
+            ("phase", "Phase"),
+            ("runtime_semantic", "Runtime Semantic"),
+            ("role", "Role"),
+            ("tool", "Tool"),
+            ("call_id", "Call ID"),
+            ("provider_replay_candidate", "Provider Replay Candidate"),
+            ("user_timeline_candidate", "User Timeline Candidate"),
+        ),
+        rows=rows,
+        total=len(response_items),
+        empty_state="No response runtime mapping recorded.",
     )
 
 
@@ -2392,6 +2807,28 @@ def _response_events_by_invocation(
     return grouped
 
 
+def _response_event_retention_policy(
+    llm_service: OperationsLlmQueryPort,
+) -> dict[str, object]:
+    read_policy = getattr(llm_service, "response_event_retention_policy", None)
+    if not callable(read_policy):
+        return {}
+    try:
+        policy = read_policy()
+    except Exception:
+        return {}
+    to_payload = getattr(policy, "to_payload", None)
+    if callable(to_payload):
+        try:
+            payload = to_payload()
+            return dict(payload) if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+    if isinstance(policy, dict):
+        return dict(policy)
+    return {}
+
+
 def _runtime_snapshot(runtime_metrics: Any | None) -> dict[str, object]:
     if runtime_metrics is None or not hasattr(runtime_metrics, "snapshot"):
         return {"counters": [], "gauges": [], "timings": []}
@@ -2525,6 +2962,99 @@ def _blocked_profiles(
         for profile in profiles
         if not _profile_access_readiness(profile, access_service=access_service)["ready"]
     ]
+
+
+_WARMUP_EVENT_NAMES = {
+    "llm.profile_warmup_succeeded",
+    "llm.profile_warmup_skipped",
+    "llm.profile_warmup_failed",
+}
+
+
+def _latest_warmup_events_by_profile(
+    events: tuple[OperationsObservedEvent, ...],
+) -> dict[str, OperationsObservedEvent]:
+    result: dict[str, OperationsObservedEvent] = {}
+    for event in sorted(
+        events,
+        key=lambda item: coerce_utc_datetime(item.occurred_at),
+        reverse=True,
+    ):
+        if event.event_name not in _WARMUP_EVENT_NAMES:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        profile_id = _text(payload.get("llm_id")) or event.entity_id
+        if not profile_id or profile_id in result:
+            continue
+        result[profile_id] = event
+    return result
+
+
+def _warmup_status_label(event: OperationsObservedEvent | None) -> str:
+    if event is None:
+        return "Not checked"
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    status = _text(payload.get("status")) or event.status
+    transport = _text(payload.get("transport"))
+    if event.event_name == "llm.profile_warmup_succeeded":
+        return f"Warmed ({transport})" if transport else "Warmed"
+    if event.event_name == "llm.profile_warmup_skipped":
+        reason = _text(payload.get("reason"))
+        return f"Skipped: {reason}" if reason else "Skipped"
+    if event.event_name == "llm.profile_warmup_failed":
+        reason = _text(payload.get("reason"))
+        return f"Failed: {reason}" if reason else "Failed"
+    return status or "-"
+
+
+def _warmup_tone(
+    event: OperationsObservedEvent | None,
+    *,
+    fallback: str,
+) -> str:
+    if event is None:
+        return fallback
+    if event.event_name == "llm.profile_warmup_succeeded":
+        return "success"
+    if event.event_name == "llm.profile_warmup_skipped":
+        return "warning"
+    if event.event_name == "llm.profile_warmup_failed":
+        return "danger"
+    return fallback
+
+
+def _warmup_next_action(
+    event: OperationsObservedEvent | None,
+    *,
+    readiness: dict[str, Any],
+) -> str:
+    if not readiness.get("ready"):
+        return "Open Access"
+    if event is None:
+        return "Run warmup"
+    if event.event_name == "llm.profile_warmup_succeeded":
+        return "Ready for run"
+    if event.event_name == "llm.profile_warmup_skipped":
+        return "Use invoke smoke"
+    if event.event_name == "llm.profile_warmup_failed":
+        reason = _warmup_reason(event).lower()
+        if "credential" in reason or "oauth" in reason or "token" in reason:
+            return "Check Access then retry warmup"
+        if "websocket" in reason or "connection" in reason or "endpoint" in reason:
+            return "Check WebSocket transport"
+        return "Retry warmup / inspect event"
+    return "-"
+
+
+def _warmup_reason(event: OperationsObservedEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    reason = _text(payload.get("reason"))
+    if reason:
+        return reason
+    details = payload.get("details")
+    if isinstance(details, dict):
+        return _text(details.get("reason")) or ""
+    return ""
 
 
 def _profile_access_readiness(
@@ -2661,13 +3191,20 @@ def _execution_owner_context(
     if not isinstance(metadata, dict):
         metadata = {}
     trace_id = _text(metadata.get("trace_id")) or run_id
+    summary_payload = item.summary_payload if isinstance(item.summary_payload, dict) else {}
+    focus_id = (
+        _text(getattr(item, "correlation_key", None))
+        or _text(summary_payload.get("llm_invocation_id"))
+        or _text(summary_payload.get("invocation_id"))
+        or _text(getattr(item, "id", None))
+    )
     return {
         "run_id": run_id,
         "turn_id": _text(metadata.get("turn_id")) or item.turn_id,
         "trace_id": trace_id,
         "session_key": _text(metadata.get("session_key")) or "-",
         "route": f"/ui/workbench/runs/{run_id}",
-        "trace_route": f"/ui/trace/{trace_id}?step_id={item.step_id}",
+        "trace_route": _trace_route(trace_id, focus_id=focus_id),
         "chain_id": item.chain_id,
         "step_id": item.step_id,
         "step_kind": _enum_value(getattr(step, "kind", None)),
@@ -2676,6 +3213,11 @@ def _execution_owner_context(
         **_llm_execution_summary_context(getattr(item, "summary_payload", None)),
         "updated_at": _execution_item_updated_at(item),
     }
+
+
+def _trace_route(trace_id: str, *, focus_id: str | None = None) -> str:
+    route = f"/workbench/traces/{trace_id}"
+    return f"{route}?focus_id={focus_id}" if focus_id else route
 
 
 def _llm_execution_summary_context(summary_payload: Any) -> dict[str, str]:
@@ -2800,11 +3342,39 @@ def _resolver_facts_section(
                 "warning" if _text(payload.get("reason")) else "neutral",
             ),
             OperationsKeyValueItemModel(
+                "Routing Input Blocks",
+                _optional_int_label(payload.get("routing_input_block_count")),
+            ),
+            OperationsKeyValueItemModel(
+                "Session Replay Window",
+                _resolver_replay_window_label(payload.get("session_replay_window")),
+            ),
+            OperationsKeyValueItemModel(
                 "Run ID",
                 _text(payload.get("run_id")) or run_context.get("run_id", "-"),
             ),
         ),
     )
+
+
+def _resolver_replay_window_label(value: object) -> str:
+    if not isinstance(value, dict):
+        return "-"
+    parts: list[str] = []
+    from_sequence = _optional_int_label(value.get("from_sequence_no"))
+    to_sequence = _optional_int_label(value.get("to_sequence_no"))
+    if from_sequence != "-" or to_sequence != "-":
+        parts.append(f"seq={from_sequence}..{to_sequence}")
+    item_count = _optional_int_label(value.get("item_count"))
+    if item_count != "-":
+        parts.append(f"items={item_count}")
+    active_only = value.get("active_session_only")
+    if isinstance(active_only, bool):
+        parts.append(f"active_only={str(active_only).lower()}")
+    protocol_call_ids = value.get("protocol_call_ids")
+    if isinstance(protocol_call_ids, list) and protocol_call_ids:
+        parts.append(f"calls={len(protocol_call_ids)}")
+    return "; ".join(parts) if parts else "-"
 
 
 def _invocation_reason(invocation: LlmInvocation) -> str:
@@ -2867,11 +3437,32 @@ def _metadata_text_label(invocation: LlmInvocation, key: str) -> str:
     return value or "-"
 
 
-def _direct_tool_protocol_count(invocation: LlmInvocation) -> int:
-    value = _request_metadata(invocation).get("direct_tool_protocol_call_ids")
-    if isinstance(value, (list, tuple)):
-        return len([item for item in value if str(item or "").strip()])
-    return 0
+def _request_render_snapshot_label(invocation: LlmInvocation) -> str:
+    value = _text(_request_metadata(invocation).get("request_render_snapshot_id"))
+    if value is not None:
+        return value
+    return "-"
+
+
+def _tool_protocol_issue_count(invocation: LlmInvocation) -> int:
+    payload = _tool_protocol_render_report(invocation)
+    if not payload:
+        return 0
+    return _tool_protocol_filtered_count(payload) + sum(
+        _int_value(payload.get(key))
+        for key in (
+            "replay_orphan_tool_output_count",
+            "replay_missing_tool_output_count",
+            "replay_duplicate_tool_call_id_count",
+            "replay_duplicate_tool_output_id_count",
+        )
+    )
+
+
+def _tool_protocol_render_report(invocation: LlmInvocation) -> dict[str, Any]:
+    render_report = _provider_render_report(invocation)
+    tool_protocol = render_report.get("tool_protocol")
+    return dict(tool_protocol) if isinstance(tool_protocol, dict) else {}
 
 
 def _response_text_label(invocation: LlmInvocation) -> str:
@@ -2915,8 +3506,8 @@ def _end_turn_label(invocation: LlmInvocation) -> str:
     return "-"
 
 
-def _direct_transcript_sequence_label(invocation: LlmInvocation) -> str:
-    sequence_range = _request_metadata(invocation).get("direct_transcript_sequence_range")
+def _draft_input_sequence_label(invocation: LlmInvocation) -> str:
+    sequence_range = _request_metadata(invocation).get("draft_input_sequence_range")
     if not isinstance(sequence_range, dict):
         return "-"
     sessions = sequence_range.get("sessions")
@@ -2936,6 +3527,111 @@ def _direct_transcript_sequence_label(invocation: LlmInvocation) -> str:
     if len(sessions) > 3:
         labels.append(f"+{len(sessions) - 3}")
     return ", ".join(labels)
+
+
+def _draft_input_budget_summary(invocation: LlmInvocation) -> dict[str, object]:
+    value = _request_metadata(invocation).get("draft_input_budget_summary")
+    return value if isinstance(value, dict) else {}
+
+
+def _tool_result_stats(invocation: LlmInvocation) -> dict[str, object]:
+    value = _draft_input_budget_summary(invocation).get("tool_result_stats")
+    return value if isinstance(value, dict) else {}
+
+
+def _tool_result_stat_int(invocation: LlmInvocation, key: str) -> int:
+    return _int_value(_tool_result_stats(invocation).get(key))
+
+
+def _tool_result_stat_label(invocation: LlmInvocation, key: str) -> str:
+    value = _tool_result_stat_int(invocation, key)
+    return str(value) if value else "-"
+
+
+def _tool_result_omitted_label(invocation: LlmInvocation) -> str:
+    omitted_count = _tool_result_stat_int(invocation, "omitted_count")
+    omitted_chars = _tool_result_stat_int(invocation, "omitted_chars")
+    parts: list[str] = []
+    if omitted_count:
+        parts.append(f"count={omitted_count}")
+    if omitted_chars:
+        parts.append(f"chars={omitted_chars}")
+    return "; ".join(parts) if parts else "-"
+
+
+def _tool_result_refs_label(invocation: LlmInvocation) -> str:
+    artifact_ref_count = _tool_result_stat_int(invocation, "artifact_ref_count")
+    read_handle_count = _tool_result_stat_int(invocation, "read_handle_count")
+    parts: list[str] = []
+    if artifact_ref_count:
+        parts.append(f"artifact_refs={artifact_ref_count}")
+    if read_handle_count:
+        parts.append(f"read_handles={read_handle_count}")
+    return "; ".join(parts) if parts else "-"
+
+
+def _tool_result_excerpt_count_label(invocation: LlmInvocation) -> str:
+    count = _tool_result_excerpt_count(invocation)
+    return str(count) if count else "-"
+
+
+def _tool_result_excerpt_count(invocation: LlmInvocation) -> int:
+    count = 0
+    for item in invocation.input_items:
+        if item.kind.value != "function_call_output":
+            continue
+        if _input_item_payload_has_tool_result_excerpt(item.payload):
+            count += 1
+    return count
+
+
+def _tool_result_excerpt_sample_label(invocation: LlmInvocation) -> str:
+    for item in invocation.input_items:
+        if item.kind.value != "function_call_output":
+            continue
+        if not _input_item_payload_has_tool_result_excerpt(item.payload):
+            continue
+        text = _input_item_output_text(item.payload.get("output"))
+        if text.strip():
+            return _bounded_text(text.strip().replace("\n", " "), limit=160)
+    return "-"
+
+
+def _input_item_payload_has_tool_result_excerpt(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    output = payload.get("output")
+    text = _input_item_output_text(output)
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "tool_result:",
+            "stdout_excerpt:",
+            "stderr_excerpt:",
+            "body_excerpt_policy:",
+            "artifact_refs:",
+            "read_handles:",
+        )
+    )
+
+
+def _input_item_output_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for block in value:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        text = value.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
 
 
 def _max_context_label(profiles: list[LlmProfile]) -> str:
@@ -3173,7 +3869,9 @@ def _request_payload(invocation: LlmInvocation) -> dict[str, Any]:
             ],
             "response_format": invocation.response_format,
             "overrides": invocation.request_overrides,
-            "request_metadata": invocation.request_metadata,
+            "request_metadata": request_metadata_preview_payload(
+                invocation.request_metadata,
+            ),
             "provider_request_payload_preview": dict(
                 invocation.provider_request_payload_preview,
             ),
@@ -3181,9 +3879,167 @@ def _request_payload(invocation: LlmInvocation) -> dict[str, Any]:
     )
 
 
+def _runtime_request_summary(invocation: LlmInvocation) -> dict[str, Any]:
+    metadata = _request_metadata(invocation)
+    summary: dict[str, Any] = {
+        "message_count": len(invocation.messages),
+        "input_item_count": len(invocation.input_items),
+        "input_item_kinds": [item.kind.value for item in invocation.input_items],
+        "tool_schema_count": len(invocation.tool_schemas),
+        "response_format_configured": invocation.response_format is not None,
+    }
+    for key in (
+        "request_render_snapshot_id",
+        "request_render_snapshot_kind",
+        "input_mode",
+        "runtime_contract_version",
+        "runtime_contract_hash",
+        "draft_input_session_item_count",
+        "tool_surface_id",
+        "tool_surface_snapshot_id",
+        "tool_surface_function_count",
+        "tool_surface_mirrored_schema_count",
+        "request_context_source",
+        "context_slice_id",
+        "context_slice_item_count",
+        "context_slice_included_node_count",
+        "context_slice_omitted_node_count",
+        "context_slice_active_tool_count",
+        "context_slice_projected_input_item_count",
+        "context_slice_archived_ref_count",
+        "context_slice_redacted_ref_count",
+        "context_slice_unresolved_ref_count",
+        "context_slice_loss",
+        "visible_input_summary",
+        "request_render_timings",
+    ):
+        value = metadata.get(key)
+        if value not in (None, "", {}, []):
+            summary[key] = value
+    request_render_snapshot = metadata.get("request_render_snapshot")
+    if isinstance(request_render_snapshot, dict):
+        surface = request_render_snapshot_preview_payload(request_render_snapshot)
+        if surface:
+            summary["request_render_snapshot"] = surface
+            diagnostics = surface.get("diagnostics")
+            if (
+                "request_render_timings" not in summary
+                and isinstance(diagnostics, dict)
+            ):
+                timings = diagnostics.get("request_render_timings")
+                if timings not in (None, "", {}, []):
+                    summary["request_render_timings"] = timings
+    tool_surface = metadata.get("tool_surface")
+    if isinstance(tool_surface, dict):
+        surface = _tool_surface_summary(tool_surface)
+        if surface:
+            summary["tool_surface"] = surface
+    render_report = _provider_render_report(invocation)
+    coverage = render_report.get("input_item_mapping_coverage")
+    if isinstance(coverage, dict) and coverage:
+        summary["provider_input_item_mapping_coverage"] = dict(coverage)
+    return {
+        key: value
+        for key, value in summary.items()
+        if value not in (None, "", {}, [])
+    }
+
+
+def _tool_surface_summary(surface: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    surface_id = _text(surface.get("id"))
+    if surface_id:
+        summary["id"] = surface_id
+    functions = surface.get("functions")
+    if isinstance(functions, list | tuple):
+        summary["function_count"] = len(functions)
+    mirrored_schema_names = surface.get("mirrored_schema_names")
+    if isinstance(mirrored_schema_names, list | tuple):
+        summary["mirrored_schema_count"] = len(mirrored_schema_names)
+    blocked_access_count = surface.get("blocked_access_count")
+    if isinstance(blocked_access_count, int):
+        summary["blocked_access_count"] = blocked_access_count
+    return summary
+
+
 def _provider_request_preview(invocation: LlmInvocation) -> dict[str, Any]:
     preview = getattr(invocation, "provider_request_payload_preview", None)
     return dict(preview) if isinstance(preview, dict) else {}
+
+
+def _provider_render_report(invocation: LlmInvocation) -> dict[str, Any]:
+    preview = _provider_request_preview(invocation)
+    render_report = preview.get("render_report")
+    return dict(render_report) if isinstance(render_report, dict) else {}
+
+
+def _provider_context_mapping_table(
+    invocation: LlmInvocation,
+) -> OperationsTableSectionModel:
+    render_report = _provider_render_report(invocation)
+    raw_mapping = render_report.get("input_item_mapping")
+    rows: list[OperationsTableRowModel] = []
+    if isinstance(raw_mapping, list):
+        for index, item in enumerate(raw_mapping[:80], start=1):
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"{invocation.id}:provider_context_mapping:{index}",
+                    cells={
+                        "provider_index": _text(
+                            item.get("provider_payload_index"),
+                        )
+                        or str(index - 1),
+                        "input_index": _text(item.get("input_item_index"))
+                        or str(index - 1),
+                        "input_kind": _text(item.get("input_item_kind")) or "-",
+                        "source": _text(item.get("input_item_source")) or "-",
+                        "owner": _text(item.get("owner")) or "-",
+                        "kind": _text(item.get("kind")) or "-",
+                        "session_item": _text(item.get("session_item_id")) or "-",
+                        "tool_call": _text(item.get("tool_call_id")) or "-",
+                        "tool_run": _text(item.get("tool_run_id")) or "-",
+                        "trace_status": _text(item.get("trace_status")) or "-",
+                        "trace_reason": _text(item.get("trace_reason")) or "-",
+                    },
+                    status=_text(item.get("trace_status"))
+                    or _text(item.get("input_item_source"))
+                    or "mapped",
+                    tone="info",
+                ),
+            )
+    return OperationsTableSectionModel(
+        id=f"{invocation.id}_provider_context_mapping",
+        title="Provider Context Mapping",
+        columns=_columns(
+            ("provider_index", "Provider Index"),
+            ("input_index", "Input Index"),
+            ("input_kind", "Input Kind"),
+            ("source", "Source"),
+            ("owner", "Owner"),
+            ("kind", "Kind"),
+            ("session_item", "Session Item"),
+            ("tool_call", "Tool Call"),
+            ("tool_run", "Tool Run"),
+            ("trace_status", "Trace Status"),
+            ("trace_reason", "Trace Reason"),
+        ),
+        rows=tuple(rows),
+        total=len(rows),
+        empty_state="No provider context mapping recorded.",
+    )
+
+
+def _provider_wire_preview(invocation: LlmInvocation) -> dict[str, Any]:
+    preview = _provider_request_preview(invocation)
+    if not preview:
+        return {}
+    return {
+        key: value
+        for key, value in preview.items()
+        if key != "render_report"
+    }
 
 
 def _provider_request_continuation_label(invocation: LlmInvocation) -> str:
@@ -3199,12 +4055,166 @@ def _provider_request_continuation_label(invocation: LlmInvocation) -> str:
     return "initial request"
 
 
+def _provider_request_transport_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    value = _text(preview.get("transport"))
+    return value or "-"
+
+
+def _provider_request_renderer_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    value = _text(preview.get("renderer_id"))
+    if value:
+        return value
+    render_report = preview.get("render_report")
+    if isinstance(render_report, dict):
+        value = _text(render_report.get("renderer_id"))
+        if value:
+            return value
+    return "-"
+
+
+def _provider_request_render_strategy_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    value = _text(preview.get("render_strategy"))
+    if value:
+        return value
+    render_report = preview.get("render_report")
+    if isinstance(render_report, dict):
+        value = _text(render_report.get("render_strategy"))
+        if value:
+            return value
+    return "-"
+
+
+def _provider_request_render_report_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    render_report = preview.get("render_report")
+    if not isinstance(render_report, dict) or not render_report:
+        return "-"
+    parts: list[str] = []
+    renderer_id = _text(render_report.get("renderer_id"))
+    transport = _text(render_report.get("transport"))
+    strategy = _text(render_report.get("render_strategy"))
+    if renderer_id:
+        parts.append(f"renderer={renderer_id}")
+    if transport:
+        parts.append(f"transport={transport}")
+    if strategy:
+        parts.append(f"strategy={strategy}")
+    loss_report = render_report.get("loss_report")
+    if isinstance(loss_report, dict) and loss_report:
+        parts.append(f"loss={_truncate(_json_or_text(loss_report), 160)}")
+    elif isinstance(loss_report, dict):
+        parts.append("loss=none")
+    return "; ".join(parts) if parts else _truncate(_json_or_text(render_report), 240)
+
+
+def _provider_tool_mapping_label(invocation: LlmInvocation) -> str:
+    render_report = _provider_render_report(invocation)
+    tool_surface = render_report.get("tool_surface")
+    if not isinstance(tool_surface, dict):
+        return "-"
+    mapping = tool_surface.get("provider_tool_mapping")
+    if not isinstance(mapping, list) or not mapping:
+        return "-"
+    traced = 0
+    untraced = 0
+    samples: list[str] = []
+    for raw_row in mapping:
+        if not isinstance(raw_row, dict):
+            continue
+        status = _text(raw_row.get("trace_status"))
+        if status == "runtime_tool_surface":
+            traced += 1
+        else:
+            untraced += 1
+        if len(samples) >= 3:
+            continue
+        provider_name = _text(raw_row.get("provider_name")) or "?"
+        node_id = _text(raw_row.get("node_id"))
+        source_id = _text(raw_row.get("source_id"))
+        target = node_id or source_id or _text(raw_row.get("tool_id")) or "untraced"
+        samples.append(f"{provider_name}->{target}")
+    if not traced and not untraced:
+        return "-"
+    parts = [f"traced={traced}", f"untraced={untraced}"]
+    if samples:
+        parts.append("sample=" + ", ".join(samples))
+    return "; ".join(parts)
+
+
+def _provider_request_input_delta_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    if not preview:
+        return "-"
+    delta_mode = preview.get("input_delta_mode")
+    input_delta_count = preview.get("input_delta_count")
+    input_baseline_count = preview.get("input_baseline_count")
+    parts: list[str] = []
+    if isinstance(delta_mode, bool):
+        parts.append(f"mode={str(delta_mode).lower()}")
+    if isinstance(input_delta_count, int):
+        parts.append(f"delta={input_delta_count}")
+    if isinstance(input_baseline_count, int):
+        parts.append(f"baseline={input_baseline_count}")
+    return "; ".join(parts) if parts else "-"
+
+
+def _provider_continuation_fallback_label(invocation: LlmInvocation) -> str:
+    result = getattr(invocation, "result", None)
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, dict):
+        return "-"
+    if metadata.get("provider_continuation_fallback") is not True:
+        return "-"
+    reason = _text(metadata.get("provider_continuation_fallback_reason"))
+    return reason or "fallback"
+
+
 def _provider_request_input_items_label(invocation: LlmInvocation) -> str:
     preview = _provider_request_preview(invocation)
     values = preview.get("input_item_types")
     if not isinstance(values, list) or not values:
         return "-"
     return ", ".join(str(item) for item in values[:8])
+
+
+def _replay_input_item_count_label(invocation: LlmInvocation) -> str:
+    return str(len(invocation.input_items))
+
+
+def _replay_input_item_kinds_label(invocation: LlmInvocation) -> str:
+    if not invocation.input_items:
+        return "-"
+    values = [item.kind.value for item in invocation.input_items[:8]]
+    suffix = "..." if len(invocation.input_items) > 8 else ""
+    return ", ".join(values) + suffix
+
+
+def _replay_input_item_sources_label(invocation: LlmInvocation) -> str:
+    if not invocation.input_items:
+        return "-"
+    values = tuple(
+        dict.fromkeys(
+            item.source.strip() or "-"
+            for item in invocation.input_items
+        ),
+    )
+    suffix = "..." if len(values) > 8 else ""
+    return ", ".join(values[:8]) + suffix
+
+
+def _replay_protocol_items_label(invocation: LlmInvocation) -> str:
+    counts = Counter(item.kind.value for item in invocation.input_items)
+    if not counts:
+        return "-"
+    return (
+        f"reasoning={counts.get('reasoning', 0)}; "
+        f"calls={counts.get('function_call', 0)}; "
+        f"outputs={counts.get('function_call_output', 0)}; "
+        f"provider_external={counts.get('provider_external_item', 0)}"
+    )
 
 
 def _provider_request_tool_count_label(invocation: LlmInvocation) -> str:
@@ -3230,6 +4240,106 @@ def _provider_request_options_label(invocation: LlmInvocation) -> str:
     if not keys:
         return "-"
     return ", ".join(str(key) for key in keys[:8])
+
+
+def _error_fact_items(
+    invocation: LlmInvocation,
+    *,
+    category: str,
+    error_code: str,
+) -> tuple[OperationsKeyValueItemModel, ...]:
+    retryable = _retryable_error(category, error_code)
+    items: list[OperationsKeyValueItemModel] = [
+        OperationsKeyValueItemModel(
+            "Category",
+            category,
+            "danger" if category != "-" else "neutral",
+        ),
+        OperationsKeyValueItemModel(
+            "Error Code",
+            error_code,
+            "danger" if error_code != "-" else "neutral",
+        ),
+        OperationsKeyValueItemModel(
+            "Retryable",
+            "Yes" if retryable else "No",
+            "warning" if retryable else "neutral",
+        ),
+    ]
+    if invocation.error is not None:
+        items.append(
+            OperationsKeyValueItemModel(
+                "Provider Error Message",
+                _truncate(invocation.error.message, 240),
+                "danger",
+            ),
+        )
+        for key, value in sorted(invocation.error.details.items()):
+            if value in (None, "", [], {}):
+                continue
+            items.append(
+                OperationsKeyValueItemModel(
+                    f"Error Detail: {key}",
+                    _truncate(_json_or_text(value), 240),
+                    "danger",
+                ),
+            )
+    preview = _provider_request_preview(invocation)
+    preview_error = _text(preview.get("preview_error"))
+    if preview_error:
+        items.append(
+            OperationsKeyValueItemModel(
+                "Provider Preview Error",
+                _truncate(preview_error, 240),
+                "danger",
+            ),
+        )
+    provider_transport = _provider_request_transport_label(invocation)
+    if provider_transport != "-":
+        items.append(
+            OperationsKeyValueItemModel(
+                "Provider Transport",
+                provider_transport,
+                "neutral",
+            ),
+        )
+    provider_continuation = _provider_request_continuation_label(invocation)
+    if provider_continuation != "-":
+        items.append(
+            OperationsKeyValueItemModel(
+                "Provider Continuation",
+                provider_continuation,
+                "neutral",
+            ),
+        )
+    provider_input_delta = _provider_request_input_delta_label(invocation)
+    if provider_input_delta != "-":
+        items.append(
+            OperationsKeyValueItemModel(
+                "Provider Input Delta",
+                provider_input_delta,
+                "neutral",
+            ),
+        )
+    fallback_reason = _provider_continuation_fallback_label(invocation)
+    if fallback_reason != "-":
+        items.append(
+            OperationsKeyValueItemModel(
+                "Provider Continuation Fallback",
+                fallback_reason,
+                "warning",
+            ),
+        )
+    return tuple(items)
+
+
+def _json_or_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
 
 
 def _result_payload(invocation: LlmInvocation) -> dict[str, Any] | None:
@@ -3328,6 +4438,14 @@ def _text(value: Any) -> str | None:
     if isinstance(value, (int, float)):
         return str(value)
     return None
+
+
+def _bounded_text(value: str, *, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 1:
+        return value[:limit]
+    return value[: limit - 1].rstrip() + "…"
 
 
 def _text_list(value: Any) -> tuple[str, ...]:

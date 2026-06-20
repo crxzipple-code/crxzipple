@@ -17,6 +17,7 @@ from crxzipple.interfaces.cli.main import _is_missing_database_schema_error
 from crxzipple.interfaces.cli.main import app
 from crxzipple.interfaces.cli import db as db_cli
 from crxzipple.interfaces.runtime_container import AssemblyTarget
+from crxzipple.modules.browser.infrastructure.engines import CdpControlEngine
 from crxzipple.modules.dispatch.application import (
     CreateDispatchTaskInput,
     EnqueueDispatchTaskInput,
@@ -33,7 +34,28 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0076_tool_surface_snapshots"
+HEAD_REVISION = "0085_context_request_render_snapshots"
+
+
+class _FakeCdpSocket:
+    def send(self, _payload: str) -> None:
+        return None
+
+    def recv(self) -> str:
+        return '{"id": 1, "result": {}}'
+
+    def close(self) -> None:
+        return None
+
+
+def _fake_ws_connect(_ws_url: str, *, timeout: float | None = None):  # noqa: ANN202
+    del timeout
+    return _FakeCdpSocket()
+
+
+def _fake_cdp_control_engine(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    kwargs.setdefault("ws_connect", _fake_ws_connect)
+    return CdpControlEngine(*args, **kwargs)
 
 
 class CliModuleTestCase(unittest.TestCase):
@@ -51,8 +73,18 @@ class CliModuleTestCase(unittest.TestCase):
             "crxzipple.modules.skills.infrastructure.filesystem.repository.DEFAULT_SYSTEM_SKILLS_DIR",
             skills_root / "system",
         )
+        self._browser_playwright_patcher = patch(
+            "crxzipple.app.assembly.browser.PlaywrightCdpSessionPool",
+            FakePlaywrightCdpSessionPool,
+        )
+        self._browser_cdp_control_patcher = patch(
+            "crxzipple.app.assembly.browser.CdpControlEngine",
+            _fake_cdp_control_engine,
+        )
         self._global_skills_patcher.start()
         self._system_skills_patcher.start()
+        self._browser_playwright_patcher.start()
+        self._browser_cdp_control_patcher.start()
         _write_skill_package(
             skills_root / "system" / "memory-recall",
             name="memory-recall",
@@ -79,6 +111,8 @@ class CliModuleTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.harness.close()
+        self._browser_cdp_control_patcher.stop()
+        self._browser_playwright_patcher.stop()
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
         self._skills_tempdir.cleanup()

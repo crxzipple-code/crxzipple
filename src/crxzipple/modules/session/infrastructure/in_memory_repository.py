@@ -89,10 +89,6 @@ class InMemorySessionItemRepository:
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
-        model_visible: bool | None = None,
-        user_visible: bool | None = None,
-        chat_visible: bool | None = None,
-        trace_visible: bool | None = None,
         after_sequence_no: int | None = None,
         before_sequence_no: int | None = None,
     ) -> list[SessionItem]:
@@ -103,22 +99,6 @@ class InMemorySessionItemRepository:
             items = [item for item in items if item.sequence_no > after_sequence_no]
         if before_sequence_no is not None and before_sequence_no > 0:
             items = [item for item in items if item.sequence_no < before_sequence_no]
-        if model_visible is not None:
-            items = [
-                item for item in items if item.visibility.model_visible is model_visible
-            ]
-        if user_visible is not None:
-            items = [
-                item for item in items if item.visibility.user_visible is user_visible
-            ]
-        if chat_visible is not None:
-            items = [
-                item for item in items if item.visibility.chat_visible is chat_visible
-            ]
-        if trace_visible is not None:
-            items = [
-                item for item in items if item.visibility.trace_visible is trace_visible
-            ]
         items = sorted(
             items,
             key=lambda item: (item.created_at, item.sequence_no, item.id),

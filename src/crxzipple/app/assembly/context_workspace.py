@@ -26,8 +26,11 @@ from crxzipple.app.integration.context_workspace_workspace import (
     WorkspaceContextNodeProvider,
 )
 from crxzipple.modules.context_workspace.application import (
+    ContextControlSliceService,
     ContextOwnerRegistry,
-    ContextRenderService,
+    RequestRenderSnapshotService,
+    ContextSliceBuilderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
     ContextWorkspaceService,
     ContextWorkspaceServices,
@@ -35,7 +38,8 @@ from crxzipple.modules.context_workspace.application import (
 from crxzipple.modules.context_workspace.infrastructure import (
     SqlAlchemyContextNodeRepository,
     SqlAlchemyContextOperationRepository,
-    SqlAlchemyContextRenderSnapshotRepository,
+    SqlAlchemyContextRequestRenderSnapshotRepository,
+    SqlAlchemyContextSnapshotRepository,
     SqlAlchemyContextWorkspaceRepository,
 )
 
@@ -57,7 +61,10 @@ def context_workspace_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.CONTEXT_OWNER_REGISTRY,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
                 AppKey.CONTEXT_TREE_SERVICE,
-                AppKey.CONTEXT_RENDER_SERVICE,
+                AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE,
+                AppKey.CONTEXT_REQUEST_RENDER_SNAPSHOT_SERVICE,
+                AppKey.CONTEXT_CONTROL_SLICE_BUILDER,
+                AppKey.CONTEXT_SLICE_BUILDER,
             ),
             requires=(AppKey.DATABASE_SESSION_FACTORY,),
             build=_build_context_workspace_services,
@@ -132,7 +139,10 @@ def _build_context_workspace_services(ctx) -> dict[str, object]:
     workspace_repository = SqlAlchemyContextWorkspaceRepository(session_factory)
     node_repository = SqlAlchemyContextNodeRepository(session_factory)
     operation_repository = SqlAlchemyContextOperationRepository(session_factory)
-    snapshot_repository = SqlAlchemyContextRenderSnapshotRepository(session_factory)
+    snapshot_repository = SqlAlchemyContextSnapshotRepository(session_factory)
+    request_render_snapshot_repository = (
+        SqlAlchemyContextRequestRenderSnapshotRepository(session_factory)
+    )
     workspace_service = ContextWorkspaceService(
         workspace_repository=workspace_repository,
         node_repository=node_repository,
@@ -144,22 +154,44 @@ def _build_context_workspace_services(ctx) -> dict[str, object]:
         operation_repository=operation_repository,
         owner_registry=owner_registry,
     )
-    render_service = ContextRenderService(
+    snapshot_service = ContextObservationSnapshotService(
         workspace_repository=workspace_repository,
         node_repository=node_repository,
         snapshot_repository=snapshot_repository,
         owner_registry=owner_registry,
     )
+    request_render_snapshot_service = RequestRenderSnapshotService(
+        workspace_repository=workspace_repository,
+        snapshot_repository=request_render_snapshot_repository,
+    )
+    slice_builder = ContextSliceBuilderService(
+        workspace_repository=workspace_repository,
+        node_repository=node_repository,
+        owner_registry=owner_registry,
+        session_item_resolver=ctx.registry.get(AppKey.SESSION_SERVICE),
+    )
+    control_slice_builder = ContextControlSliceService(
+        workspace_repository=workspace_repository,
+        node_repository=node_repository,
+    )
     services = ContextWorkspaceServices(
         workspaces=workspace_service,
         tree=tree_service,
-        render=render_service,
+        observation_snapshots=snapshot_service,
+        slice_builder=slice_builder,
+        control_slice_builder=control_slice_builder,
+        request_render_snapshots=request_render_snapshot_service,
     )
     return {
         AppKey.CONTEXT_OWNER_REGISTRY: owner_registry,
         AppKey.CONTEXT_WORKSPACE_SERVICE: services.workspaces,
         AppKey.CONTEXT_TREE_SERVICE: services.tree,
-        AppKey.CONTEXT_RENDER_SERVICE: services.render,
+        AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE: services.observation_snapshots,
+        AppKey.CONTEXT_REQUEST_RENDER_SNAPSHOT_SERVICE: (
+            services.request_render_snapshots
+        ),
+        AppKey.CONTEXT_CONTROL_SLICE_BUILDER: services.control_slice_builder,
+        AppKey.CONTEXT_SLICE_BUILDER: services.slice_builder,
     }
 
 
@@ -195,7 +227,7 @@ def _build_tool_node_provider(ctx) -> ToolContextNodeProvider:
     registry = ctx.require(AppKey.CONTEXT_OWNER_REGISTRY)
     provider = ToolContextNodeProvider(
         tool_service=ctx.require(AppKey.TOOL_SERVICE),
-        prompt_catalog=ctx.require(AppKey.TOOL_SOURCE_QUERY_SERVICE),
+        runtime_request_catalog=ctx.require(AppKey.TOOL_SOURCE_QUERY_SERVICE),
     )
     registry.register(provider)
     return provider

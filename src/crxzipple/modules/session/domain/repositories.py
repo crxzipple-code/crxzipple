@@ -51,10 +51,6 @@ class SessionItemRepository(Protocol):
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
-        model_visible: bool | None = None,
-        user_visible: bool | None = None,
-        chat_visible: bool | None = None,
-        trace_visible: bool | None = None,
         after_sequence_no: int | None = None,
         before_sequence_no: int | None = None,
     ) -> list[SessionItem]:

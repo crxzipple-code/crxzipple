@@ -37,6 +37,7 @@ from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 
 DEFAULT_TOOL_RUN_ERROR_MESSAGE = "Tool run failed without an error message."
 TOOL_RESULT_ENVELOPE_METADATA_KEY = "tool_result_envelope"
+TOOL_RESULT_ENVELOPE_SCHEMA_VERSION = "2026-06-14.tool_result_envelope.v1"
 
 
 def _normalize_access_requirement_sets(
@@ -84,6 +85,7 @@ def _normalized_tool_result_envelope_payload(
     payload = _tool_result_envelope_payload(result)
     if payload is None:
         return None
+    payload.setdefault("schema_version", TOOL_RESULT_ENVELOPE_SCHEMA_VERSION)
     payload["tool_run_id"] = tool_run_id
     if call_id is not None:
         payload["call_id"] = call_id

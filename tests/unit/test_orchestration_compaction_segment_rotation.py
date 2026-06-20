@@ -24,7 +24,6 @@ from crxzipple.modules.session.domain import Session
 from crxzipple.modules.session.domain.value_objects import (
     SessionItem,
     SessionItemKind,
-    SessionItemVisibility,
 )
 
 
@@ -109,7 +108,7 @@ def test_compaction_summary_requires_session_item_frontier() -> None:
         stage=OrchestrationRunStage.COMPLETED,
         active_session_id="segment-1",
         metadata={
-            "prompt_mode": "compaction",
+            "runtime_request_mode": "compaction",
             "session_key": "agent:assistant:main",
         },
         result_payload={
@@ -160,7 +159,7 @@ def test_compaction_summary_prefers_session_item_frontier() -> None:
         stage=OrchestrationRunStage.COMPLETED,
         active_session_id="segment-1",
         metadata={
-            "prompt_mode": "compaction",
+            "runtime_request_mode": "compaction",
             "session_key": "agent:assistant:main",
         },
         result_payload={
@@ -181,7 +180,6 @@ def test_compaction_summary_prefers_session_item_frontier() -> None:
         role="assistant",
         kind=SessionItemKind.ASSISTANT_MESSAGE,
         content_payload={"text": "Compacted session summary."},
-        visibility=SessionItemVisibility(model_visible=True),
         source_module="llm",
         source_kind="llm_response_item",
         source_id="llm-response-item-summary",

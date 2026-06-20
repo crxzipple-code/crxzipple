@@ -2000,9 +2000,9 @@ def _age_label(seconds: float) -> str:
 
 def _trace_route(event: _ChannelEventRecord) -> str:
     if event.trace_id:
-        return f"/trace?trace_id={event.trace_id}"
+        return f"/workbench/traces/{event.trace_id}"
     if event.run_id:
-        return f"/trace?run_id={event.run_id}"
+        return f"/workbench/runs/{event.run_id}"
     return "-"
 
 

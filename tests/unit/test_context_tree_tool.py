@@ -8,12 +8,12 @@ from crxzipple.app.integration.context_workspace_skills import SkillContextNodeP
 from crxzipple.modules.context_workspace.application import (
     ContextOwnerRegistry,
     ContextNodeUpsertInput,
-    ContextRenderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
-    RecordContextRenderSnapshotInput,
-    RenderContextPromptInput,
+    RecordContextSnapshotInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.skills.application import SkillPackage, SkillReadResult
 from crxzipple.modules.skills.domain import SkillManifest
@@ -25,10 +25,10 @@ from crxzipple.modules.context_workspace.domain import (
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
-from crxzipple.modules.tool.application import ToolPromptBundle
+from crxzipple.modules.tool.application import ToolRuntimeRequestBundle
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolError,
@@ -37,6 +37,7 @@ from crxzipple.modules.tool.domain import (
 )
 from tools.context_tree.local import (
     ContextTreeToolDeps,
+    capability_search,
     context_tree_disable_tool_schema,
     context_tree_enable_tool_schema,
     context_tree_estimate,
@@ -63,6 +64,58 @@ def test_context_tree_tool_manifest_does_not_reintroduce_owner_resource_actions(
     assert "context_tree.render_current" in manifest_text
     assert "context_tree.read_snapshot" in manifest_text
     assert "context_tree.diff_since" in manifest_text
+    assert "capability.search" in manifest_text
+
+
+def test_capability_search_finds_and_enables_tool_schema() -> None:
+    deps = _deps()
+    deps.workspace_service.ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:capability",
+            agent_id="assistant",
+            metadata={"available_tool_names": ["fetch_weather"]},
+        ),
+    )
+    execution_context = ToolExecutionContext(
+        attrs={
+            "session_key": "session:capability",
+            "agent_id": "assistant",
+            "run_id": "run-capability",
+        },
+    )
+
+    search_result = asyncio.run(
+        capability_search(deps.tool_deps)(
+            {"query": "weather", "limit": 5},
+            execution_context,
+        ),
+    )
+
+    assert search_result.metadata["tool"] == "capability.search"
+    assert search_result.metadata["match_count"] >= 1
+    assert any(
+        match.get("tool_id") == "fetch_weather"
+        or match.get("source_id") == "bundled.openapi.weather"
+        for match in search_result.details["matches"]
+    )
+    assert search_result.details["mirrored_tool_schema_names"] == []
+
+    enable_result = asyncio.run(
+        capability_search(deps.tool_deps)(
+            {"query": "fetch weather", "enable": True, "limit": 5},
+            execution_context,
+        ),
+    )
+
+    assert enable_result.metadata["enabled_count"] == 1
+    assert enable_result.details["enabled_node_ids"] == ["tools.tool.fetch_weather"]
+    assert enable_result.details["mirrored_tool_schema_names"] == ["fetch_weather"]
+    assert deps.tree_service.list_enabled_tool_schema_names(
+        "session:capability",
+    ) == ("fetch_weather",)
+    assert "Callable tool schemas now include: fetch_weather." in enable_result.blocks[0][
+        "text"
+    ]
 
 
 def test_context_tree_tools_expand_and_control_tool_schema_mirror() -> None:
@@ -181,18 +234,18 @@ def test_context_tree_replay_tools_render_read_snapshot_and_diff() -> None:
     assert current_result.details["revision"] == 1
     assert "session.current" in current_result.details["included_node_ids"]
     assert "<context_tree" in current_result.blocks[0]["text"]
-    assert current_result.details["prompt_body"] == deps.render_service.render_prompt_body(
-        RenderContextPromptInput(session_key="session:replay"),
-    ).prompt_body
+    assert current_result.details["debug_body"] == deps.render_service.render_observation(
+        ContextObservationRenderInput(session_key="session:replay"),
+    ).debug_body
 
-    rendered = deps.render_service.render_prompt_body(
-        RenderContextPromptInput(session_key="session:replay"),
+    rendered = deps.render_service.render_observation(
+        ContextObservationRenderInput(session_key="session:replay"),
     )
-    snapshot = deps.render_service.record_render_snapshot(
-        RecordContextRenderSnapshotInput(
+    snapshot = deps.render_service.record_snapshot(
+        RecordContextSnapshotInput(
             session_key="session:replay",
             run_id="run-replay",
-            prompt_body=rendered.prompt_body,
+            debug_body=rendered.debug_body,
             estimate=rendered.estimate,
             included_node_ids=rendered.included_node_ids,
             mirrored_node_ids=rendered.mirrored_node_ids,
@@ -208,7 +261,7 @@ def test_context_tree_replay_tools_render_read_snapshot_and_diff() -> None:
     )
     assert read_result.metadata["tool"] == "context_tree.read_snapshot"
     assert read_result.metadata["snapshot_id"] == "ctxsnap_replay"
-    assert read_result.details["prompt_body"] == rendered.prompt_body
+    assert read_result.details["debug_body"] == rendered.debug_body
     assert "<context_tree" in read_result.blocks[0]["text"]
 
     asyncio.run(
@@ -223,14 +276,14 @@ def test_context_tree_replay_tools_render_read_snapshot_and_diff() -> None:
             execution_context,
         ),
     )
-    rendered_before_schema = deps.render_service.render_prompt_body(
-        RenderContextPromptInput(session_key="session:replay"),
+    rendered_before_schema = deps.render_service.render_observation(
+        ContextObservationRenderInput(session_key="session:replay"),
     )
-    schema_snapshot = deps.render_service.record_render_snapshot(
-        RecordContextRenderSnapshotInput(
+    schema_snapshot = deps.render_service.record_snapshot(
+        RecordContextSnapshotInput(
             session_key="session:replay",
             run_id="run-replay",
-            prompt_body=rendered_before_schema.prompt_body,
+            debug_body=rendered_before_schema.debug_body,
             estimate=rendered_before_schema.estimate,
             included_node_ids=rendered_before_schema.included_node_ids,
             mirrored_node_ids=rendered_before_schema.mirrored_node_ids,
@@ -351,7 +404,7 @@ def test_context_tree_update_plan_records_visible_working_plan() -> None:
                 "status": "in_progress",
                 "current_step": "Wire public plan affordance.",
                 "completed_steps": ["Added work.plan default root."],
-                "verified_facts": ["Context Tree render includes loaded root nodes."],
+                "observed_facts": ["Context Tree render includes loaded root nodes."],
                 "assumptions": ["Agent will update this node as progress changes."],
                 "next_steps": ["Run focused tests."],
             },
@@ -375,13 +428,13 @@ def test_context_tree_update_plan_records_visible_working_plan() -> None:
     )
     assert result.details["node"]["metadata"]["plan_update_count"] == 1
     assert "Updated visible working plan" in result.blocks[0]["text"]
-    rendered = deps.render_service.render_prompt_body(
-        RenderContextPromptInput(session_key="session:plan"),
+    rendered = deps.render_service.render_observation(
+        ContextObservationRenderInput(session_key="session:plan"),
     )
     assert "work.plan" in rendered.included_node_ids
-    assert "<node id=\"work.plan\"" in rendered.prompt_body
-    assert "working_plan:" in rendered.prompt_body
-    assert "Context Tree render includes loaded root nodes." in rendered.prompt_body
+    assert "<node id=\"work.plan\"" in rendered.debug_body
+    assert "working_plan:" in rendered.debug_body
+    assert "Context Tree render includes loaded root nodes." in rendered.debug_body
 
 
 def test_context_tree_update_plan_terminal_status_tells_agent_to_answer() -> None:
@@ -403,10 +456,10 @@ def test_context_tree_update_plan_terminal_status_tells_agent_to_answer() -> Non
     result = asyncio.run(
         context_tree_update_plan(deps.tool_deps)(
             {
-                "objective": "Answer from verified weather facts.",
+                "objective": "Answer from observed weather facts.",
                 "status": "done",
                 "current_step": "Weather facts are ready.",
-                "verified_facts": ["Kunming hourly forecast is available."],
+                "observed_facts": ["Kunming hourly forecast is available."],
                 "next_steps": ["None"],
                 "update_reason": "final_summary",
             },
@@ -438,10 +491,10 @@ def test_context_tree_update_plan_terminal_status_blocks_same_objective_reopen()
     terminal = asyncio.run(
         context_tree_update_plan(deps.tool_deps)(
             {
-                "objective": "Answer from verified weather facts.",
+                "objective": "Answer from observed weather facts.",
                 "status": "done",
                 "current_step": "Weather facts are ready.",
-                "verified_facts": ["Kunming hourly forecast is available."],
+                "observed_facts": ["Kunming hourly forecast is available."],
                 "update_reason": "final_summary",
             },
             execution_context,
@@ -452,7 +505,7 @@ def test_context_tree_update_plan_terminal_status_blocks_same_objective_reopen()
     reopen = asyncio.run(
         context_tree_update_plan(deps.tool_deps)(
             {
-                "objective": "Answer from verified weather facts.",
+                "objective": "Answer from observed weather facts.",
                 "status": "in_progress",
                 "current_step": "Re-run the same weather lookup.",
                 "next_steps": ["Call the weather tool again."],
@@ -488,10 +541,10 @@ def test_context_tree_expand_after_terminal_plan_tells_agent_to_answer() -> None
     asyncio.run(
         context_tree_update_plan(deps.tool_deps)(
             {
-                "objective": "Answer from verified weather facts.",
+                "objective": "Answer from observed weather facts.",
                 "status": "done",
                 "current_step": "Weather facts are ready.",
-                "verified_facts": ["Kunming hourly forecast is available."],
+                "observed_facts": ["Kunming hourly forecast is available."],
                 "update_reason": "final_summary",
             },
             execution_context,
@@ -528,8 +581,8 @@ def test_context_tree_update_plan_repeated_payload_is_no_op() -> None:
     payload = {
         "objective": "Investigate browser route drift.",
         "status": "in_progress",
-        "current_step": "Compare prompt surfaces.",
-        "verified_facts": ["Provider sees browser runtime starter tools."],
+        "current_step": "Compare runtime request surfaces.",
+        "observed_facts": ["Provider sees browser runtime starter tools."],
         "next_steps": ["Validate a fixture run."],
         "update_reason": "phase_change",
     }
@@ -552,11 +605,11 @@ def test_context_tree_update_plan_repeated_payload_is_no_op() -> None:
         context_tree_update_plan(deps.tool_deps)(
             {
                 **payload,
-                "verified_facts": [
+                "observed_facts": [
                     "Provider sees browser runtime starter tools.",
                     "Direct transcript uses compact tool envelopes.",
                 ],
-                "update_reason": "verified_fact",
+                "update_reason": "observed_fact",
             },
             execution_context,
         ),
@@ -616,21 +669,21 @@ def test_context_tree_update_plan_same_phase_update_is_no_op() -> None:
     assert int(same_phase.details["revision"]) == first_revision
     assert "phase unchanged" in same_phase.blocks[0]["text"]
 
-    verified_fact = asyncio.run(
+    observed_fact = asyncio.run(
         context_tree_update_plan(deps.tool_deps)(
             {
                 **payload,
-                "verified_facts": ["Runtime exposes Nuxt shopping API methods."],
-                "update_reason": "verified_fact",
+                "observed_facts": ["Runtime exposes Nuxt shopping API methods."],
+                "update_reason": "observed_fact",
             },
             execution_context,
         ),
     )
 
-    assert verified_fact.metadata["no_op"] is False
-    assert verified_fact.metadata["phase_changed"] is False
-    assert verified_fact.metadata["plan_update_count"] == 2
-    assert int(verified_fact.details["revision"]) > first_revision
+    assert observed_fact.metadata["no_op"] is False
+    assert observed_fact.metadata["phase_changed"] is False
+    assert observed_fact.metadata["plan_update_count"] == 2
+    assert int(observed_fact.details["revision"]) > first_revision
 
 
 class _Deps:
@@ -642,7 +695,7 @@ class _Deps:
         self.workspaces = InMemoryContextWorkspaceRepository()
         self.nodes = InMemoryContextNodeRepository()
         self.operations = InMemoryContextOperationRepository()
-        self.snapshots = InMemoryContextRenderSnapshotRepository()
+        self.snapshots = InMemoryContextSnapshotRepository()
         self.registry = ContextOwnerRegistry()
         tool_service = _ToolService()
         self.registry.register(ToolContextNodeProvider(tool_service, tool_service))
@@ -659,14 +712,14 @@ class _Deps:
             operation_repository=self.operations,
             owner_registry=self.registry,
         )
-        self.render_service = ContextRenderService(
+        self.render_service = ContextObservationSnapshotService(
             workspace_repository=self.workspaces,
             node_repository=self.nodes,
             snapshot_repository=self.snapshots,
         )
         self.tool_deps = ContextTreeToolDeps(
             context_tree_service=self.tree_service,
-            context_render_service=self.render_service,
+            context_observation_snapshot_service=self.render_service,
         )
 
 
@@ -695,14 +748,14 @@ class _ToolService:
             if str(tool_id) == "fetch_weather"
         }
 
-    def list_prompt_bundles(
+    def list_runtime_request_bundles(
         self,
         function_ids,
-    ) -> tuple[ToolPromptBundle, ...]:
+    ) -> tuple[ToolRuntimeRequestBundle, ...]:
         if "fetch_weather" not in set(function_ids):
             return ()
         return (
-            ToolPromptBundle(
+            ToolRuntimeRequestBundle(
                 source_id="bundled.openapi.weather",
                 title="Weather",
                 summary="Weather tools.",

@@ -18,7 +18,7 @@ from crxzipple.modules.orchestration.application import (
 from crxzipple.modules.orchestration.application.turn_submission import (
     build_accept_run_input,
     build_submission_options,
-    prompt_bootstrap_metadata_for_content,
+    runtime_request_bootstrap_metadata_for_content,
     resolve_profile,
     submit_turn,
 )
@@ -39,7 +39,7 @@ from crxzipple.modules.orchestration.application.ports import (
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
-    RunPromptInputPreviewDTO,
+    RuntimeLlmRequestPreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.http_models import OrchestrationRunResponse
 from crxzipple.modules.session.domain import DirectSessionScope
@@ -87,7 +87,7 @@ class TurnResponse(BaseModel):
         )
 
 
-class RunPromptInputPreviewMessageResponse(BaseModel):
+class RuntimeLlmRequestPreviewMessageResponse(BaseModel):
     role: str
     content: Any
     name: str | None = None
@@ -95,35 +95,35 @@ class RunPromptInputPreviewMessageResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class RunPromptInputPreviewToolSchemaResponse(BaseModel):
+class RuntimeLlmRequestPreviewToolSchemaResponse(BaseModel):
     name: str
     description: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
 
 
-class RunPromptInputPreviewResponse(BaseModel):
+class RuntimeLlmRequestPreviewResponse(BaseModel):
     run_id: str
     llm_id: str
     mode: str
-    messages: list[RunPromptInputPreviewMessageResponse] = Field(default_factory=list)
-    tool_schemas: list[RunPromptInputPreviewToolSchemaResponse] = Field(default_factory=list)
-    prompt_report: dict[str, Any] | None = None
-    context_render_snapshot_id: str | None = None
-    context_render: dict[str, Any] | None = None
-    context_render_metadata: dict[str, Any] = Field(default_factory=dict)
-    provider_attachments: dict[str, Any] = Field(default_factory=dict)
-    context_surface: dict[str, Any] = Field(default_factory=dict)
+    messages: list[RuntimeLlmRequestPreviewMessageResponse] = Field(default_factory=list)
+    input_items: list[dict[str, Any]] = Field(default_factory=list)
+    tool_schemas: list[RuntimeLlmRequestPreviewToolSchemaResponse] = Field(default_factory=list)
+    runtime_request_report: dict[str, Any] | None = None
+    request_render_snapshot_id: str | None = None
+    request_render_snapshot: dict[str, Any] | None = None
+    request_render_snapshot_metadata: dict[str, Any] = Field(default_factory=dict)
     tool_surface: dict[str, Any] = Field(default_factory=dict)
+    runtime_context: dict[str, Any] = Field(default_factory=dict)
     provider_request_options: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_dto(cls, dto: RunPromptInputPreviewDTO) -> "RunPromptInputPreviewResponse":
+    def from_dto(cls, dto: RuntimeLlmRequestPreviewDTO) -> "RuntimeLlmRequestPreviewResponse":
         return cls(
             run_id=dto.run_id,
             llm_id=dto.llm_id,
             mode=dto.mode,
             messages=[
-                RunPromptInputPreviewMessageResponse(
+                RuntimeLlmRequestPreviewMessageResponse(
                     role=item.role,
                     content=item.content,
                     name=item.name,
@@ -132,29 +132,29 @@ class RunPromptInputPreviewResponse(BaseModel):
                 )
                 for item in dto.messages
             ],
+            input_items=[dict(item) for item in dto.input_items],
             tool_schemas=[
-                RunPromptInputPreviewToolSchemaResponse(
+                RuntimeLlmRequestPreviewToolSchemaResponse(
                     name=item.name,
                     description=item.description,
                     input_schema=dict(item.input_schema),
                 )
                 for item in dto.tool_schemas
             ],
-            prompt_report=(
-                dict(dto.prompt_report)
-                if dto.prompt_report is not None
+            runtime_request_report=(
+                dict(dto.runtime_request_report)
+                if dto.runtime_request_report is not None
                 else None
             ),
-            context_render_snapshot_id=dto.context_render_snapshot_id,
-            context_render=(
-                dict(dto.context_render)
-                if dto.context_render is not None
+            request_render_snapshot_id=dto.request_render_snapshot_id,
+            request_render_snapshot=(
+                dict(dto.request_render_snapshot)
+                if dto.request_render_snapshot is not None
                 else None
             ),
-            context_render_metadata=dict(dto.context_render_metadata),
-            provider_attachments=dict(dto.provider_attachments),
-            context_surface=dict(dto.context_surface),
+            request_render_snapshot_metadata=dict(dto.request_render_snapshot_metadata),
             tool_surface=dict(dto.tool_surface),
+            runtime_context=dict(dto.runtime_context),
             provider_request_options=dict(dto.provider_request_options),
         )
 
@@ -298,7 +298,7 @@ def create_turn(
 
     try:
         submission_service = _submission_port(container)
-        submission_metadata = prompt_bootstrap_metadata_for_content(
+        submission_metadata = runtime_request_bootstrap_metadata_for_content(
             payload.content,
             metadata=payload.metadata,
         )
@@ -358,20 +358,20 @@ def get_turn(
     return _turn_response_from_run(run)
 
 
-@router.get("/turns/{run_id}/prompt-preview", response_model=RunPromptInputPreviewResponse)
-def get_turn_prompt_preview(
+@router.get("/turns/{run_id}/llm-request-preview", response_model=RuntimeLlmRequestPreviewResponse)
+def get_turn_llm_request_preview(
     run_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> RunPromptInputPreviewResponse:
+) -> RuntimeLlmRequestPreviewResponse:
     inspection_service = _inspection_port(container)
     try:
-        preview = inspection_service.preview_prompt(run_id)
+        preview = inspection_service.preview_runtime_llm_request(run_id)
     except OrchestrationRunNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except OrchestrationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    return RunPromptInputPreviewResponse.from_dto(
-        RunPromptInputPreviewDTO.from_value(
+    return RuntimeLlmRequestPreviewResponse.from_dto(
+        RuntimeLlmRequestPreviewDTO.from_value(
             run_id=run_id,
             preview=preview,
         ),

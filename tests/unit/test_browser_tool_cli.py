@@ -72,9 +72,10 @@ class BrowserToolCliTestCase(CliModuleTestCase):
         payload = json.loads(run_result.stdout)
         self.assertEqual(payload["tool_id"], "browser.navigate")
         self.assertEqual(payload["status"], "succeeded")
-        self.assertEqual(payload["output_payload"]["command"]["kind"], "open-tab")
-        self.assertTrue(
-            payload["output_payload"]["value"]["url"].startswith("https://example.com")
+        self.assertEqual(payload["output_payload"]["command"]["kind"], "navigate")
+        self.assertEqual(
+            payload["output_payload"]["command"]["payload"]["url"],
+            "https://example.com",
         )
         self.assertEqual(
             payload["output_payload"]["value"]["ws_url"],

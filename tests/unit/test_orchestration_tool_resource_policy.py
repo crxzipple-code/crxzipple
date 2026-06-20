@@ -397,7 +397,7 @@ def test_terminal_context_tree_plan_stops_remaining_tool_batch() -> None:
                 ),
             ),
             _resolved_tool(
-                "browser.runtime.call_client",
+                "browser.evaluate",
                 execution_policy=ToolExecutionPolicy(
                     mutates_state=False,
                     supports_parallel=True,
@@ -420,7 +420,7 @@ def test_terminal_context_tree_plan_stops_remaining_tool_batch() -> None:
                 ),
                 ToolCallIntent(
                     id="call-browser-extra",
-                    name="browser.runtime.call_client",
+                    name="browser.evaluate",
                     arguments={"target_id": "page-1"},
                 ),
             ),

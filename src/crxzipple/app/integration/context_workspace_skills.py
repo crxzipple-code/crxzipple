@@ -219,7 +219,7 @@ def _workspace_dir(request: ContextChildrenRequest) -> str | None:
 
 
 def _surface(request: ContextChildrenRequest) -> str:
-    return _optional_text(request.workspace.metadata.get("prompt_input")) or "interactive"
+    return _optional_text(request.workspace.metadata.get("runtime_request_surface")) or "interactive"
 
 
 def _available_skill_names(metadata: dict[str, object]) -> tuple[str, ...]:

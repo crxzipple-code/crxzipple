@@ -8,6 +8,7 @@ from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmApiFamily,
     LlmContinuationSignal,
+    LlmInputItem,
     LlmMessage,
     LlmProviderContinuation,
     LlmResponseItem,
@@ -21,11 +22,19 @@ from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 class LlmAdapterRequest:
     invocation_id: str
     messages: tuple[LlmMessage, ...]
+    input_items: tuple[LlmInputItem, ...] = field(default_factory=tuple)
+    provider_context_messages: tuple[LlmMessage, ...] = field(default_factory=tuple)
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
+    request_policy: dict[str, Any] = field(default_factory=dict)
     overrides: dict[str, Any] = field(default_factory=dict)
+    request_metadata: dict[str, Any] = field(default_factory=dict)
+    runtime_context: dict[str, Any] = field(default_factory=dict)
+    runtime_route: dict[str, Any] = field(default_factory=dict)
+    runtime_policy: dict[str, Any] = field(default_factory=dict)
     resolved_credential: str | None = None
     continuation: LlmProviderContinuation | None = None
+    provider_transport: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)

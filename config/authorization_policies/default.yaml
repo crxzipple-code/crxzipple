@@ -1,9 +1,10 @@
 - id: allow_llm_invocation
-  description: Allow invoking and streaming configured llm profiles.
+  description: Allow invoking, streaming, and warming up configured llm profiles.
   effect: allow
   actions:
     - llm.invoke
     - llm.stream
+    - llm.warmup
   resource:
     kind: llm_profile
 

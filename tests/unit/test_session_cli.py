@@ -196,8 +196,6 @@ class SessionCliTestCase(CliModuleTestCase):
                 "tool_run",
                 "--source-id",
                 "run-1",
-                "--visibility",
-                '{"model_visible":true,"trace_visible":true}',
             ],
         )
 
@@ -209,7 +207,6 @@ class SessionCliTestCase(CliModuleTestCase):
         self.assertEqual(append_payload["source_module"], "tool")
         self.assertEqual(append_payload["source_kind"], "tool_run")
         self.assertEqual(append_payload["source_id"], "run-1")
-        self.assertTrue(append_payload["visibility"]["model_visible"])
 
     def test_session_item_commands_append_and_filter_items(self) -> None:
         self._register_llm_and_agent()
@@ -237,8 +234,6 @@ class SessionCliTestCase(CliModuleTestCase):
                 "commentary",
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"hello item"}]}',
-                "--visibility",
-                '{"model_visible":true,"user_visible":true,"chat_visible":true,"trace_visible":true}',
                 "--source-module",
                 "orchestration",
                 "--source-kind",
@@ -257,8 +252,6 @@ class SessionCliTestCase(CliModuleTestCase):
                 "tool",
                 "--content-payload",
                 '{"status":"succeeded"}',
-                "--visibility",
-                '{"model_visible":true,"user_visible":false,"chat_visible":false,"trace_visible":true}',
                 "--source-module",
                 "tool",
                 "--source-kind",
@@ -278,7 +271,6 @@ class SessionCliTestCase(CliModuleTestCase):
         tool_payload = json.loads(append_tool_result.stdout)
         self.assertEqual(user_payload["kind"], "user_message")
         self.assertEqual(user_payload["sequence_no"], 1)
-        self.assertEqual(user_payload["visibility"]["chat_visible"], True)
         self.assertEqual(tool_payload["kind"], "tool_result")
         self.assertEqual(tool_payload["sequence_no"], 2)
         self.assertEqual(tool_payload["tool_name"], "browser.snapshot")
@@ -286,25 +278,10 @@ class SessionCliTestCase(CliModuleTestCase):
         all_items_result = self.invoke_cli(
             ["session", "items", "agent:assistant:main", "--active-only"],
         )
-        chat_items_result = self.invoke_cli(
-            [
-                "session",
-                "items",
-                "agent:assistant:main",
-                "--active-only",
-                "--chat-visible",
-            ],
-        )
-
         self.assertEqual(all_items_result.exit_code, 0)
-        self.assertEqual(chat_items_result.exit_code, 0)
         self.assertEqual(
             [item["kind"] for item in json.loads(all_items_result.stdout)],
             ["user_message", "tool_result"],
-        )
-        self.assertEqual(
-            [item["id"] for item in json.loads(chat_items_result.stdout)],
-            [user_payload["id"]],
         )
 
     def test_session_start_command_accepts_reply_payload(self) -> None:

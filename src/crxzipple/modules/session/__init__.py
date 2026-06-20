@@ -13,7 +13,6 @@ from crxzipple.modules.session.domain import (
     SessionInstance,
     SessionItem,
     SessionItemKind,
-    SessionItemVisibility,
 )
 
 __all__ = [
@@ -28,6 +27,5 @@ __all__ = [
     "SessionInstance",
     "SessionItem",
     "SessionItemKind",
-    "SessionItemVisibility",
     "SessionResolutionService",
 ]

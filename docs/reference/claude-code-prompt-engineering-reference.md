@@ -389,22 +389,21 @@ surface for discovered evidence and summaries.
 
 ## CRXZipple Current Cross-Check
 
-The current CRXZipple prompt path has already moved in the same direction as
+The current CRXZipple request path has already moved in the same direction as
 Claude Code's layered request:
 
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:115`
-  defines `RunPromptInputCollector` as a collector, not the final prompt renderer.
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:167`
-  collects profile data, `:169` collects active-session messages, `:189`
-  constructs the current run transcript, `:201` resolves LLM routing, and `:245`
-  resolves the skill prompt catalog.
-- `src/crxzipple/modules/orchestration/application/prompt_input.py:267`
-  builds bounded context blocks for agent instruction and runtime context.
-- `src/crxzipple/modules/orchestration/application/engine.py:535` records the
-  Context Workspace render snapshot.
-- `src/crxzipple/modules/orchestration/application/engine.py:631` mirrors
-  visible tool schemas from the snapshot, `:645` inserts the rendered tree body,
-  and `:668` adds opened artifact attachments.
+- `src/crxzipple/modules/orchestration/application/runtime_llm_request_draft.py`
+  defines `RuntimeLlmRequestDraftCollector` as a collector, not the final
+  provider renderer.
+- `src/crxzipple/modules/orchestration/application/runtime_llm_request.py`
+  builds the runtime request envelope from Context Slice items, active Tool
+  Surface, runtime policy, and provider options.
+- `src/crxzipple/modules/llm/infrastructure/adapters/*_renderer.py` owns
+  provider-specific rendering.
+- `src/crxzipple/app/integration/context_workspace_orchestration/adapter.py`
+  records the Context Snapshot / Context Slice for a run.
+- `src/crxzipple/modules/orchestration/application/engine.py` carries Context
+  Snapshot / Tool Surface refs through the run and invocation metadata.
 - `src/crxzipple/modules/context_workspace/application/prompts/runtime_contract.md:1`
   is the current runtime-level behavior contract.
 - `src/crxzipple/modules/llm/application/services.py:436` records

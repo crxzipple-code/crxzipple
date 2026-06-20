@@ -12,7 +12,6 @@ from crxzipple.modules.session.domain import (
     DirectSessionScope,
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
 )
 from crxzipple.modules.session.interfaces.dto import (
     ResolveSessionDTO,
@@ -110,36 +109,11 @@ class SessionResponse(BaseModel):
         )
 
 
-class SessionItemVisibilityPayload(BaseModel):
-    model_visible: bool = True
-    user_visible: bool = False
-    chat_visible: bool = False
-    trace_visible: bool = True
-
-    @classmethod
-    def from_value_object(
-        cls,
-        visibility: dict[str, bool],
-    ) -> "SessionItemVisibilityPayload":
-        return cls(**visibility)
-
-    def to_value_object(self) -> SessionItemVisibility:
-        return SessionItemVisibility(
-            model_visible=self.model_visible,
-            user_visible=self.user_visible,
-            chat_visible=self.chat_visible,
-            trace_visible=self.trace_visible,
-        )
-
-
 class AppendSessionItemRequest(BaseModel):
     kind: SessionItemKind
     role: str | None = None
     phase: SessionItemPhase = SessionItemPhase.UNKNOWN
     content_payload: dict[str, object] = Field(default_factory=dict)
-    visibility: SessionItemVisibilityPayload = Field(
-        default_factory=SessionItemVisibilityPayload,
-    )
     source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
@@ -157,7 +131,6 @@ class AppendSessionItemRequest(BaseModel):
             role=self.role,
             phase=self.phase,
             content_payload=self.content_payload,
-            visibility=self.visibility.to_value_object(),
             source_module=self.source_module,
             source_kind=self.source_kind,
             source_id=self.source_id,
@@ -179,8 +152,7 @@ class SessionItemResponse(BaseModel):
     kind: str
     phase: str
     content_payload: dict[str, object] = Field(default_factory=dict)
-    visibility: SessionItemVisibilityPayload
-    visibility_state: str = "active"
+    lifecycle_state: str = "active"
     source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
@@ -202,8 +174,7 @@ class SessionItemResponse(BaseModel):
             kind=dto.kind,
             phase=dto.phase,
             content_payload=dto.content_payload,
-            visibility=SessionItemVisibilityPayload.from_value_object(dto.visibility),
-            visibility_state=_session_item_visibility_state(dto),
+            lifecycle_state=_session_item_lifecycle_state(dto),
             source_module=dto.source_module,
             source_kind=dto.source_kind,
             source_id=dto.source_id,
@@ -216,7 +187,7 @@ class SessionItemResponse(BaseModel):
         )
 
 
-def _session_item_visibility_state(dto: SessionItemDTO) -> str:
+def _session_item_lifecycle_state(dto: SessionItemDTO) -> str:
     return "archived" if dto.metadata.get("archived_by_compaction_run_id") else "active"
 
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from crxzipple.modules.llm.interfaces.dto import LlmMessageDTO, ToolSchemaDTO
-from crxzipple.modules.orchestration.application import RunPromptInputPreview
+from crxzipple.modules.orchestration.application import RuntimeLlmRequestPreview
 from crxzipple.modules.orchestration.domain import (
     InboundInstruction,
     OrchestrationErrorPayload,
@@ -198,19 +198,19 @@ class OrchestrationExecutorLeaseDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class RunPromptInputPreviewDTO:
+class RuntimeLlmRequestPreviewDTO:
     run_id: str
     llm_id: str
     mode: str
     messages: tuple[LlmMessageDTO, ...]
+    input_items: tuple[dict[str, object], ...]
     tool_schemas: tuple[ToolSchemaDTO, ...]
-    prompt_report: dict[str, object] | None
-    context_render_snapshot_id: str | None
-    context_render: dict[str, object] | None
-    context_render_metadata: dict[str, object]
-    provider_attachments: dict[str, object]
-    context_surface: dict[str, object]
+    runtime_request_report: dict[str, object] | None
+    request_render_snapshot_id: str | None
+    request_render_snapshot: dict[str, object] | None
+    request_render_snapshot_metadata: dict[str, object]
     tool_surface: dict[str, object]
+    runtime_context: dict[str, object]
     provider_request_options: dict[str, object]
 
     @classmethod
@@ -218,14 +218,8 @@ class RunPromptInputPreviewDTO:
         cls,
         *,
         run_id: str,
-        preview: RunPromptInputPreview,
-    ) -> "RunPromptInputPreviewDTO":
-        context_render = (
-            preview.prompt_report.context_render.to_payload()
-            if preview.prompt_report is not None
-            and preview.prompt_report.context_render is not None
-            else None
-        )
+        preview: RuntimeLlmRequestPreview,
+    ) -> "RuntimeLlmRequestPreviewDTO":
         return cls(
             run_id=run_id,
             llm_id=preview.llm_id,
@@ -234,20 +228,111 @@ class RunPromptInputPreviewDTO:
                 LlmMessageDTO.from_value(message)
                 for message in preview.messages
             ),
+            input_items=tuple(dict(item) for item in preview.input_items),
             tool_schemas=tuple(
                 ToolSchemaDTO.from_value(schema)
                 for schema in preview.tool_schemas
             ),
-            prompt_report=(
-                preview.prompt_report.to_payload()
-                if preview.prompt_report is not None
+            runtime_request_report=(
+                preview.runtime_request_report.to_payload()
+                if preview.runtime_request_report is not None
                 else None
             ),
-            context_render_snapshot_id=preview.context_render_snapshot_id,
-            context_render=context_render,
-            context_render_metadata=dict(preview.context_render_metadata),
-            provider_attachments=dict(preview.provider_attachments),
-            context_surface=dict(preview.context_surface),
+            request_render_snapshot_id=preview.request_render_snapshot_id,
+            request_render_snapshot=dict(preview.request_render_snapshot),
+            request_render_snapshot_metadata=_request_render_snapshot_metadata_preview(
+                preview.request_render_snapshot_metadata,
+            ),
             tool_surface=dict(preview.tool_surface),
+            runtime_context=dict(preview.runtime_context),
             provider_request_options=dict(preview.provider_request_options),
         )
+
+
+def _request_render_snapshot_metadata_preview(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    allowed_keys = {
+        "snapshot_kind",
+        "tree_schema_version",
+        "runtime_contract_version",
+        "runtime_contract_hash",
+        "history_delivery",
+        "session_budget_status",
+        "duplicate_tool_delivery_risk",
+        "draft_input_message_count",
+        "draft_input_session_item_count",
+        "draft_input_roles",
+        "draft_input_budget_summary",
+        "protocol_required_ref_count",
+        "collapsed_ref_count",
+        "mirrored_tool_schema_count",
+        "provider_tool_schema_names",
+        "visible_input_summary",
+        "request_render_timings",
+        "runtime_request_snapshot",
+        "request_render_snapshot",
+        "tool_schema_mirror_budget",
+        "tool_schema_mirror_default_schema_source",
+        "tool_schema_mirror_skipped_count",
+        "tool_schema_mirror_duplicate_count",
+        "tool_schema_mirror_skipped_by_reason",
+        "artifact_content_budget",
+        "artifact_content_block_count",
+        "artifact_content_candidate_count",
+        "artifact_content_image_count",
+        "artifact_content_file_count",
+        "artifact_content_omitted_count",
+    }
+    preview: dict[str, object] = {}
+    for key in sorted(allowed_keys):
+        value = metadata.get(key)
+        if value in (None, "", {}, []):
+            continue
+        if isinstance(value, dict):
+            preview[key] = _metadata_dict_summary(value)
+        elif isinstance(value, list | tuple):
+            preview[key] = _metadata_list_summary(value)
+        else:
+            preview[key] = value
+    return preview
+
+
+def _metadata_dict_summary(value: dict[str, object]) -> dict[str, object]:
+    omitted_keys = {
+        "content",
+        "debug_body",
+        "input",
+        "messages",
+        "node_estimate_breakdown",
+        "provider_attachment_mirror",
+        "provider_attachments",
+        "raw_tree_body",
+        "rendered_prompt",
+        "text",
+        "tool_schemas",
+        "top_rendered_nodes",
+    }
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        if key in omitted_keys or item in (None, "", {}, []):
+            continue
+        if isinstance(item, str | int | float | bool):
+            result[key] = item
+        elif isinstance(item, dict):
+            result[key] = {"field_count": len(item)}
+        elif isinstance(item, list | tuple):
+            result[key] = {"item_count": len(item)}
+    return result
+
+
+def _metadata_list_summary(value: list[object] | tuple[object, ...]) -> dict[str, object]:
+    scalar_items = [
+        item for item in value if isinstance(item, str | int | float | bool)
+    ]
+    if len(scalar_items) == len(value):
+        return {
+            "item_count": len(value),
+            "items": list(scalar_items[:50]),
+        }
+    return {"item_count": len(value)}

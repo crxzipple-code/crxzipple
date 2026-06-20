@@ -301,7 +301,7 @@ class SkillOwnerCatalogPersistenceTestCase(unittest.TestCase):
                 source_id="global",
                 surface="",
             )
-            prompt = manager.build_prompt_catalog(workspace_dir=None, surface="")
+            catalog = manager.build_runtime_request_catalog(workspace_dir=None, surface="")
 
             installed_root = global_root / "release-ops"
             self.assertEqual(empty_sync_result.synced_count, 0)
@@ -314,10 +314,10 @@ class SkillOwnerCatalogPersistenceTestCase(unittest.TestCase):
             )
             assert indexed is not None
             self.assertEqual(indexed.requirements.required_tools, ("git_diff",))
-            self.assertIsNotNone(prompt)
-            assert prompt is not None
-            self.assertIn("release-ops", prompt.content)
-            self.assertIn("requires tools: git_diff", prompt.content)
+            self.assertIsNotNone(catalog)
+            assert catalog is not None
+            self.assertIn("release-ops", catalog.content)
+            self.assertIn("requires tools: git_diff", catalog.content)
 
     def test_migration_revision_is_chained_after_tool_discovery_runs(self) -> None:
         migration = _load_migration_0053()

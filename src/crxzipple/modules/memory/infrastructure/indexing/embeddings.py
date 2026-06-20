@@ -95,7 +95,7 @@ class OpenAICompatibleMemoryEmbeddingProvider:
         return self._base_url.rstrip("/")
 
     def embed_texts(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]:
-        from crxzipple.modules.llm.infrastructure.adapters.common import (
+        from crxzipple.modules.llm.infrastructure.adapters.http_helpers import (
             ensure_json_response,
             join_url,
         )

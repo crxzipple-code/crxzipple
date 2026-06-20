@@ -6,33 +6,34 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from crxzipple.modules.llm.application import (
+    build_provider_continuation_state_from_invocation,
+    provider_continuation_from_state,
+)
 from crxzipple.modules.llm.domain import (
-    LlmApiFamily,
-    LlmCapability,
     LlmMessage,
-    LlmProviderContinuation,
     ToolCallIntent,
     ToolSchema,
 )
+from crxzipple.modules.llm.application.runtime_request import (
+    RuntimeLlmRequest,
+    runtime_request_context_from_metadata,
+)
 from crxzipple.modules.memory.application import MemoryRuntimePort
 from crxzipple.modules.orchestration.application.ports import (
-    ContextRenderSnapshotRecord,
-    ContextRenderSnapshotPort,
+    RequestRenderSnapshotRecord,
+    RequestRenderSnapshotPort,
     LlmPort,
     ToolExecutionPort,
 )
-from crxzipple.modules.orchestration.application.prompting import (
-    PromptReport,
+from crxzipple.modules.orchestration.application.runtime_request_mode import RuntimeRequestMode
+from crxzipple.modules.orchestration.application.runtime_request_report import RuntimeRequestReport
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft import (
+    RuntimeLlmRequestDraftCollector,
+    RuntimeLlmRequestDraft,
 )
-from crxzipple.modules.orchestration.application.prompting import PromptMode
-from crxzipple.modules.orchestration.application.prompt_input import (
-    RunPromptInputCollector,
-    RunPromptInput,
-)
-from crxzipple.modules.orchestration.application.provider_request import (
-    LlmRequestEnvelope,
-    ProviderPromptRequestBuilder,
-    build_llm_request_metadata,
+from crxzipple.modules.llm.application.runtime_request_factory import (
+    RuntimeLlmRequestBuilder,
 )
 from crxzipple.modules.orchestration.application.llm_request_policy import (
     EffectiveLlmRequestPolicy,
@@ -40,6 +41,7 @@ from crxzipple.modules.orchestration.application.llm_request_policy import (
 )
 from crxzipple.modules.orchestration.application.engine_session_recorder import (
     OrchestrationSessionRecorder,
+    RuntimeResponseRecord,
 )
 from crxzipple.modules.orchestration.application.engine_llm_invoker import (
     OrchestrationEngineLlmInvoker,
@@ -47,7 +49,6 @@ from crxzipple.modules.orchestration.application.engine_llm_invoker import (
 from crxzipple.modules.orchestration.application.engine_tool_executor import (
     OrchestrationEngineToolExecutor,
     ToolExecutionBatchOutcome,
-    tool_run_evidence_frontier_item,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet, ToolResolver
 from crxzipple.modules.orchestration.domain import (
@@ -79,8 +80,8 @@ class EngineAdvanceOutcome:
     tool_run_links: tuple[dict[str, object], ...] = field(default_factory=tuple)
     pending_tool_run_ids: tuple[str, ...] = field(default_factory=tuple)
     pending_approval_request: PendingApprovalRequest | None = None
-    prompt_report: PromptReport | None = None
-    context_render_snapshot_id: str | None = None
+    runtime_request_report: RuntimeRequestReport | None = None
+    request_render_snapshot_id: str | None = None
     llm_request_metadata: dict[str, object] = field(default_factory=dict)
     yield_requested: bool = False
     yield_reason: str | None = None
@@ -89,27 +90,27 @@ class EngineAdvanceOutcome:
     continuation_end_turn: bool | None = None
     provider_continuation_state: dict[str, object] = field(default_factory=dict)
     loop_diagnostic: dict[str, object] = field(default_factory=dict)
-    evidence_frontier: tuple[dict[str, object], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
-class RunPromptInputPreview:
+class RuntimeLlmRequestPreview:
     llm_id: str
-    mode: PromptMode
+    mode: RuntimeRequestMode
     messages: tuple[LlmMessage, ...]
+    input_items: tuple[dict[str, object], ...] = field(default_factory=tuple)
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
-    prompt_report: PromptReport | None = None
-    context_render_snapshot_id: str | None = None
-    context_render_metadata: dict[str, object] = field(default_factory=dict)
-    provider_attachments: dict[str, object] = field(default_factory=dict)
-    context_surface: dict[str, object] = field(default_factory=dict)
+    runtime_request_report: RuntimeRequestReport | None = None
+    request_render_snapshot_id: str | None = None
+    request_render_snapshot_metadata: dict[str, object] = field(default_factory=dict)
+    request_render_snapshot: dict[str, object] = field(default_factory=dict)
     tool_surface: dict[str, object] = field(default_factory=dict)
+    runtime_context: dict[str, object] = field(default_factory=dict)
     provider_request_options: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedRunPromptInput:
-    prompt: RunPromptInput
+class _ResolvedRuntimeLlmRequestDraft:
+    draft: RuntimeLlmRequestDraft
     resolved_tools: ResolvedToolSet
 
 
@@ -118,21 +119,35 @@ class _AdvanceContext:
     run: OrchestrationRun
     session_key: str
     user_session_item_id: str | None
-    prompt: RunPromptInput
+    draft: RuntimeLlmRequestDraft
     resolved_tools: ResolvedToolSet
-    request_envelope: LlmRequestEnvelope
-    context_render_snapshot_id: str | None = None
-    context_render_snapshot_metadata: dict[str, object] = field(default_factory=dict)
+    request_envelope: RuntimeLlmRequest
+    request_render_snapshot_id: str | None = None
+    request_render_snapshot_metadata: dict[str, object] = field(default_factory=dict)
+
+
+def _snapshot_metadata_for_request(
+    request_render_snapshot: RequestRenderSnapshotRecord | None,
+    *,
+    policy_payload: dict[str, object],
+) -> dict[str, object]:
+    metadata = (
+        dict(request_render_snapshot.metadata)
+        if request_render_snapshot is not None
+        else {}
+    )
+    metadata["llm_request_policy"] = policy_payload
+    return metadata
 
 
 @dataclass(slots=True)
 class OrchestrationEngine:
-    prompt_inputs: RunPromptInputCollector
+    runtime_request_drafts: RuntimeLlmRequestDraftCollector
     session_recorder: OrchestrationSessionRecorder
     llm_port: LlmPort
     tool_resolver: ToolResolver
     tool_execution_port: ToolExecutionPort
-    context_snapshot_port: ContextRenderSnapshotPort
+    request_render_snapshot_port: RequestRenderSnapshotPort
     memory_port: MemoryRuntimePort | None = None
     detailed_phase_metrics_enabled: bool = False
     metrics: RuntimeMetricsRegistry = field(
@@ -140,18 +155,18 @@ class OrchestrationEngine:
     )
     llm_invoker: OrchestrationEngineLlmInvoker = field(init=False)
     tool_executor: OrchestrationEngineToolExecutor = field(init=False)
-    provider_request_builder: ProviderPromptRequestBuilder = field(init=False)
+    runtime_llm_request_builder: RuntimeLlmRequestBuilder = field(init=False)
 
     def __post_init__(self) -> None:
-        self.prompt_inputs.detailed_phase_metrics_enabled = (
+        self.runtime_request_drafts.detailed_phase_metrics_enabled = (
             self.detailed_phase_metrics_enabled
         )
-        self.prompt_inputs.metrics = self.metrics
+        self.runtime_request_drafts.metrics = self.metrics
         self.llm_invoker = OrchestrationEngineLlmInvoker(
             llm_port=self.llm_port,
             metrics=self.metrics,
         )
-        self.provider_request_builder = ProviderPromptRequestBuilder(
+        self.runtime_llm_request_builder = RuntimeLlmRequestBuilder(
             tool_surface_snapshot_builder=_tool_surface_snapshot_builder(
                 self.tool_execution_port,
             ),
@@ -164,39 +179,35 @@ class OrchestrationEngine:
             metrics=self.metrics,
         )
 
-    def preview_prompt(self, run: OrchestrationRun) -> RunPromptInputPreview:
-        surface = self._build_prompt_input(run)
-        context_render_snapshot = self._prompt_preview_context_render_snapshot(
+    def preview_runtime_llm_request(self, run: OrchestrationRun) -> RuntimeLlmRequestPreview:
+        surface = self._build_runtime_request_preview_draft(run)
+        request_render_snapshot = self._runtime_request_preview_render_snapshot(
             run,
-            surface.prompt,
+            surface.draft,
         )
-        base_prompt = self._prompt_with_recorded_transcript_window(
-            surface.prompt,
-            context_render_snapshot,
+        base_draft = self._draft_with_recorded_transcript_window(
+            surface.draft,
+            request_render_snapshot,
         )
-        prompt = self.provider_request_builder.prompt_with_context_snapshot(
-            base_prompt,
-            context_render_snapshot,
+        report_draft = self.runtime_llm_request_builder.draft_with_request_render_snapshot(
+            base_draft,
+            request_render_snapshot,
         )
-        provider_options = self.llm_invoker.request_overrides(
-            llm_id=prompt.llm_id,
-            tool_schemas=prompt.tool_schemas,
-            require_tool_call=prompt.surface_policy.require_tool_call,
+        resolved_tools = self.runtime_llm_request_builder.resolved_tools_for_draft(
+            surface.resolved_tools,
+            base_draft,
+            request_render_snapshot,
         )
-        request_options = _llm_request_options_from_run(run, prompt=base_prompt)
-        provider_options.update(request_options["provider_options"])
-        _merge_reasoning_config_into_provider_options(
-            provider_options,
-            request_options["reasoning_config"],
+        request_options = _llm_request_options_from_run(run, draft=base_draft)
+        provider_options = dict(request_options["provider_options"])
+        snapshot_metadata = _snapshot_metadata_for_request(
+            request_render_snapshot,
+            policy_payload=request_options["policy"].to_payload(),
         )
-        snapshot_metadata = {
-            **dict(context_render_snapshot.metadata),
-            "llm_request_policy": request_options["policy"].to_payload(),
-        }
-        request_envelope = self.provider_request_builder.request_envelope(
-            prompt=base_prompt,
-            context_render_snapshot=context_render_snapshot,
-            resolved_tools=surface.resolved_tools,
+        request_envelope = self.runtime_llm_request_builder.request_envelope(
+            draft=base_draft,
+            request_render_snapshot=request_render_snapshot,
+            resolved_tools=resolved_tools,
             snapshot_metadata=snapshot_metadata,
             run_id=run.id,
             agent_id=run.agent_id,
@@ -205,18 +216,21 @@ class OrchestrationEngine:
             reasoning_config=request_options["reasoning_config"],
             output_contract=request_options["output_contract"],
         )
-        request_metadata = _llm_request_metadata_from_envelope(request_envelope)
-        return RunPromptInputPreview(
+        request_metadata = request_envelope.request_metadata()
+        return RuntimeLlmRequestPreview(
             llm_id=request_envelope.llm_id,
-            mode=prompt.mode,
+            mode=base_draft.mode,
             messages=request_envelope.messages,
+            input_items=tuple(
+                item.to_payload() for item in request_envelope.transcript.items
+            ),
             tool_schemas=request_envelope.tool_schemas,
-            prompt_report=prompt.report,
-            context_render_snapshot_id=context_render_snapshot.snapshot_id,
-            context_render_metadata=dict(context_render_snapshot.metadata),
-            provider_attachments=dict(context_render_snapshot.provider_attachments),
-            context_surface=request_envelope.context_surface.to_payload(),
+            runtime_request_report=report_draft.report,
+            request_render_snapshot_id=request_render_snapshot.snapshot_id,
+            request_render_snapshot_metadata=dict(request_render_snapshot.metadata),
+            request_render_snapshot=request_envelope.request_render_snapshot.to_payload(),
             tool_surface=request_envelope.tool_surface.to_payload(),
+            runtime_context=runtime_request_context_from_metadata(request_metadata),
             provider_request_options={
                 "response_format": _response_format_from_output_contract(
                     request_envelope,
@@ -229,35 +243,18 @@ class OrchestrationEngine:
             },
         )
 
-    def _prompt_preview_context_render_snapshot(
+    def _runtime_request_preview_render_snapshot(
         self,
         run: OrchestrationRun,
-        prompt: RunPromptInput,
-    ) -> ContextRenderSnapshotRecord:
-        recorded = self.context_snapshot_port.get_recorded_run_prompt_snapshot(
+        draft: RuntimeLlmRequestDraft,
+    ) -> RequestRenderSnapshotRecord:
+        recorded = self.request_render_snapshot_port.get_recorded_run_request_render_snapshot(
             run=run,
-            prompt=prompt,
+            draft=draft,
         )
         if recorded is not None:
             return recorded
-        return self._preview_context_render_snapshot(run, prompt)
-
-    @staticmethod
-    def _prompt_with_recorded_transcript_window(
-        prompt: RunPromptInput,
-        context_render_snapshot: ContextRenderSnapshotRecord,
-    ) -> RunPromptInput:
-        raw_count = context_render_snapshot.metadata.get(
-            "direct_transcript_message_count",
-        )
-        if isinstance(raw_count, bool):
-            return prompt
-        if not isinstance(raw_count, int):
-            return prompt
-        count = max(0, raw_count)
-        if count >= len(prompt.messages):
-            return prompt
-        return replace(prompt, messages=prompt.messages[:count])
+        return self._preview_request_render_snapshot(run, draft)
 
     def advance_once(
         self,
@@ -268,42 +265,45 @@ class OrchestrationEngine:
         with self._timed_phase("build_context"):
             context = self._build_advance_context(run)
         with self._timed_phase("llm_invoke"):
-            provider_continuation = _provider_continuation_for_prompt(run, context.prompt)
+            provider_continuation = self.llm_invoker.provider_continuation(
+                request_envelope=context.request_envelope,
+                continuation=provider_continuation_from_state(
+                    _provider_continuation_state_from_run(run),
+                ),
+            )
             invocation = self.llm_invoker.invoke(
-                llm_id=context.request_envelope.llm_id,
-                messages=context.request_envelope.messages,
-                tool_schemas=context.request_envelope.tool_schemas,
+                request_envelope=context.request_envelope,
                 response_format=_response_format_from_output_contract(
                     context.request_envelope,
                 ),
-                request_overrides=context.request_envelope.provider_options,
                 continuation=provider_continuation,
-                require_tool_call=context.prompt.surface_policy.require_tool_call,
-                request_metadata=_llm_request_metadata_from_envelope(
-                    context.request_envelope,
-                ),
                 on_llm_stream_update=on_llm_stream_update,
             )
         self._validate_invocation_result(invocation)
-        session_item_ids = self._record_llm_response_items(
+        response_record = self._record_llm_response_items(
             context=context,
             invocation=invocation,
         )
 
         assert invocation.result is not None
-        tool_calls = _local_tool_calls_from_invocation(invocation)
+        tool_calls = response_record.tool_calls
         if tool_calls:
             return self._advance_outcome_for_tool_calls(
                 run,
                 context=context,
                 invocation=invocation,
-                session_item_ids=session_item_ids,
+                session_item_ids=response_record.item_ids,
+                assistant_progress_item_ids=response_record.assistant_progress_item_ids,
+                tool_call_session_item_ids_by_call_id=(
+                    response_record.tool_call_session_item_ids_by_call_id or {}
+                ),
                 tool_calls=tool_calls,
             )
         return self._advance_outcome_for_message_only(
             context=context,
             invocation=invocation,
-            session_item_ids=session_item_ids,
+            session_item_ids=response_record.item_ids,
+            assistant_progress_item_ids=response_record.assistant_progress_item_ids,
         )
 
     async def advance_once_async(
@@ -315,44 +315,47 @@ class OrchestrationEngine:
         with self._timed_phase("build_context"):
             context = await asyncio.to_thread(self._build_advance_context, run)
         with self._timed_phase("llm_invoke"):
-            provider_continuation = _provider_continuation_for_prompt(run, context.prompt)
+            provider_continuation = self.llm_invoker.provider_continuation(
+                request_envelope=context.request_envelope,
+                continuation=provider_continuation_from_state(
+                    _provider_continuation_state_from_run(run),
+                ),
+            )
             invocation = await self.llm_invoker.invoke_async(
-                llm_id=context.request_envelope.llm_id,
-                messages=context.request_envelope.messages,
-                tool_schemas=context.request_envelope.tool_schemas,
+                request_envelope=context.request_envelope,
                 response_format=_response_format_from_output_contract(
                     context.request_envelope,
                 ),
-                request_overrides=context.request_envelope.provider_options,
                 continuation=provider_continuation,
-                require_tool_call=context.prompt.surface_policy.require_tool_call,
-                request_metadata=_llm_request_metadata_from_envelope(
-                    context.request_envelope,
-                ),
                 on_llm_stream_update=on_llm_stream_update,
             )
         self._validate_invocation_result(invocation)
-        session_item_ids = await asyncio.to_thread(
+        response_record = await asyncio.to_thread(
             self._record_llm_response_items,
             context=context,
             invocation=invocation,
         )
 
         assert invocation.result is not None
-        tool_calls = _local_tool_calls_from_invocation(invocation)
+        tool_calls = response_record.tool_calls
         if tool_calls:
             return await self._advance_outcome_for_tool_calls_async(
                 run,
                 context=context,
                 invocation=invocation,
-                session_item_ids=session_item_ids,
+                session_item_ids=response_record.item_ids,
+                assistant_progress_item_ids=response_record.assistant_progress_item_ids,
+                tool_call_session_item_ids_by_call_id=(
+                    response_record.tool_call_session_item_ids_by_call_id or {}
+                ),
                 tool_calls=tool_calls,
             )
         return await asyncio.to_thread(
             self._advance_outcome_for_message_only,
             context=context,
             invocation=invocation,
-            session_item_ids=session_item_ids,
+            session_item_ids=response_record.item_ids,
+            assistant_progress_item_ids=response_record.assistant_progress_item_ids,
         )
 
     def _build_advance_context(self, run: OrchestrationRun) -> _AdvanceContext:
@@ -371,67 +374,56 @@ class OrchestrationEngine:
                 run,
                 session_key=session_key,
             )
-        with self._timed_phase("build_prompt_input", detailed=True):
-            surface = self._build_prompt_input(run)
-        with self._timed_phase("context_render_snapshot", detailed=True):
-            context_render_snapshot = self._record_context_render_snapshot(
+        with self._timed_phase("build_runtime_request_draft", detailed=True):
+            surface = self._build_runtime_request_draft(run)
+        with self._timed_phase("request_render_snapshot", detailed=True):
+            request_render_snapshot = self._record_request_render_snapshot(
                 run,
-                surface.prompt,
+                surface.draft,
             )
-        prompt = self.provider_request_builder.prompt_with_context_snapshot(
-            surface.prompt,
-            context_render_snapshot,
+        base_draft = surface.draft
+        report_draft = self.runtime_llm_request_builder.draft_with_request_render_snapshot(
+            base_draft,
+            request_render_snapshot,
         )
-        resolved_tools = self.provider_request_builder.resolved_tools_for_prompt(
-            surface.resolved_tools,
-            prompt,
-            context_render_snapshot,
+        resolved_tools = self._resolve_tools_for_runtime_draft(
+            run,
+            base_resolved_tools=surface.resolved_tools,
+            draft=base_draft,
+            request_render_snapshot=request_render_snapshot,
         )
-        provider_options = self.llm_invoker.request_overrides(
-            llm_id=prompt.llm_id,
-            tool_schemas=prompt.tool_schemas,
-            require_tool_call=prompt.surface_policy.require_tool_call,
+        request_options = _llm_request_options_from_run(run, draft=base_draft)
+        provider_options = dict(request_options["provider_options"])
+        snapshot_metadata = _snapshot_metadata_for_request(
+            request_render_snapshot,
+            policy_payload=request_options["policy"].to_payload(),
         )
-        request_options = _llm_request_options_from_run(run, prompt=surface.prompt)
-        provider_options.update(request_options["provider_options"])
-        snapshot_metadata = (
-            dict(context_render_snapshot.metadata)
-            if context_render_snapshot is not None
-            else {}
-        )
-        snapshot_metadata["llm_request_policy"] = request_options["policy"].to_payload()
-        _merge_reasoning_config_into_provider_options(
-            provider_options,
-            request_options["reasoning_config"],
-        )
-        provider_continuation = _provider_continuation_for_prompt(run, prompt)
-        request_envelope = self.provider_request_builder.request_envelope(
-            prompt=surface.prompt,
-            context_render_snapshot=context_render_snapshot,
-            resolved_tools=surface.resolved_tools,
+        request_envelope = self.runtime_llm_request_builder.request_envelope(
+            draft=base_draft,
+            request_render_snapshot=request_render_snapshot,
+            resolved_tools=resolved_tools,
             snapshot_metadata=snapshot_metadata,
             run_id=run.id,
             agent_id=run.agent_id,
             provider_options=provider_options,
             reasoning_config=request_options["reasoning_config"],
             output_contract=request_options["output_contract"],
-            include_context_messages=provider_continuation is None,
         )
         context = _AdvanceContext(
             run=run,
             session_key=session_key,
             user_session_item_id=inbound_record.user_session_item_id,
-            prompt=prompt,
+            draft=report_draft,
             resolved_tools=resolved_tools,
             request_envelope=request_envelope,
-            context_render_snapshot_id=(
-                context_render_snapshot.snapshot_id
-                if context_render_snapshot is not None
+            request_render_snapshot_id=(
+                request_render_snapshot.snapshot_id
+                if request_render_snapshot is not None
                 else None
             ),
-            context_render_snapshot_metadata=(
-                dict(context_render_snapshot.metadata)
-                if context_render_snapshot is not None
+            request_render_snapshot_metadata=(
+                dict(request_render_snapshot.metadata)
+                if request_render_snapshot is not None
                 else {}
             ),
         )
@@ -456,42 +448,52 @@ class OrchestrationEngine:
         context: _AdvanceContext,
         invocation: Any,
         session_item_ids: tuple[str, ...],
+        assistant_progress_item_ids: tuple[str, ...],
+        tool_call_session_item_ids_by_call_id: dict[str, str],
         tool_calls: tuple[ToolCallIntent, ...],
     ) -> EngineAdvanceOutcome:
         assert invocation.result is not None
         tool_call_names = tuple(tool_call.name for tool_call in tool_calls)
-        with self._timed_phase("tool_assistant_items", detailed=True):
-            assistant_progress_item_ids = list(
-                self._assistant_items_for_tool_calls(
-                    context=context,
-                    invocation=invocation,
+        extra_assistant_progress_item_ids: tuple[str, ...] = ()
+        if not session_item_ids:
+            with self._timed_phase("tool_assistant_items", detailed=True):
+                extra_assistant_progress_item_ids = tuple(
+                    self._assistant_items_for_tool_calls(
+                        context=context,
+                        invocation=invocation,
+                    )
                 )
-            )
         with self._timed_phase("tool_execution"):
             execution_outcome = self.tool_executor.execute_tool_calls(
                 run,
                 session_key=context.session_key,
-                active_session_id=context.prompt.active_session_id,
+                active_session_id=context.draft.active_session_id,
                 resolved_tools=context.resolved_tools,
                 tool_calls=tool_calls,
-                append_tool_call_messages=context.prompt.surface_policy.record_tool_call_messages,
+                append_tool_call_messages=context.draft.surface_policy.record_tool_call_messages,
                 append_tool_call_session_items=not session_item_ids,
-                append_tool_result_messages=context.prompt.surface_policy.record_tool_result_messages,
+                tool_call_session_item_ids_by_call_id=tool_call_session_item_ids_by_call_id,
+                append_tool_result_messages=context.draft.surface_policy.record_tool_result_messages,
                 invocation_id=invocation.id,
                 extra_context_attrs=self._tool_execution_context_attrs(context),
             )
-        outcome_session_item_ids = (
-            *session_item_ids,
-            *assistant_progress_item_ids,
-            *execution_outcome.tool_call_session_item_ids,
-            *execution_outcome.tool_result_session_item_ids,
+        all_assistant_progress_item_ids = _unique_ids(
+            (*assistant_progress_item_ids, *extra_assistant_progress_item_ids),
+        )
+        outcome_session_item_ids = _unique_ids(
+            (
+                *session_item_ids,
+                *extra_assistant_progress_item_ids,
+                *execution_outcome.tool_call_session_item_ids,
+                *execution_outcome.tool_result_session_item_ids,
+            ),
         )
         with self._timed_phase("tool_outcome_build", detailed=True):
             return self._advance_outcome_from_tool_execution(
                 context=context,
                 invocation=invocation,
                 session_item_ids=outcome_session_item_ids,
-                assistant_progress_item_ids=tuple(assistant_progress_item_ids),
+                assistant_progress_item_ids=all_assistant_progress_item_ids,
                 tool_call_session_item_ids=execution_outcome.tool_call_session_item_ids,
                 tool_result_session_item_ids=execution_outcome.tool_result_session_item_ids,
                 tool_call_names=tool_call_names,
@@ -505,43 +507,53 @@ class OrchestrationEngine:
         context: _AdvanceContext,
         invocation: Any,
         session_item_ids: tuple[str, ...],
+        assistant_progress_item_ids: tuple[str, ...],
+        tool_call_session_item_ids_by_call_id: dict[str, str],
         tool_calls: tuple[ToolCallIntent, ...],
     ) -> EngineAdvanceOutcome:
         assert invocation.result is not None
         tool_call_names = tuple(tool_call.name for tool_call in tool_calls)
-        with self._timed_phase("tool_assistant_items", detailed=True):
-            assistant_progress_item_ids = list(
-                await asyncio.to_thread(
-                    self._assistant_items_for_tool_calls,
-                    context=context,
-                    invocation=invocation,
+        extra_assistant_progress_item_ids: tuple[str, ...] = ()
+        if not session_item_ids:
+            with self._timed_phase("tool_assistant_items", detailed=True):
+                extra_assistant_progress_item_ids = tuple(
+                    await asyncio.to_thread(
+                        self._assistant_items_for_tool_calls,
+                        context=context,
+                        invocation=invocation,
+                    )
                 )
-            )
         with self._timed_phase("tool_execution"):
             execution_outcome = await self.tool_executor.execute_tool_calls_async(
                 run,
                 session_key=context.session_key,
-                active_session_id=context.prompt.active_session_id,
+                active_session_id=context.draft.active_session_id,
                 resolved_tools=context.resolved_tools,
                 tool_calls=tool_calls,
-                append_tool_call_messages=context.prompt.surface_policy.record_tool_call_messages,
+                append_tool_call_messages=context.draft.surface_policy.record_tool_call_messages,
                 append_tool_call_session_items=not session_item_ids,
-                append_tool_result_messages=context.prompt.surface_policy.record_tool_result_messages,
+                tool_call_session_item_ids_by_call_id=tool_call_session_item_ids_by_call_id,
+                append_tool_result_messages=context.draft.surface_policy.record_tool_result_messages,
                 invocation_id=invocation.id,
                 extra_context_attrs=self._tool_execution_context_attrs(context),
             )
-        outcome_session_item_ids = (
-            *session_item_ids,
-            *assistant_progress_item_ids,
-            *execution_outcome.tool_call_session_item_ids,
-            *execution_outcome.tool_result_session_item_ids,
+        all_assistant_progress_item_ids = _unique_ids(
+            (*assistant_progress_item_ids, *extra_assistant_progress_item_ids),
+        )
+        outcome_session_item_ids = _unique_ids(
+            (
+                *session_item_ids,
+                *extra_assistant_progress_item_ids,
+                *execution_outcome.tool_call_session_item_ids,
+                *execution_outcome.tool_result_session_item_ids,
+            ),
         )
         with self._timed_phase("tool_outcome_build", detailed=True):
             return self._advance_outcome_from_tool_execution(
                 context=context,
                 invocation=invocation,
                 session_item_ids=outcome_session_item_ids,
-                assistant_progress_item_ids=tuple(assistant_progress_item_ids),
+                assistant_progress_item_ids=all_assistant_progress_item_ids,
                 tool_call_session_item_ids=execution_outcome.tool_call_session_item_ids,
                 tool_result_session_item_ids=execution_outcome.tool_result_session_item_ids,
                 tool_call_names=tool_call_names,
@@ -577,15 +589,11 @@ class OrchestrationEngine:
             pending_tool_run_ids=tuple(
                 tool_run.id for _, tool_run in execution_outcome.background_runs
             ),
-            evidence_frontier=_merge_evidence_frontier(
-                context.run.metadata.get("evidence_frontier"),
-                execution_outcome.evidence_frontier_items,
-            ),
             pending_approval_request=execution_outcome.pending_approval_request,
             yield_requested=execution_outcome.yield_requested,
             yield_reason=execution_outcome.yield_reason,
             continue_loop=(
-                context.prompt.surface_policy.auto_continue_inline_tools
+                context.draft.surface_policy.auto_continue_inline_tools
                 and execution_outcome.pending_approval_request is None
                 and not execution_outcome.background_runs
                 and not execution_outcome.yield_requested
@@ -594,12 +602,11 @@ class OrchestrationEngine:
 
     @staticmethod
     def _tool_execution_context_attrs(context: _AdvanceContext) -> dict[str, object]:
-        prompt = context.prompt
         attrs: dict[str, object] = {}
         for key in (
             "tool_surface_id",
             "tool_surface_snapshot_id",
-            "context_render_snapshot_id",
+            "request_render_snapshot_id",
         ):
             value = context.request_envelope.metadata.get(key)
             if isinstance(value, str) and value.strip():
@@ -615,20 +622,7 @@ class OrchestrationEngine:
         ]
         if tool_surface_functions:
             attrs["tool_surface_functions"] = tool_surface_functions
-        catalog = prompt.skills_catalog
-        if catalog is None:
-            return attrs
-        raw_names = catalog.metadata.get("available_skill_names")
-        if not isinstance(raw_names, list):
-            return {**attrs, "available_skill_names": []}
-        names: list[str] = []
-        for name in raw_names:
-            if not isinstance(name, str):
-                continue
-            normalized = name.strip()
-            if normalized and normalized not in names:
-                names.append(normalized)
-        return {**attrs, "available_skill_names": names}
+        return attrs
 
     def _advance_outcome_for_message_only(
         self,
@@ -636,13 +630,15 @@ class OrchestrationEngine:
         context: _AdvanceContext,
         invocation: Any,
         session_item_ids: tuple[str, ...],
+        assistant_progress_item_ids: tuple[str, ...],
     ) -> EngineAdvanceOutcome:
         assert invocation.result is not None
-        if not context.prompt.surface_policy.record_assistant_messages:
+        if not context.draft.surface_policy.record_assistant_messages:
             return self._build_outcome(
                 context=context,
                 invocation=invocation,
                 session_item_ids=session_item_ids,
+                assistant_progress_item_ids=assistant_progress_item_ids,
                 continue_loop=_continuation_needs_follow_up(invocation),
             )
         if session_item_ids:
@@ -650,12 +646,13 @@ class OrchestrationEngine:
                 context=context,
                 invocation=invocation,
                 session_item_ids=session_item_ids,
+                assistant_progress_item_ids=assistant_progress_item_ids,
                 continue_loop=_continuation_needs_follow_up(invocation),
             )
         with self._timed_phase("assistant_item_record", detailed=True):
             assistant_session_item_ids = self.session_recorder.append_assistant_response_item(
                 session_key=context.session_key,
-                active_session_id=context.prompt.active_session_id,
+                active_session_id=context.draft.active_session_id,
                 invocation_id=invocation.id,
                 response_text=invocation.result.text,
                 structured_output=invocation.result.structured_output,
@@ -674,6 +671,7 @@ class OrchestrationEngine:
                     *session_item_ids,
                     *assistant_session_item_ids,
                 ),
+                assistant_progress_item_ids=assistant_progress_item_ids,
                 continue_loop=_continuation_needs_follow_up(invocation),
             )
 
@@ -684,13 +682,13 @@ class OrchestrationEngine:
         invocation: Any,
     ) -> tuple[str, ...]:
         assert invocation.result is not None
-        if not context.prompt.surface_policy.record_assistant_messages:
+        if not context.draft.surface_policy.record_assistant_messages:
             return ()
         if invocation.result.text is None or not invocation.result.text.strip():
             return ()
         return self.session_recorder.append_assistant_response_message(
             session_key=context.session_key,
-            active_session_id=context.prompt.active_session_id,
+            active_session_id=context.draft.active_session_id,
             invocation_id=invocation.id,
             response_text=invocation.result.text,
             structured_output=None,
@@ -711,7 +709,6 @@ class OrchestrationEngine:
         tool_call_names: tuple[str, ...] = (),
         tool_run_links: tuple[dict[str, object], ...] = (),
         pending_tool_run_ids: tuple[str, ...] = (),
-        evidence_frontier: tuple[dict[str, object], ...] = (),
         pending_approval_request: PendingApprovalRequest | None = None,
         yield_requested: bool = False,
         yield_reason: str | None = None,
@@ -719,7 +716,7 @@ class OrchestrationEngine:
     ) -> EngineAdvanceOutcome:
         assert invocation.result is not None
         return EngineAdvanceOutcome(
-            llm_id=context.prompt.llm_id,
+            llm_id=context.draft.llm_id,
             llm_invocation_id=invocation.id,
             llm_response_item_ids=_llm_response_item_ids(invocation),
             response_text=invocation.result.text,
@@ -732,17 +729,18 @@ class OrchestrationEngine:
             tool_call_names=tool_call_names,
             tool_run_links=tool_run_links,
             pending_tool_run_ids=pending_tool_run_ids,
-            evidence_frontier=evidence_frontier,
             pending_approval_request=pending_approval_request,
-            prompt_report=context.prompt.report,
-            context_render_snapshot_id=context.context_render_snapshot_id,
+            runtime_request_report=context.draft.report,
+            request_render_snapshot_id=context.request_render_snapshot_id,
             llm_request_metadata=_llm_request_metadata(context),
             yield_requested=yield_requested,
             yield_reason=yield_reason,
             continue_loop=continue_loop,
             continuation_reason=_continuation_reason(invocation),
             continuation_end_turn=_continuation_end_turn(invocation),
-            provider_continuation_state=_provider_continuation_state(invocation),
+            provider_continuation_state=build_provider_continuation_state_from_invocation(
+                invocation,
+            ),
             loop_diagnostic=_terminal_loop_diagnostic(invocation),
         )
 
@@ -751,13 +749,13 @@ class OrchestrationEngine:
         *,
         context: _AdvanceContext,
         invocation: Any,
-    ) -> tuple[str, ...]:
+    ) -> RuntimeResponseRecord:
         response_items = getattr(invocation, "response_items", None)
         if not isinstance(response_items, (list, tuple)) or not response_items:
-            return ()
+            return RuntimeResponseRecord()
         return self.session_recorder.append_llm_response_items(
             session_key=context.session_key,
-            active_session_id=context.prompt.active_session_id,
+            active_session_id=context.draft.active_session_id,
             invocation_id=invocation.id,
             response_items=tuple(response_items),
         )
@@ -782,32 +780,6 @@ class OrchestrationEngine:
         return self.session_recorder.append_completed_background_tool_results(
             run,
             tool_runs=tool_runs,
-        )
-
-    def evidence_frontier_for_tool_runs(
-        self,
-        run: OrchestrationRun,
-        *,
-        tool_runs: tuple[ToolRun, ...],
-    ) -> tuple[dict[str, object], ...]:
-        items: list[dict[str, object]] = []
-        for tool_run in tool_runs:
-            tool_call = self._tool_call_intent_for_background_run(
-                run=run,
-                tool_run=tool_run,
-            )
-            if tool_call is None:
-                continue
-            items.append(
-                tool_run_evidence_frontier_item(
-                    tool_call=tool_call,
-                    tool_run=tool_run,
-                    source_run_id=run.id,
-                ),
-            )
-        return _merge_evidence_frontier(
-            run.metadata.get("evidence_frontier"),
-            tuple(items),
         )
 
     def _tool_call_intent_for_background_run(
@@ -842,65 +814,121 @@ class OrchestrationEngine:
             )
         return ToolCallIntent(id=tool_call_id, name=tool_name, arguments={})
 
-    def _build_prompt_input(
+    def _build_runtime_request_draft(
         self,
         run: OrchestrationRun,
-    ) -> _ResolvedRunPromptInput:
+    ) -> _ResolvedRuntimeLlmRequestDraft:
         with self._timed_phase("tool_resolve", detailed=True):
             resolved_tools = self.tool_resolver.resolve(run)
-        with self._timed_phase("prompt_input_collect", detailed=True):
-            prompt = self.prompt_inputs.build(
+        with self._timed_phase("runtime_request_draft_collect", detailed=True):
+            draft = self.runtime_request_drafts.build(
                 run,
                 resolved_tools=resolved_tools,
             )
-        return _ResolvedRunPromptInput(
-            prompt=prompt,
+        return _ResolvedRuntimeLlmRequestDraft(
+            draft=draft,
             resolved_tools=resolved_tools,
         )
 
-    def _record_context_render_snapshot(
+    def _build_runtime_request_preview_draft(
         self,
         run: OrchestrationRun,
-        prompt: RunPromptInput,
-    ) -> ContextRenderSnapshotRecord:
+    ) -> _ResolvedRuntimeLlmRequestDraft:
+        with self._timed_phase("tool_schema_candidate_resolve", detailed=True):
+            resolved_tools = self.tool_resolver.resolve_schema_candidates(run)
+        with self._timed_phase("runtime_request_draft_collect", detailed=True):
+            draft = self.runtime_request_drafts.build(
+                run,
+                resolved_tools=resolved_tools,
+                validate_llm_access=False,
+            )
+        return _ResolvedRuntimeLlmRequestDraft(
+            draft=draft,
+            resolved_tools=resolved_tools,
+        )
+
+    def _resolve_tools_for_runtime_draft(
+        self,
+        run: OrchestrationRun,
+        *,
+        base_resolved_tools: ResolvedToolSet,
+        draft: RuntimeLlmRequestDraft,
+        request_render_snapshot: RequestRenderSnapshotRecord | None,
+    ) -> ResolvedToolSet:
+        visible_tool_names = self.runtime_llm_request_builder.visible_tool_schema_names(
+            request_render_snapshot,
+        )
+        if draft.surface_policy.surface == "interactive" and visible_tool_names:
+            return self.tool_resolver.resolve_for_schema_names(
+                run,
+                visible_tool_names,
+            )
+        return self.runtime_llm_request_builder.resolved_tools_for_draft(
+            base_resolved_tools,
+            draft,
+            request_render_snapshot,
+        )
+
+    def _record_request_render_snapshot(
+        self,
+        run: OrchestrationRun,
+        draft: RuntimeLlmRequestDraft,
+    ) -> RequestRenderSnapshotRecord:
         try:
-            snapshot = self.context_snapshot_port.record_run_prompt_snapshot(
+            snapshot = self.request_render_snapshot_port.record_run_request_render_snapshot(
                 run=run,
-                prompt=prompt,
+                draft=draft,
             )
         except Exception as exc:  # pragma: no cover - defensive runtime guard.
             raise OrchestrationValidationError(
-                "Context Workspace prompt render failed for orchestration run "
+                "Context Workspace request render snapshot failed for orchestration run "
                 f"'{run.id}': {exc}",
             ) from exc
         if snapshot is None:
             raise OrchestrationValidationError(
-                "Context Workspace prompt render did not return a snapshot for "
+                "Context Workspace request render snapshot did not return a snapshot for "
                 f"orchestration run '{run.id}'.",
             )
         return snapshot
 
-    def _preview_context_render_snapshot(
+    def _preview_request_render_snapshot(
         self,
         run: OrchestrationRun,
-        prompt: RunPromptInput,
-    ) -> ContextRenderSnapshotRecord:
+        draft: RuntimeLlmRequestDraft,
+    ) -> RequestRenderSnapshotRecord:
         try:
-            snapshot = self.context_snapshot_port.preview_run_prompt_snapshot(
+            snapshot = self.request_render_snapshot_port.preview_run_request_render_snapshot(
                 run=run,
-                prompt=prompt,
+                draft=draft,
             )
         except Exception as exc:  # pragma: no cover - defensive runtime guard.
             raise OrchestrationValidationError(
-                "Context Workspace prompt preview failed for orchestration run "
+                "Context Workspace request render snapshot preview failed for orchestration run "
                 f"'{run.id}': {exc}",
             ) from exc
         if snapshot is None:
             raise OrchestrationValidationError(
-                "Context Workspace prompt preview did not return a render record for "
+                "Context Workspace request render snapshot preview did not return a snapshot for "
                 f"orchestration run '{run.id}'.",
             )
         return snapshot
+
+    @staticmethod
+    def _draft_with_recorded_transcript_window(
+        draft: RuntimeLlmRequestDraft,
+        request_render_snapshot: RequestRenderSnapshotRecord,
+    ) -> RuntimeLlmRequestDraft:
+        raw_count = request_render_snapshot.metadata.get(
+            "draft_input_message_count",
+        )
+        if isinstance(raw_count, bool):
+            return draft
+        if not isinstance(raw_count, int):
+            return draft
+        count = max(0, raw_count)
+        if count >= len(draft.messages):
+            return draft
+        return replace(draft, messages=draft.messages[:count])
 
     def _timed_phase(
         self,
@@ -917,35 +945,13 @@ class OrchestrationEngine:
 
 
 def _llm_request_metadata(context: _AdvanceContext) -> dict[str, object]:
-    return _llm_request_metadata_from_envelope(context.request_envelope)
-
-
-def _llm_request_metadata_from_envelope(
-    request_envelope: LlmRequestEnvelope,
-) -> dict[str, object]:
-    metadata = dict(request_envelope.metadata)
-    if request_envelope.context_surface.snapshot_id:
-        metadata["context_surface"] = request_envelope.context_surface.to_payload()
-    if request_envelope.tool_surface.id:
-        metadata["tool_surface"] = request_envelope.tool_surface.to_payload()
-    if request_envelope.reasoning_config:
-        metadata["reasoning_config"] = dict(request_envelope.reasoning_config)
-    if request_envelope.output_contract:
-        metadata["output_contract"] = dict(request_envelope.output_contract)
-    if request_envelope.provider_options:
-        metadata["provider_options"] = dict(request_envelope.provider_options)
-    if request_envelope.blocked_tool_access:
-        metadata["blocked_tool_access"] = [
-            dict(item) for item in request_envelope.blocked_tool_access
-        ]
-    return metadata
+    return context.request_envelope.request_metadata()
 
 
 def _response_format_from_output_contract(
-    request_envelope: LlmRequestEnvelope,
+    request_envelope: RuntimeLlmRequest,
 ) -> dict[str, object] | None:
-    response_format = request_envelope.output_contract.get("response_format")
-    return dict(response_format) if isinstance(response_format, dict) else None
+    return request_envelope.response_format()
 
 
 def _llm_request_options_from_run_metadata(
@@ -977,15 +983,15 @@ def _llm_request_options_from_run_metadata(
 def _llm_request_options_from_run(
     run: OrchestrationRun,
     *,
-    prompt: RunPromptInput,
+    draft: RuntimeLlmRequestDraft,
 ) -> dict[str, object]:
     policy = resolve_effective_llm_request_policy(
         run,
-        llm_capabilities=prompt.llm_capabilities,
-        llm_api_family=prompt.llm_api_family,
-        runtime_defaults=prompt.runtime_llm_defaults,
-        llm_defaults=prompt.llm_defaults,
-        agent_llm_policy=prompt.llm_policy,
+        llm_capabilities=draft.llm_capabilities,
+        llm_api_family=draft.llm_api_family,
+        runtime_defaults=draft.runtime_llm_defaults,
+        llm_defaults=draft.llm_defaults,
+        agent_llm_policy=draft.llm_policy,
     )
     return _llm_request_options_from_policy(policy)
 
@@ -1001,18 +1007,6 @@ def _llm_request_options_from_policy(
     }
 
 
-def _merge_reasoning_config_into_provider_options(
-    provider_options: dict[str, object],
-    reasoning_config: object,
-) -> None:
-    if not isinstance(reasoning_config, dict) or not reasoning_config:
-        return
-    existing = provider_options.get("reasoning")
-    reasoning = dict(existing) if isinstance(existing, dict) else {}
-    reasoning.update(reasoning_config)
-    provider_options["reasoning"] = reasoning
-
-
 def _dict_option(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -1020,14 +1014,6 @@ def _dict_option(value: object) -> dict[str, object]:
 def _tool_surface_snapshot_builder(tool_execution_port: object) -> Callable[..., object] | None:
     builder = getattr(tool_execution_port, "build_tool_surface", None)
     return builder if callable(builder) else None
-
-
-def _legacy_llm_request_metadata(context: _AdvanceContext) -> dict[str, object]:
-    return build_llm_request_metadata(
-        prompt=context.prompt,
-        context_render_snapshot_id=context.context_render_snapshot_id,
-        snapshot_metadata=context.context_render_snapshot_metadata,
-    )
 
 
 def _llm_response_item_ids(invocation: Any) -> tuple[str, ...]:
@@ -1042,40 +1028,6 @@ def _llm_response_item_ids(invocation: Any) -> tuple[str, ...]:
             if normalized not in item_ids:
                 item_ids.append(normalized)
     return tuple(item_ids)
-
-
-def _local_tool_calls_from_invocation(invocation: Any) -> tuple[ToolCallIntent, ...]:
-    response_items = getattr(invocation, "response_items", None)
-    if isinstance(response_items, (list, tuple)) and response_items:
-        tool_calls: list[ToolCallIntent] = []
-        for item in response_items:
-            if _enum_value(getattr(item, "kind", None)) != "tool_call":
-                continue
-            content = getattr(item, "content_payload", None)
-            if not isinstance(content, dict):
-                content = {}
-            tool_name = str(
-                content.get("tool_name") or getattr(item, "tool_name", None) or "",
-            ).strip()
-            if not tool_name:
-                continue
-            call_id = str(
-                content.get("call_id")
-                or getattr(item, "call_id", None)
-                or getattr(item, "provider_item_id", None)
-                or getattr(item, "id", "")
-                or "tool_call",
-            )
-            arguments = content.get("arguments")
-            tool_calls.append(
-                ToolCallIntent(
-                    id=call_id,
-                    name=tool_name,
-                    arguments=dict(arguments) if isinstance(arguments, dict) else {},
-                ),
-            )
-        return tuple(tool_calls)
-    return ()
 
 
 def _continuation_needs_follow_up(invocation: Any) -> bool:
@@ -1096,92 +1048,25 @@ def _continuation_end_turn(invocation: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _provider_continuation_from_run(
+def _provider_continuation_state_from_run(
     run: OrchestrationRun,
-) -> LlmProviderContinuation | None:
+) -> dict[str, object] | None:
     raw_state = run.metadata.get("provider_continuation_state")
     if not isinstance(raw_state, dict):
         return None
-    if raw_state.get("mode") != "provider_native":
-        return None
-    previous_response_id = _optional_text(raw_state.get("previous_response_id"))
-    if previous_response_id is None:
-        return None
-    return LlmProviderContinuation(
-        mode="provider_native",
-        previous_response_id=previous_response_id,
-        previous_invocation_id=_optional_text(raw_state.get("previous_invocation_id")),
-        provider_family=_optional_text(raw_state.get("provider_family")),
-    )
+    return dict(raw_state)
 
 
-def _provider_continuation_for_prompt(
-    run: OrchestrationRun,
-    prompt: RunPromptInput,
-) -> LlmProviderContinuation | None:
-    if not _llm_api_family_supports_provider_continuation(prompt.llm_api_family):
-        return None
-    if LlmCapability.PROVIDER_NATIVE_CONTINUATION not in set(prompt.llm_capabilities):
-        return None
-    return _provider_continuation_from_run(run)
-
-
-def _llm_api_family_supports_provider_continuation(api_family: str | None) -> bool:
-    if api_family is None:
-        return False
-    return api_family.strip() in {
-        LlmApiFamily.OPENAI_RESPONSES.value,
-        LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
-    }
-
-
-def _provider_continuation_state(invocation: Any) -> dict[str, object]:
-    previous_response_id = _optional_text(getattr(invocation, "provider_request_id", None))
-    if previous_response_id is None:
-        return {}
-    preview = getattr(invocation, "provider_request_payload_preview", None)
-    if not isinstance(preview, dict):
-        return {}
-    api_family = _optional_text(preview.get("api_family"))
-    if api_family not in {"openai_responses", "openai_codex_responses"}:
-        return {}
-    return {
-        "mode": "provider_native",
-        "provider_family": api_family,
-        "previous_response_id": previous_response_id,
-        "previous_invocation_id": getattr(invocation, "id", ""),
-        "last_request_had_previous_response_id": bool(
-            preview.get("has_previous_response_id"),
-        ),
-    }
-
-
-def _merge_evidence_frontier(
-    existing: object,
-    new_items: tuple[dict[str, object], ...],
-) -> tuple[dict[str, object], ...]:
-    items: list[dict[str, object]] = []
-    seen_ids: set[str] = set()
-    if isinstance(existing, list | tuple):
-        for raw in existing:
-            if not isinstance(raw, dict):
-                continue
-            item = dict(raw)
-            item_id = str(item.get("id") or "")
-            if item_id and item_id in seen_ids:
-                continue
-            items.append(item)
-            if item_id:
-                seen_ids.add(item_id)
-    for raw in new_items:
-        item = dict(raw)
-        item_id = str(item.get("id") or "")
-        if item_id and item_id in seen_ids:
+def _unique_ids(values: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
             continue
-        items.append(item)
-        if item_id:
-            seen_ids.add(item_id)
-    return tuple(items)
+        seen.add(text)
+        unique.append(text)
+    return tuple(unique)
 
 
 def _terminal_loop_diagnostic(invocation: Any) -> dict[str, object]:

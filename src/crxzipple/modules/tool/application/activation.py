@@ -107,7 +107,7 @@ class ToolPackagePlan:
     manifest_path: str
     package_kind: ToolPackageKind
     capability_ids: tuple[str, ...] = ()
-    prompt: Mapping[str, Any] = field(default_factory=dict)
+    runtime_request: Mapping[str, Any] = field(default_factory=dict)
     local_handlers: tuple[ToolHandlerPlan, ...] = ()
     remote_runtimes: tuple[ToolRuntimePlan, ...] = ()
     sandbox_runtimes: tuple[ToolRuntimePlan, ...] = ()

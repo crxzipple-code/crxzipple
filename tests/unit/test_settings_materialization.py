@@ -13,6 +13,34 @@ from crxzipple.modules.settings import (
 )
 
 
+class CountingSettingsQueryProxy:
+    def __init__(self, wrapped) -> None:
+        self.wrapped = wrapped
+        self.list_resources_calls: dict[str | None, int] = {}
+        self.get_effective_calls: dict[str, int] = {}
+        self.list_effective_payloads_calls: dict[str, int] = {}
+
+    def list_resources(self, *, resource_kind=None, owner_module=None):
+        del owner_module
+        self.list_resources_calls[resource_kind] = (
+            self.list_resources_calls.get(resource_kind, 0) + 1
+        )
+        return self.wrapped.list_resources(resource_kind=resource_kind)
+
+    def get_effective(self, resource_id: str, *, environment=None):
+        self.get_effective_calls[resource_id] = (
+            self.get_effective_calls.get(resource_id, 0) + 1
+        )
+        return self.wrapped.get_effective(resource_id, environment=environment)
+
+    def list_effective_payloads(self, *, resource_kind: str, environment=None):
+        del environment
+        self.list_effective_payloads_calls[resource_kind] = (
+            self.list_effective_payloads_calls.get(resource_kind, 0) + 1
+        )
+        return self.wrapped.list_effective_payloads(resource_kind=resource_kind)
+
+
 class SettingsMaterializationTestCase(unittest.TestCase):
     def test_bootstrap_settings_materializes_shared_runtime_configs(self) -> None:
         services = create_bootstrap_settings_services(
@@ -82,6 +110,34 @@ class SettingsMaterializationTestCase(unittest.TestCase):
             "oauth2_account",
         )
         self.assertEqual(materializer.warnings, ())
+
+    def test_materializer_reuses_effective_payloads_for_same_kind(self) -> None:
+        services = create_bootstrap_settings_services(
+            SimpleNamespace(
+                llm_profiles=(),
+                tool_local_paths=("/tmp/crxzipple/tools",),
+                tool_openapi_providers=(
+                    {
+                        "name": "weather",
+                        "spec_location": "/tmp/weather.yaml",
+                        "base_url": "https://weather.test",
+                    },
+                ),
+                tool_mcp_providers=(),
+                channel_profiles=(),
+                agent_profiles=(),
+                environment="test",
+            ),
+        )
+        query = CountingSettingsQueryProxy(services.queries)
+        materializer = SettingsEffectiveConfigMaterializer(query)
+
+        self.assertEqual(len(materializer.tool_roots()), 1)
+        self.assertEqual(len(materializer.tool_providers()), 1)
+
+        self.assertEqual(query.list_effective_payloads_calls.get("tool-catalog"), 1)
+        self.assertEqual(query.list_resources_calls, {})
+        self.assertEqual(query.get_effective_calls, {})
 
     def test_startup_seed_does_not_overwrite_existing_runtime_defaults(self) -> None:
         services = create_in_memory_settings_services()

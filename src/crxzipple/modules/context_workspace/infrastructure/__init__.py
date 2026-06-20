@@ -1,23 +1,27 @@
 from crxzipple.modules.context_workspace.infrastructure.in_memory_repository import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextRequestRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
 from crxzipple.modules.context_workspace.infrastructure.persistence import (
     SqlAlchemyContextNodeRepository,
     SqlAlchemyContextOperationRepository,
-    SqlAlchemyContextRenderSnapshotRepository,
+    SqlAlchemyContextRequestRenderSnapshotRepository,
+    SqlAlchemyContextSnapshotRepository,
     SqlAlchemyContextWorkspaceRepository,
 )
 
 __all__ = [
     "InMemoryContextNodeRepository",
     "InMemoryContextOperationRepository",
-    "InMemoryContextRenderSnapshotRepository",
+    "InMemoryContextRequestRenderSnapshotRepository",
+    "InMemoryContextSnapshotRepository",
     "InMemoryContextWorkspaceRepository",
     "SqlAlchemyContextNodeRepository",
     "SqlAlchemyContextOperationRepository",
-    "SqlAlchemyContextRenderSnapshotRepository",
+    "SqlAlchemyContextRequestRenderSnapshotRepository",
+    "SqlAlchemyContextSnapshotRepository",
     "SqlAlchemyContextWorkspaceRepository",
 ]

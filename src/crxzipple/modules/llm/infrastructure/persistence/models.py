@@ -49,12 +49,27 @@ class LlmInvocationModel(Base):
         nullable=False,
         default=list,
     )
+    input_items: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    provider_context_messages: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
     tool_schemas: Mapped[list[dict[str, object]]] = mapped_column(
         JSON(),
         nullable=False,
         default=list,
     )
     response_format: Mapped[dict[str, object] | None] = mapped_column(JSON(), nullable=True)
+    request_policy: Mapped[dict[str, object]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=dict,
+    )
     request_overrides: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,
@@ -122,8 +137,8 @@ class LlmInvocationResponseItemModel(Base):
     provider_item_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     call_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    model_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
-    user_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
+    provider_replay_candidate: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
+    user_timeline_candidate: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

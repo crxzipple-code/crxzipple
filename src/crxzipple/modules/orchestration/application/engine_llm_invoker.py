@@ -4,10 +4,14 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from crxzipple.modules.llm.application import InvokeLlmInput, StreamLlmInput
+from crxzipple.modules.llm.application import (
+    InvokeLlmInput,
+    StreamLlmInput,
+    profile_supports_provider_continuation,
+)
+from crxzipple.modules.llm.application.runtime_request import RuntimeLlmRequest
 from crxzipple.modules.llm.domain import (
     LlmAdapterNotConfiguredError,
-    LlmApiFamily,
     LlmProviderContinuation,
 )
 from crxzipple.modules.orchestration.application.ports import LlmPort
@@ -28,46 +32,27 @@ class OrchestrationEngineLlmInvoker:
     def invoke(
         self,
         *,
-        llm_id: str,
-        messages: tuple,
-        tool_schemas: tuple,
+        request_envelope: RuntimeLlmRequest,
         response_format: dict[str, object] | None = None,
-        request_overrides: dict[str, object] | None = None,
         continuation: LlmProviderContinuation | None = None,
-        require_tool_call: bool = False,
-        request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
     ):
-        overrides = self._merged_request_overrides(
-            base_overrides=request_overrides,
-            llm_id=llm_id,
-            tool_schemas=tool_schemas,
-            require_tool_call=require_tool_call,
-        )
-        labels = {"llm_id": llm_id}
+        labels = {"llm_id": request_envelope.llm_id}
         with self.metrics.active("orchestration.llm.active", labels=labels):
             with self.metrics.timed("orchestration.llm.invoke_seconds", labels=labels):
                 try:
                     events = self.llm_port.stream_invoke(
-                        StreamLlmInput(
-                            llm_id=llm_id,
-                            messages=messages,
-                            tool_schemas=tool_schemas,
+                        StreamLlmInput.from_runtime_request(
+                            request_envelope,
                             response_format=response_format,
-                            overrides=overrides,
-                            request_metadata=dict(request_metadata or {}),
                             continuation=continuation,
                         ),
                     )
                 except LlmAdapterNotConfiguredError:
                     return self.llm_port.invoke(
-                        InvokeLlmInput(
-                            llm_id=llm_id,
-                            messages=messages,
-                            tool_schemas=tool_schemas,
+                        InvokeLlmInput.from_runtime_request(
+                            request_envelope,
                             response_format=response_format,
-                            overrides=overrides,
-                            request_metadata=dict(request_metadata or {}),
                             continuation=continuation,
                         ),
                     )
@@ -108,46 +93,27 @@ class OrchestrationEngineLlmInvoker:
     async def invoke_async(
         self,
         *,
-        llm_id: str,
-        messages: tuple,
-        tool_schemas: tuple,
+        request_envelope: RuntimeLlmRequest,
         response_format: dict[str, object] | None = None,
-        request_overrides: dict[str, object] | None = None,
         continuation: LlmProviderContinuation | None = None,
-        require_tool_call: bool = False,
-        request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
     ):
-        overrides = self._merged_request_overrides(
-            base_overrides=request_overrides,
-            llm_id=llm_id,
-            tool_schemas=tool_schemas,
-            require_tool_call=require_tool_call,
-        )
-        labels = {"llm_id": llm_id}
+        labels = {"llm_id": request_envelope.llm_id}
         with self.metrics.active("orchestration.llm.active", labels=labels):
             with self.metrics.timed("orchestration.llm.invoke_seconds", labels=labels):
                 try:
                     events = self.llm_port.stream_invoke_async(
-                        StreamLlmInput(
-                            llm_id=llm_id,
-                            messages=messages,
-                            tool_schemas=tool_schemas,
+                        StreamLlmInput.from_runtime_request(
+                            request_envelope,
                             response_format=response_format,
-                            overrides=overrides,
-                            request_metadata=dict(request_metadata or {}),
                             continuation=continuation,
                         ),
                     )
                 except LlmAdapterNotConfiguredError:
                     return await self.llm_port.invoke_async(
-                        InvokeLlmInput(
-                            llm_id=llm_id,
-                            messages=messages,
-                            tool_schemas=tool_schemas,
+                        InvokeLlmInput.from_runtime_request(
+                            request_envelope,
                             response_format=response_format,
-                            overrides=overrides,
-                            request_metadata=dict(request_metadata or {}),
                             continuation=continuation,
                         ),
                     )
@@ -181,13 +147,9 @@ class OrchestrationEngineLlmInvoker:
                             raise OrchestrationValidationError("LLM invocation failed [stream_failed].")
                 except LlmAdapterNotConfiguredError:
                     return await self.llm_port.invoke_async(
-                        InvokeLlmInput(
-                            llm_id=llm_id,
-                            messages=messages,
-                            tool_schemas=tool_schemas,
+                        InvokeLlmInput.from_runtime_request(
+                            request_envelope,
                             response_format=response_format,
-                            overrides=overrides,
-                            request_metadata=dict(request_metadata or {}),
                             continuation=continuation,
                         ),
                     )
@@ -201,48 +163,30 @@ class OrchestrationEngineLlmInvoker:
                     invocation_id,
                 )
 
-    def _merged_request_overrides(
+    def provider_continuation(
         self,
         *,
-        base_overrides: dict[str, object] | None,
-        llm_id: str,
-        tool_schemas: tuple,
-        require_tool_call: bool,
-    ) -> dict[str, object]:
-        overrides = dict(base_overrides or {})
-        overrides.update(
-            self.request_overrides(
-                llm_id=llm_id,
-                tool_schemas=tool_schemas,
-                require_tool_call=require_tool_call,
-            ),
-        )
-        return overrides
+        request_envelope: RuntimeLlmRequest,
+        continuation: LlmProviderContinuation | None,
+    ) -> LlmProviderContinuation | None:
+        if continuation is None:
+            return None
+        if not self._supports_provider_continuation(
+            request_envelope=request_envelope,
+            continuation=continuation,
+        ):
+            return None
+        return continuation
 
-    def request_overrides(
+    def _supports_provider_continuation(
         self,
         *,
-        llm_id: str,
-        tool_schemas: tuple,
-        require_tool_call: bool,
-    ) -> dict[str, object]:
-        if not require_tool_call or not tool_schemas:
-            return {}
-        profile = self.llm_port.get_profile(llm_id)
-        if profile.api_family in {
-            LlmApiFamily.OPENAI_RESPONSES,
-            LlmApiFamily.OPENAI_CODEX_RESPONSES,
-            LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
-        }:
-            return {"tool_choice": "required"}
-        if profile.api_family is LlmApiFamily.ANTHROPIC_MESSAGES:
-            return {"tool_choice": {"type": "any"}}
-        if profile.api_family is LlmApiFamily.GEMINI_GENERATE_CONTENT:
-            return {
-                "toolConfig": {
-                    "functionCallingConfig": {
-                        "mode": "ANY",
-                    },
-                },
-            }
-        return {}
+        request_envelope: RuntimeLlmRequest,
+        continuation: LlmProviderContinuation,
+    ) -> bool:
+        profile = self.llm_port.get_profile(request_envelope.llm_id)
+        return profile_supports_provider_continuation(
+            profile=profile,
+            continuation=continuation,
+            provider_options=request_envelope.provider_options,
+        )

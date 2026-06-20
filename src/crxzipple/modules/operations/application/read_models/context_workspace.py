@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from crxzipple.modules.context_workspace.application import BuildContextObservationSliceInput
+from crxzipple.modules.context_workspace.domain import ContextWorkspaceNotFoundError
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
     OperationsModuleOverview,
@@ -18,7 +21,8 @@ from crxzipple.modules.operations.application.read_models.modules import (
     OperationsModulePage,
 )
 from crxzipple.modules.operations.application.read_models.ports import (
-    OperationsContextRenderPort,
+    OperationsContextObservationSnapshotPort,
+    OperationsContextSliceBuilderPort,
     OperationsContextTreePort,
     OperationsContextWorkspacePort,
 )
@@ -36,13 +40,14 @@ class ContextWorkspaceOperationsQuery:
 class ContextWorkspaceOperationsReadModelProvider:
     workspace_service: OperationsContextWorkspacePort | None
     tree_service: OperationsContextTreePort | None
-    render_service: OperationsContextRenderPort | None
+    observation_snapshot_service: OperationsContextObservationSnapshotPort | None
+    slice_builder: OperationsContextSliceBuilderPort | None = None
 
     def overview(self) -> OperationsModuleOverview:
         page = self.page(ContextWorkspaceOperationsQuery(limit=40))
         workspaces = _section_rows(page.sections, "workspaces")
         nodes = _section_rows(page.sections, "visible_nodes")
-        snapshots = _section_rows(page.sections, "render_snapshots")
+        snapshots = _section_rows(page.sections, "snapshots")
         return OperationsModuleOverview(
             module=page.module,
             title=page.title,
@@ -71,28 +76,31 @@ class ContextWorkspaceOperationsReadModelProvider:
         visible = filtered[query.offset : query.offset + query.limit]
         tree_views, tree_error = _safe_tree_views(self.tree_service, visible)
         snapshots, snapshot_error = _safe_list_snapshots(
-            self.render_service,
+            self.observation_snapshot_service,
             limit=min(max(query.limit, 40), 100),
             offset=0,
         )
+        slice_rows, slice_error = _safe_operations_slice_rows(
+            self.slice_builder,
+            visible,
+            snapshots,
+            limit=query.limit,
+        )
         workspace_rows = _workspace_rows(visible, tree_views)
         node_rows = _node_rows(tree_views, query.limit)
-        warning_rows = _investigation_warning_rows(
-            tree_views,
-            query.search,
-            query.limit,
-        )
+        node_status_rows = _node_status_rows(tree_views, query.limit)
         snapshot_rows = _snapshot_rows(snapshots, query.search, query.limit)
-        prompt_budget_rows = _prompt_budget_rows(snapshots, query.search, query.limit)
+        context_budget_rows = _context_budget_rows(snapshots, query.search, query.limit)
         diagnostic_rows = _diagnostic_rows(
             workspace_error=workspace_error,
             tree_error=tree_error,
             snapshot_error=snapshot_error,
+            slice_error=slice_error,
         )
         health = _health(
             workspace_service_available=self.workspace_service is not None,
             tree_service_available=self.tree_service is not None,
-            render_service_available=self.render_service is not None,
+            observation_snapshot_service_available=self.observation_snapshot_service is not None,
             diagnostic_rows=diagnostic_rows,
         )
         sections = (
@@ -111,25 +119,32 @@ class ContextWorkspaceOperationsReadModelProvider:
                 empty_state="No context nodes.",
             ),
             _table_section(
-                section_id="investigation_warnings",
-                title="Investigation Warnings",
-                rows=warning_rows,
-                total=_investigation_warning_total(tree_views, query.search),
-                empty_state="No investigation warnings.",
+                section_id="node_status",
+                title="Node Status",
+                rows=node_status_rows,
+                total=len(_node_status_rows(tree_views, 10_000)),
+                empty_state="No context node status.",
             ),
             _table_section(
-                section_id="render_snapshots",
-                title="Render Snapshots",
+                section_id="snapshots",
+                title="Context Snapshots",
                 rows=snapshot_rows,
                 total=len(_filter_snapshots(snapshots, query.search)),
-                empty_state="No context render snapshots.",
+                empty_state="No context snapshots.",
             ),
             _table_section(
-                section_id="prompt_budget",
-                title="Prompt Budget",
-                rows=prompt_budget_rows,
+                section_id="context_budget",
+                title="Context Budget",
+                rows=context_budget_rows,
                 total=len(_filter_snapshots(snapshots, query.search)),
-                empty_state="No prompt budget snapshots.",
+                empty_state="No context budget snapshots.",
+            ),
+            _table_section(
+                section_id="observation_slices",
+                title="Observation Slices",
+                rows=slice_rows,
+                total=len(slice_rows),
+                empty_state="No operations projection slices.",
             ),
             _table_section(
                 section_id="diagnostics",
@@ -142,7 +157,7 @@ class ContextWorkspaceOperationsReadModelProvider:
         return OperationsModulePage(
             module="context_workspace",
             title="Context Workspace",
-            subtitle="观察会话绑定的 Prompt Tree、可见节点、估算体积与渲染快照。",
+            subtitle="观察会话绑定的 Context Tree、可见节点、估算体积与上下文快照。",
             health=health,
             updated_at=format_datetime_utc(now),
             auto_refresh=True,
@@ -156,6 +171,7 @@ class ContextWorkspaceOperationsReadModelProvider:
                 workspaces=filtered,
                 tree_views=tree_views,
                 snapshots=snapshots,
+                slice_rows=slice_rows,
             ),
             tabs=tuple(
                 OperationsTabModel(
@@ -224,17 +240,88 @@ def _safe_tree_views(
 
 
 def _safe_list_snapshots(
-    service: OperationsContextRenderPort | None,
+    service: OperationsContextObservationSnapshotPort | None,
     *,
     limit: int,
     offset: int,
 ) -> tuple[tuple[Any, ...], str | None]:
     if service is None:
-        return (), "Context Render service is not available."
+        return (), "Context observation snapshot service is not available."
     try:
         return tuple(service.list_recent_snapshots(limit=limit, offset=offset)), None
     except Exception as exc:
         return (), str(exc)
+
+
+def _safe_operations_slice_rows(
+    builder: OperationsContextSliceBuilderPort | None,
+    workspaces: tuple[Any, ...],
+    snapshots: tuple[Any, ...],
+    *,
+    limit: int,
+) -> tuple[tuple[dict[str, str], ...], str | None]:
+    if builder is None:
+        return (), "Context Slice Builder service is not available."
+    latest_run_by_session = _latest_run_by_session(snapshots)
+    rows: list[dict[str, str]] = []
+    for workspace in workspaces:
+        session_key = _text(getattr(workspace, "session_key", ""))
+        if not session_key:
+            continue
+        run_id = latest_run_by_session.get(session_key, "")
+        try:
+            context_slice = builder.build_slice(
+                data=BuildContextObservationSliceInput(
+                    session_key=session_key,
+                    run_id=run_id,
+                    audience="operations_projection",
+                    metadata={"surface": "operations"},
+                ),
+            )
+        except ContextWorkspaceNotFoundError:
+            continue
+        except Exception as exc:
+            return tuple(rows), str(exc)
+        rows.append(_operations_slice_row(context_slice, session_key=session_key))
+        if len(rows) >= limit:
+            break
+    return tuple(rows), None
+
+
+def _latest_run_by_session(snapshots: tuple[Any, ...]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for snapshot in snapshots:
+        session_key = _text(getattr(snapshot, "session_key", ""))
+        run_id = _text(getattr(snapshot, "run_id", ""))
+        if session_key and run_id and session_key not in result:
+            result[session_key] = run_id
+    return result
+
+
+def _operations_slice_row(context_slice: Any, *, session_key: str) -> dict[str, str]:
+    payload = context_slice.to_payload()
+    report = _metadata(payload.get("report"))
+    loss = _metadata(report.get("loss"))
+    budget = _metadata(report.get("budget"))
+    items = payload.get("items")
+    active_tools = payload.get("active_tools")
+    return {
+        "id": _text(payload.get("slice_id")),
+        "slice": _short_text(_text(payload.get("slice_id")), max_length=32),
+        "audience": _text(payload.get("audience")),
+        "session": session_key,
+        "run": _short_text(_text(payload.get("run_id"))),
+        "revision": str(payload.get("tree_revision") or ""),
+        "items": str(len(items) if isinstance(items, (list, tuple)) else 0),
+        "active_tools": str(
+            len(active_tools) if isinstance(active_tools, (list, tuple)) else 0,
+        ),
+        "included": str(_metadata_int(report, "included_count")),
+        "omitted": str(_metadata_int(report, "omitted_count")),
+        "collapsed": str(_metadata_int(loss, "collapsed_ref_count")),
+        "unresolved": str(_metadata_int(loss, "unresolved_ref_count")),
+        "tokens": str(_metadata_int(budget, "text_tokens")),
+    }
 
 
 def _filter_workspaces(
@@ -293,7 +380,9 @@ def _workspace_rows(
     for workspace in workspaces:
         workspace_id = _text(getattr(workspace, "id", ""))
         nodes = _nodes_from_view(views_by_workspace.get(workspace_id))
-        prompt_nodes = [node for node in nodes if bool(getattr(node.state, "prompt_visible", False))]
+        snapshot_nodes = [
+            node for node in nodes if bool(getattr(node.state, "snapshot_visible", False))
+        ]
         rows.append(
             {
                 "id": workspace_id,
@@ -302,8 +391,10 @@ def _workspace_rows(
                 "status": _text(getattr(workspace, "status", "")),
                 "revision": str(getattr(workspace, "active_revision", "")),
                 "nodes": str(len(nodes)),
-                "prompt_nodes": str(len(prompt_nodes)),
-                "tokens": str(sum(_estimate_tokens(getattr(node, "estimate", None)) for node in prompt_nodes)),
+                "snapshot_nodes": str(len(snapshot_nodes)),
+                "tokens": str(
+                    sum(_estimate_tokens(getattr(node, "estimate", None)) for node in snapshot_nodes),
+                ),
                 "updated": _format_time(getattr(workspace, "updated_at", None)),
             },
         )
@@ -337,62 +428,65 @@ def _node_rows(
     return tuple(rows)
 
 
-def _investigation_warning_rows(
+def _node_status_rows(
     tree_views: tuple[Any, ...],
-    search: str,
     limit: int,
 ) -> tuple[dict[str, str], ...]:
-    rows: list[dict[str, str]] = []
+    grouped: dict[tuple[str, str, str], dict[str, int]] = defaultdict(
+        lambda: {
+            "total": 0,
+            "snapshot_visible": 0,
+            "collapsed": 0,
+            "pinned": 0,
+            "schema_enabled": 0,
+            "tokens": 0,
+        },
+    )
     for view in tree_views:
         workspace = getattr(view, "workspace", None)
         session_key = _text(getattr(workspace, "session_key", ""))
         for node in _nodes_from_view(view):
-            if _text(getattr(node, "kind", "")) != "investigation_warning":
-                continue
-            metadata = _metadata(getattr(node, "metadata", None))
-            owner_ref = _metadata(getattr(node, "owner_ref", None))
-            warning_types = _text_list(
-                metadata.get("warning_types") or owner_ref.get("warning_types"),
-            )
-            row = {
-                "id": f"{session_key}:{_text(getattr(node, 'id', ''))}",
+            owner = _text(getattr(node, "owner", "")) or "-"
+            kind = _text(getattr(node, "kind", "")) or "-"
+            state = getattr(node, "state", None)
+            bucket = grouped[(session_key, owner, kind)]
+            bucket["total"] += 1
+            bucket["tokens"] += _estimate_tokens(getattr(node, "estimate", None))
+            if bool(getattr(state, "snapshot_visible", False)):
+                bucket["snapshot_visible"] += 1
+            if bool(getattr(state, "collapsed", True)):
+                bucket["collapsed"] += 1
+            if bool(getattr(state, "pinned", False)):
+                bucket["pinned"] += 1
+            if bool(getattr(state, "schema_enabled", False)):
+                bucket["schema_enabled"] += 1
+
+    rows: list[dict[str, str]] = []
+    for (session_key, owner, kind), counts in sorted(
+        grouped.items(),
+        key=lambda item: (
+            item[0][0],
+            item[0][1],
+            item[0][2],
+        ),
+    ):
+        rows.append(
+            {
+                "id": f"{session_key}:{owner}:{kind}",
                 "session": session_key,
-                "warning_type": ", ".join(warning_types) or "-",
-                "code": _text(
-                    metadata.get("code") or owner_ref.get("code"),
-                    "browser_investigation_warning",
-                ),
-                "status": _text(
-                    metadata.get("severity") or owner_ref.get("severity"),
-                    "warning",
-                ),
-                "latest_tool": _text(
-                    metadata.get("latest_tool") or owner_ref.get("latest_tool"),
-                    "-",
-                ),
-                "latest_sequence": str(
-                    metadata.get("latest_sequence_no")
-                    or owner_ref.get("latest_sequence_no")
-                    or 0,
-                ),
-                "summary": _short_text(
-                    _text(getattr(node, "summary", "")),
-                    max_length=96,
-                ),
-                "updated": _format_time(getattr(node, "updated_at", None)),
-            }
-            if _row_matches_search(row, search):
-                rows.append(row)
-            if len(rows) >= limit:
-                return tuple(rows)
+                "owner": owner,
+                "kind": kind,
+                "total": str(counts["total"]),
+                "snapshot_visible": str(counts["snapshot_visible"]),
+                "collapsed": str(counts["collapsed"]),
+                "pinned": str(counts["pinned"]),
+                "schema_enabled": str(counts["schema_enabled"]),
+                "tokens": str(counts["tokens"]),
+            },
+        )
+        if len(rows) >= limit:
+            break
     return tuple(rows)
-
-
-def _investigation_warning_total(
-    tree_views: tuple[Any, ...],
-    search: str,
-) -> int:
-    return len(_investigation_warning_rows(tree_views, search, 10_000))
 
 
 def _snapshot_rows(
@@ -416,7 +510,7 @@ def _snapshot_rows(
                 "revision": str(getattr(snapshot, "tree_revision", "")),
                 "history": _text(metadata.get("history_delivery") or "-"),
                 "provider_messages": str(
-                    _metadata_int(metadata, "direct_transcript_message_count"),
+                    _metadata_int(metadata, "draft_input_message_count"),
                 ),
                 "tree_items": str(
                     _metadata_int(metadata, "tree_session_item_count"),
@@ -427,20 +521,6 @@ def _snapshot_rows(
                 "evidence": str(
                     _metadata_int(metadata, "tree_evidence_item_count"),
                 ),
-                "browser_warnings": str(
-                    _metadata_int(metadata, "browser_investigation_warning_count"),
-                ),
-                "browser_warning_types": _short_text(
-                    ", ".join(
-                        _text_list(
-                            metadata.get("browser_investigation_warning_types"),
-                        ),
-                    ),
-                    max_length=80,
-                ),
-                "terminal_fact_gap": "yes"
-                if bool(metadata.get("browser_evidence_path_no_terminal_fact"))
-                else "no",
                 "folded": str(_metadata_int(metadata, "folded_history_node_count")),
                 "session_tokens": str(
                     _metadata_int(metadata, "session_estimated_text_tokens"),
@@ -465,14 +545,14 @@ def _snapshot_rows(
                     len(tuple(getattr(snapshot, "mirrored_node_ids", ()))),
                 ),
                 "tokens": str(_estimate_tokens(getattr(snapshot, "estimate", None))),
-                "prompt_chars": str(len(_text(getattr(snapshot, "prompt_body", "")))),
+                "prompt_chars": str(len(_text(getattr(snapshot, "debug_body", "")))),
                 "created": _format_time(getattr(snapshot, "created_at", None)),
             },
         )
     return tuple(rows)
 
 
-def _prompt_budget_rows(
+def _context_budget_rows(
     snapshots: tuple[Any, ...],
     search: str,
     limit: int,
@@ -487,8 +567,8 @@ def _prompt_budget_rows(
                 "session": _text(getattr(snapshot, "session_key", "")),
                 "provider_tokens": str(_snapshot_provider_tokens(snapshot)),
                 "tree_tokens": str(_snapshot_rendered_tokens(snapshot)),
-                "direct_tokens": str(
-                    _metadata_int(metadata, "direct_transcript_estimated_tokens"),
+                "draft_input_tokens": str(
+                    _metadata_int(metadata, "draft_input_estimated_tokens"),
                 ),
                 "schema_tokens": str(
                     _metadata_int(metadata, "mirrored_tool_schema_estimated_tokens"),
@@ -500,7 +580,7 @@ def _prompt_budget_rows(
                     _metadata_int(metadata, "tool_schema_mirror_skipped_count"),
                 ),
                 "provider_messages": str(
-                    _metadata_int(metadata, "direct_transcript_message_count"),
+                    _metadata_int(metadata, "draft_input_message_count"),
                 ),
                 "mirrored_schemas": str(
                     len(tuple(getattr(snapshot, "mirrored_node_ids", ()))),
@@ -519,12 +599,14 @@ def _diagnostic_rows(
     workspace_error: str | None,
     tree_error: str | None,
     snapshot_error: str | None,
+    slice_error: str | None,
 ) -> tuple[dict[str, str], ...]:
     rows: list[dict[str, str]] = []
     for key, error in (
         ("workspaces", workspace_error),
         ("tree", tree_error),
-        ("render_snapshots", snapshot_error),
+        ("snapshots", snapshot_error),
+        ("observation_slices", slice_error),
     ):
         if error:
             rows.append(
@@ -544,17 +626,13 @@ def _metrics(
     workspaces: tuple[Any, ...],
     tree_views: tuple[Any, ...],
     snapshots: tuple[Any, ...],
+    slice_rows: tuple[dict[str, str], ...],
 ) -> tuple[MetricCardModel, ...]:
     nodes = tuple(node for view in tree_views for node in _nodes_from_view(view))
-    prompt_nodes = tuple(
-        node for node in nodes if bool(getattr(node.state, "prompt_visible", False))
+    snapshot_visible_nodes = tuple(
+        node for node in nodes if bool(getattr(node.state, "snapshot_visible", False))
     )
     pinned_nodes = tuple(node for node in nodes if bool(getattr(node.state, "pinned", False)))
-    investigation_warnings = tuple(
-        node
-        for node in nodes
-        if _text(getattr(node, "kind", "")) == "investigation_warning"
-    )
     token_total = sum(_snapshot_provider_tokens(snapshot) for snapshot in snapshots[:20])
     range_risk_count = sum(
         _snapshot_session_range_risk_count(snapshot)
@@ -573,7 +651,7 @@ def _metrics(
             "nodes",
             "Visible Nodes",
             str(len(nodes)),
-            f"{len(prompt_nodes)} prompt-visible",
+            f"{len(snapshot_visible_nodes)} snapshot-visible",
             "info",
         ),
         MetricCardModel(
@@ -584,22 +662,15 @@ def _metrics(
             "success" if pinned_nodes else "neutral",
         ),
         MetricCardModel(
-            "investigation_warnings",
-            "Investigation Warnings",
-            str(len(investigation_warnings)),
-            "browser no-gain signals",
-            "warning" if investigation_warnings else "success",
-        ),
-        MetricCardModel(
             "snapshots",
-            "Render Snapshots",
+            "Context Snapshots",
             str(len(snapshots)),
-            "recent prompt renders",
+            "recent context snapshots",
             "info",
         ),
         MetricCardModel(
             "snapshot_tokens",
-            "Provider Prompt Tokens",
+            "Provider Wire Tokens",
             str(token_total),
             "recent provider estimate",
             "info",
@@ -611,6 +682,13 @@ def _metrics(
             "recent hidden/split/blocked ranges",
             "warning" if range_risk_count else "success",
         ),
+        MetricCardModel(
+            "observation_slices",
+            "Observation Slices",
+            str(len(slice_rows)),
+            "operations projection slices",
+            "success" if slice_rows else "neutral",
+        ),
     )
 
 
@@ -618,7 +696,7 @@ def _health(
     *,
     workspace_service_available: bool,
     tree_service_available: bool,
-    render_service_available: bool,
+    observation_snapshot_service_available: bool,
     diagnostic_rows: tuple[dict[str, str], ...],
 ) -> str:
     if diagnostic_rows:
@@ -626,7 +704,7 @@ def _health(
     if not (
         workspace_service_available
         and tree_service_available
-        and render_service_available
+        and observation_snapshot_service_available
     ):
         return "warning"
     return "healthy"
@@ -699,7 +777,7 @@ def _node_state_label(node: Any) -> str:
         labels.append("pinned")
     if bool(getattr(state, "schema_enabled", False)):
         labels.append("schema")
-    labels.append("visible" if bool(getattr(state, "prompt_visible", False)) else "hidden")
+    labels.append("visible" if bool(getattr(state, "snapshot_visible", False)) else "hidden")
     labels.append("collapsed" if bool(getattr(state, "collapsed", True)) else "expanded")
     return ", ".join(labels)
 
@@ -765,7 +843,7 @@ def _snapshot_session_range_risk_count(snapshot: Any) -> int:
 
 def _snapshot_provider_tokens(snapshot: Any) -> int:
     metadata = _metadata(getattr(snapshot, "metadata", None))
-    value = _metadata_int(metadata, "estimated_provider_prompt_tokens")
+    value = _metadata_int(metadata, "estimated_provider_input_tokens")
     if value:
         return value
     return _estimate_tokens(getattr(snapshot, "estimate", None))
@@ -773,10 +851,10 @@ def _snapshot_provider_tokens(snapshot: Any) -> int:
 
 def _snapshot_rendered_tokens(snapshot: Any) -> int:
     metadata = _metadata(getattr(snapshot, "metadata", None))
-    value = _metadata_int(metadata, "rendered_prompt_estimated_tokens")
+    value = _metadata_int(metadata, "debug_body_estimated_tokens")
     if value:
         return value
-    rendered_estimate = metadata.get("rendered_prompt_estimate")
+    rendered_estimate = metadata.get("debug_body_estimate")
     if isinstance(rendered_estimate, dict):
         return _metadata_int(rendered_estimate, "text_tokens")
     return _estimate_tokens(getattr(snapshot, "estimate", None))

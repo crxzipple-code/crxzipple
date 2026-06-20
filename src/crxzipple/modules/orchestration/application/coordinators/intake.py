@@ -170,8 +170,8 @@ class RunIntakeCoordinator:
             run.bind_session(
                 active_session_id=plan.active_session_id,
             )
-            if plan.prompt_flow_hint is not None:
-                run.metadata["prompt_flow_hint"] = dict(plan.prompt_flow_hint)
+            if plan.runtime_request_flow_hint is not None:
+                run.metadata["runtime_request_flow_hint"] = dict(plan.runtime_request_flow_hint)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()

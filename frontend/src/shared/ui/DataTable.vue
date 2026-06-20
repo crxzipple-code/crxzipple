@@ -868,7 +868,6 @@ const textKeys: Record<string, string> = {
   "observed": "operations.events.status.observed",
   "resolved": "text.resolved",
   "intake": "text.stepKind.intake",
-  "prompt_render": "text.stepKind.promptRender",
   "llm": "text.stepKind.llm",
   "tool_batch": "text.stepKind.toolBatch",
   "approval": "text.stepKind.approval",

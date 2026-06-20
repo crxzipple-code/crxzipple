@@ -2,58 +2,18 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends
 
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.interfaces.http.ui_models import (
     ConsoleSectionResponse,
-    TraceEventResponse,
-    TraceSummaryResponse,
-    TurnStepResponse,
     UiBootstrapResponse,
-    WorkbenchHomeResponse,
-    WorkbenchLinkedEntityDetailResponse,
-    WorkbenchRunResponse,
-)
-from crxzipple.modules.orchestration.application.read_models import (
-    WorkbenchReadModelProvider,
-)
-from crxzipple.modules.orchestration.domain import OrchestrationRunNotFoundError
-from crxzipple.modules.events.application import EventTraceReadModelProvider
-from crxzipple.modules.llm.domain import LlmResponseItemNotFoundError
-from crxzipple.modules.session.domain import (
-    SessionItemNotFoundError,
 )
 from crxzipple.shared.runtime_console import ConsoleSection
 
 
 router = APIRouter()
-
-
-def _workbench_provider(container: AppContainer) -> WorkbenchReadModelProvider:
-    return WorkbenchReadModelProvider(
-        run_query=container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
-        tool_query=container.require(AppKey.TOOL_QUERY_SERVICE),
-        artifact_query=container.require(AppKey.ARTIFACT_SERVICE),
-        llm_query=container.require(AppKey.LLM_SERVICE),
-        agent_query=container.require(AppKey.AGENT_SERVICE),
-        session_query=container.require(AppKey.SESSION_SERVICE),
-    )
-
-
-def _trace_provider(container: AppContainer) -> EventTraceReadModelProvider:
-    if container.require(AppKey.EVENTS_SERVICE) is None:
-        raise HTTPException(status_code=503, detail="Event service is not available.")
-    return EventTraceReadModelProvider(
-        events_service=container.require(AppKey.EVENTS_SERVICE),
-        definition_registry=container.require(AppKey.EVENT_DEFINITION_REGISTRY),
-    )
-
-
-def _not_found(exc: OrchestrationRunNotFoundError) -> HTTPException:
-    return HTTPException(status_code=404, detail=str(exc))
-
 
 @router.get("/bootstrap", response_model=UiBootstrapResponse)
 def bootstrap(
@@ -62,7 +22,7 @@ def bootstrap(
     sections = [
         ConsoleSection(
             id="workbench",
-            owner="orchestration",
+            owner="workbench",
             status="ready",
             updated_at=None,
             data={"preferred_refresh": "sse+query"},
@@ -96,9 +56,19 @@ def bootstrap(
             "/authorization/policies/impact",
             "/authorization/audits",
             "/ui/workbench/home",
+            "/ui/workbench/turns",
+            "/ui/workbench/turns/{run_id}/cancel",
+            "/ui/workbench/turns/{run_id}/approvals/{request_id}",
             "/ui/workbench/runs/{run_id}",
             "/ui/workbench/runs/{run_id}/steps",
             "/ui/workbench/linked-entities/{entity_type}/{entity_id}",
+            "/ui/workbench/context-tree/by-session/{session_key}",
+            "/ui/workbench/context-tree/by-session/{session_key}/nodes/{node_id}/actions/{action}",
+            "/ui/workbench/context-snapshots/runs/{run_id}",
+            "/ui/workbench/context-snapshots/{snapshot_id}",
+            "/ui/workbench/runs/{run_id}/llm-request-preview",
+            "/ui/workbench/llm-invocations/{invocation_id}/llm-request-preview",
+            "/workbench/traces/{trace_id}",
             "/operations/orchestration",
             "/operations/tool",
             "/operations/browser",
@@ -127,6 +97,7 @@ def bootstrap(
             "/operations/channels/dead-letters/{channel_type}/replay",
             "/operations/memory/long-term",
             "/operations/llm/invocations/{invocation_id}/detail",
+            "/operations/llm/profiles/{llm_id}/warmup",
             "/operations/orchestration/runs/{run_id}/cancel",
             "/operations/orchestration/runs/{run_id}/resume",
             "/operations/tool/runs/{run_id}/detail",
@@ -145,7 +116,7 @@ def bootstrap(
             "/operations/skills/install",
             "/turns",
             "/turns/{run_id}",
-            "/turns/{run_id}/prompt-preview",
+            "/turns/{run_id}/llm-request-preview",
             "/turns/{run_id}/compact",
             "/turns/{run_id}/heartbeat",
             "/turns/{run_id}/memory-flush",
@@ -155,166 +126,3 @@ def bootstrap(
         ],
         sections=[ConsoleSectionResponse.from_value(item) for item in sections],
     )
-
-
-@router.get("/workbench/home", response_model=WorkbenchHomeResponse)
-def get_workbench_home(
-    container: Annotated[AppContainer, Depends(get_container)],
-    run_id: str | None = Query(default=None),
-    session_key: str | None = Query(default=None),
-) -> WorkbenchHomeResponse:
-    view = _workbench_provider(container).get_home_view(
-        run_id=run_id,
-        session_key=session_key,
-    )
-    return WorkbenchHomeResponse.from_view(view)
-
-
-@router.get("/workbench/runs/{run_id}", response_model=WorkbenchRunResponse)
-def get_workbench_run(
-    run_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> WorkbenchRunResponse:
-    try:
-        view = _workbench_provider(container).get_run_view(run_id)
-    except OrchestrationRunNotFoundError as exc:
-        raise _not_found(exc) from None
-    return WorkbenchRunResponse.from_view(view)
-
-
-@router.get("/workbench/runs/{run_id}/steps", response_model=list[TurnStepResponse])
-def list_workbench_run_steps(
-    run_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> list[TurnStepResponse]:
-    try:
-        views = _workbench_provider(container).list_step_views(run_id)
-    except OrchestrationRunNotFoundError as exc:
-        raise _not_found(exc) from None
-    return [TurnStepResponse.from_view(view) for view in views]
-
-
-@router.get(
-    "/workbench/linked-entities/{entity_type}/{entity_id}",
-    response_model=WorkbenchLinkedEntityDetailResponse,
-)
-def get_workbench_linked_entity_detail(
-    entity_type: str,
-    entity_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> WorkbenchLinkedEntityDetailResponse:
-    if entity_type in {"llm_response_item", "llm_response_item_id"}:
-        llm_service = container.require(AppKey.LLM_SERVICE)
-        try:
-            item = llm_service.get_response_item(entity_id)
-        except LlmResponseItemNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        payload = item.to_payload()
-        return WorkbenchLinkedEntityDetailResponse(
-            type="llm_response_item",
-            id=item.id,
-            owner="llm",
-            label=f"{item.kind.value} #{item.sequence_no}",
-            summary=_entity_detail_summary(payload),
-            payload=payload,
-        )
-    session_service = container.require(AppKey.SESSION_SERVICE)
-    if entity_type == "session_item":
-        try:
-            item = session_service.get_item(entity_id)
-        except SessionItemNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        payload = item.to_payload()
-        return WorkbenchLinkedEntityDetailResponse(
-            type="session_item",
-            id=item.id,
-            owner="session",
-            label=f"{item.kind.value} #{item.sequence_no}",
-            summary=_entity_detail_summary(payload),
-            payload=payload,
-        )
-    raise HTTPException(status_code=404, detail=f"Unsupported entity type '{entity_type}'.")
-
-
-@router.get("/trace/{trace_id}", response_model=TraceSummaryResponse)
-def get_trace_summary(
-    trace_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-    step_id: str | None = Query(default=None),
-    limit: Annotated[int, Query(ge=1, le=500)] = 200,
-) -> TraceSummaryResponse:
-    aliases = _trace_aliases(container, trace_id)
-    view = _trace_provider(container).get_trace(
-        trace_id,
-        aliases=aliases,
-        step_id=step_id,
-        limit=limit,
-    )
-    return TraceSummaryResponse.from_view(view)
-
-
-@router.get("/trace/{trace_id}/events", response_model=list[TraceEventResponse])
-def list_trace_events(
-    trace_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-    step_id: str | None = Query(default=None),
-    limit: Annotated[int, Query(ge=1, le=500)] = 200,
-) -> list[TraceEventResponse]:
-    aliases = _trace_aliases(container, trace_id)
-    views = _trace_provider(container).list_trace_events(
-        trace_id,
-        aliases=aliases,
-        step_id=step_id,
-        limit=limit,
-    )
-    return [TraceEventResponse.from_view(view) for view in views]
-
-
-def _entity_detail_summary(payload: dict[str, object]) -> str:
-    content = payload.get("content_payload")
-    if isinstance(content, dict):
-        text = content.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()[:240]
-        blocks = content.get("blocks")
-        if isinstance(blocks, list):
-            texts = [
-                block.get("text", "").strip()
-                for block in blocks
-                if isinstance(block, dict) and isinstance(block.get("text"), str)
-            ]
-            joined = " ".join(text for text in texts if text)
-            if joined:
-                return joined[:240]
-        tool_name = content.get("tool_name") or content.get("name")
-        if isinstance(tool_name, str) and tool_name.strip():
-            return tool_name.strip()
-    for key in ("tool_name", "provider_item_type", "kind", "role"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return str(payload.get("kind") or payload.get("role") or "entity")
-
-
-def _trace_aliases(container: AppContainer, trace_id: str) -> set[str]:
-    normalized = trace_id.strip()
-    aliases = {normalized} if normalized else set()
-    if not normalized:
-        return aliases
-    for run in container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).list_runs():
-        metadata_trace_id = run.metadata.get("trace_id")
-        metadata_correlation_id = run.metadata.get("correlation_id")
-        if normalized in {
-            run.id,
-            run.session_key,
-            metadata_trace_id if isinstance(metadata_trace_id, str) else None,
-            metadata_correlation_id if isinstance(metadata_correlation_id, str) else None,
-        }:
-            aliases.add(run.id)
-            if run.session_key is not None:
-                aliases.add(run.session_key)
-            if isinstance(metadata_trace_id, str) and metadata_trace_id.strip():
-                aliases.add(metadata_trace_id.strip())
-            if isinstance(metadata_correlation_id, str) and metadata_correlation_id.strip():
-                aliases.add(metadata_correlation_id.strip())
-    return aliases

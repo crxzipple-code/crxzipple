@@ -90,6 +90,7 @@ def build_application_registry(
     *,
     target: AssemblyTarget | str,
     overrides: Mapping[str, object] | None = None,
+    run_activation_tasks: bool = True,
 ) -> ApplicationRegistry:
     """Build a registry for one target, failing before partial integration."""
 
@@ -99,7 +100,11 @@ def build_application_registry(
         plan.factories_for(resolved_target),
         override_values,
     )
-    activation_tasks = plan.activation_tasks_for(resolved_target)
+    activation_tasks = (
+        plan.activation_tasks_for(resolved_target)
+        if run_activation_tasks
+        else ()
+    )
 
     provider_by_key = _provider_map(factories)
     build_order = _resolve_factory_order(factories, provider_by_key, override_values)

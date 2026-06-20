@@ -656,7 +656,7 @@ web.fetch_json
 落点：
 
 - `src/crxzipple/app/integration/context_workspace_orchestration/snapshot_metadata.py`
-- `src/crxzipple/modules/orchestration/application/provider_request.py`
+- `src/crxzipple/modules/orchestration/application/runtime_llm_request.py`
 - `src/crxzipple/modules/operations/application/read_models/orchestration.py`
 - `frontend/src/pages/trace/TracePage.vue`
 - `frontend/src/pages/workbench/WorkbenchPage.vue`

@@ -486,7 +486,7 @@ function openAccessSettings() {
 }
 
 function openTrace() {
-  void router.push("/trace");
+  void router.push("/workbench/traces");
 }
 
 async function refreshPage() {

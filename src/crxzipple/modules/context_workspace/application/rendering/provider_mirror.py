@@ -56,6 +56,8 @@ class ToolSurfacePolicy:
         tool_id = node.owner_ref.get("tool_id")
         if isinstance(tool_id, str) and tool_id.startswith("context_tree."):
             return 0
+        if node.state.schema_enabled:
+            return 10
         if enabled_by_default:
             for key in (schema_name, tool_id, node.id):
                 if isinstance(key, str) and key in self.default_schema_priorities:
@@ -133,11 +135,11 @@ def render_provider_attachments(
     for index, node in enumerate(nodes):
         if node.owner != "tool" or node.kind != "tool_function":
             continue
-        if isinstance(node.metadata.get("provider_schema"), dict):
+        schema = _tool_node_provider_schema_for_observation(node)
+        if schema is not None:
             tool_schema_mirror_available = True
             tool_schema_budget["available_count"] += 1
-        schema = node.metadata.get("provider_schema")
-        if not isinstance(schema, dict):
+        if schema is None:
             continue
         schema_name = schema.get("name")
         if not isinstance(schema_name, str) or not schema_name.strip():
@@ -293,6 +295,28 @@ def provider_tool_schemas(value: object) -> tuple[dict[str, object], ...]:
     if not isinstance(value, list):
         return ()
     return tuple(dict(item) for item in value if isinstance(item, dict))
+
+
+def _tool_node_provider_schema_for_observation(
+    node: ContextNode,
+) -> dict[str, object] | None:
+    schema = node.metadata.get("provider_schema")
+    if isinstance(schema, dict):
+        return dict(schema)
+    schema_name = _metadata_text(node.owner_ref.get("tool_id")) or _metadata_text(
+        node.owner_ref.get("function_id"),
+    )
+    if schema_name is None:
+        return None
+    description = node.summary.strip() or node.title.strip() or schema_name
+    return {
+        "name": schema_name,
+        "description": description,
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    }
 
 
 def default_tool_schema_ids_from_metadata(metadata: dict[str, object]) -> frozenset[str]:
@@ -494,7 +518,7 @@ def record_tool_schema_group_visibility(
         )
         if is_default_group:
             default_count += 1
-        if node.state.prompt_visible:
+        if node.state.snapshot_visible:
             visible_count += 1
         if node.state.collapsed:
             collapsed_count += 1

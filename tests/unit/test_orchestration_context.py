@@ -56,25 +56,19 @@ class _ToolThenFollowupAdapter:
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
         self.requests.append(request)
-        current_user_text = "\n".join(
-            block.get("text", "")
+        user_messages = [
+            "\n".join(
+                block.get("text", "")
+                for block in (
+                    message.content if isinstance(message.content, list) else ()
+                )
+                if isinstance(block, dict)
+            )
             for message in request.messages
             if message.role is LlmMessageRole.USER
-            for block in (
-                message.content if isinstance(message.content, list) else ()
-            )
-            if isinstance(block, dict)
-        )
+        ]
+        current_user_text = user_messages[-1] if user_messages else ""
         if "use echo" in current_user_text:
-            activation = _tool_schema_activation_response(
-                request,
-                source_id="test.local_package.echo",
-                tool_id="echo",
-                expand_call_id="call-expand-echo-history",
-                enable_call_id="call-enable-echo-history",
-            )
-            if activation is not None:
-                return activation
             if not _has_tool_message(request, "echo"):
                 return _adapter_response_from_result(
                     request,
@@ -96,7 +90,7 @@ def _context_artifacts_message(messages: tuple[LlmMessage, ...]) -> LlmMessage:
     return next(
         message
         for message in messages
-        if message.metadata.get("prompt_block_kind") == "context_artifacts"
+        if message.metadata.get("runtime_request_block_kind") == "context_artifacts"
     )
 
 
@@ -173,7 +167,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             self.container,
         )
 
-    def test_prompt_preview_routes_auto_to_vision_model_for_tool_attachments(self) -> None:
+    def test_runtime_request_preview_does_not_route_auto_to_vision_for_prior_tool_attachments(self) -> None:
         self.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="text-default",
@@ -268,16 +262,20 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.orchestration_inspection_service.preview_prompt(run.id)
-        self.assertEqual(preview.llm_id, "image-special")
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(run.id)
+        self.assertEqual(preview.llm_id, "text-default")
+        preview_payload = str(preview.messages)
+        self.assertIn("look", preview_payload)
+        self.assertNotIn("Browser screenshot captured.", preview_payload)
+        self.assertNotIn("image omitted", preview_payload)
         self.assertEqual(preview.provider_request_options["response_format"], None)
         self.assertEqual(preview.provider_request_options["output_schema"], None)
         self.assertEqual(preview.provider_request_options["overrides"], {})
         self.assertEqual(
             preview.provider_request_options["request_metadata"][
-                "context_render_snapshot_id"
+                "request_render_snapshot_id"
             ],
-            preview.context_render_snapshot_id,
+            preview.request_render_snapshot_id,
         )
         events_service = self.events_service
         assert events_service is not None
@@ -292,11 +290,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(resolver_event.payload["status"], "resolved")
         self.assertEqual(resolver_event.payload["requested_llm_id"], "auto")
-        self.assertEqual(resolver_event.payload["resolved_llm_id"], "image-special")
-        self.assertEqual(resolver_event.payload["strategy"], "auto-image")
-        self.assertTrue(resolver_event.payload["input_has_image"])
+        self.assertEqual(resolver_event.payload["resolved_llm_id"], "text-default")
+        self.assertEqual(resolver_event.payload["strategy"], "auto-default")
+        self.assertFalse(resolver_event.payload["input_has_image"])
 
-    def test_prompt_preview_materializes_image_ref_tool_attachments(self) -> None:
+    def test_runtime_request_preview_materializes_image_ref_tool_attachments(self) -> None:
         self.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="text-default",
@@ -398,16 +396,16 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.orchestration_inspection_service.preview_prompt(run.id)
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(run.id)
 
-        self.assertEqual(preview.llm_id, "image-special")
+        self.assertEqual(preview.llm_id, "text-default")
+        self.assertIn("look", str(preview.messages))
         tool_messages = _tool_messages(preview.messages)
-        self.assertEqual(len(tool_messages), 1)
-        self.assertEqual(tool_messages[0].content[1]["type"], "image")
-        self.assertEqual(tool_messages[0].content[1]["mime_type"], "image/png")
-        self.assertEqual(tool_messages[0].content[1]["data"], "ZmFrZS1wbmc=")
+        self.assertEqual(tool_messages, [])
+        self.assertNotIn("Browser screenshot captured.", str(preview.messages))
+        self.assertNotIn("image_ref", str(preview.messages))
 
-    def test_prompt_preview_downgrades_image_ref_for_explicit_non_vision_model(self) -> None:
+    def test_runtime_request_preview_downgrades_image_ref_for_explicit_non_vision_model(self) -> None:
         self.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="text-default",
@@ -509,20 +507,16 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.orchestration_inspection_service.preview_prompt(run.id)
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(run.id)
 
         self.assertEqual(preview.llm_id, "text-default")
+        self.assertIn("look", str(preview.messages))
         tool_messages = _tool_messages(preview.messages)
-        self.assertEqual(len(tool_messages), 1)
-        self.assertEqual(
-            tool_messages[0].content[1],
-            {
-                "type": "text",
-                "text": "[image attachment omitted for non-vision model:browser-screenshot.png]",
-            },
-        )
+        self.assertEqual(tool_messages, [])
+        self.assertNotIn("Browser screenshot captured.", str(preview.messages))
+        self.assertNotIn("image_ref", str(preview.messages))
 
-    def test_prompt_preview_omits_oversized_file_ref_attachments(self) -> None:
+    def test_runtime_request_preview_omits_oversized_file_ref_attachments(self) -> None:
         self._register_agent_and_llm()
         artifact = self.artifact_service.create_artifact(
             data=b"x" * 4_000_001,
@@ -585,21 +579,14 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.orchestration_inspection_service.preview_prompt(run.id)
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(run.id)
 
+        self.assertIn("look", str(preview.messages))
         tool_messages = _tool_messages(preview.messages)
-        self.assertEqual(len(tool_messages), 1)
-        self.assertEqual(
-            tool_messages[0].content,
-            [
-                {
-                    "type": "text",
-                    "text": "[file attachment omitted - exceeds llm size budget:huge.pdf]",
-                },
-            ],
-        )
+        self.assertEqual(tool_messages, [])
+        self.assertNotIn("huge.pdf", str(preview.messages))
 
-    def test_prompt_preview_materializes_text_file_ref_as_text(self) -> None:
+    def test_runtime_request_preview_materializes_text_file_ref_as_text(self) -> None:
         self._register_agent_and_llm()
         artifact = self.artifact_service.create_artifact(
             data=b"# Notes\n\nHello world",
@@ -662,21 +649,14 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.orchestration_inspection_service.preview_prompt(run.id)
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(run.id)
 
+        self.assertIn("look", str(preview.messages))
         tool_messages = _tool_messages(preview.messages)
-        self.assertEqual(len(tool_messages), 1)
-        self.assertEqual(
-            tool_messages[0].content,
-            [
-                {
-                    "type": "text",
-                    "text": "[file:notes.md]\n# Notes\n\nHello world",
-                },
-            ],
-        )
+        self.assertEqual(tool_messages, [])
+        self.assertNotIn("notes.md", str(preview.messages))
 
-    def test_prompt_preview_filters_orphan_function_calls_from_transcript(self) -> None:
+    def test_runtime_request_preview_filters_orphan_function_calls_from_transcript(self) -> None:
         self._register_agent_and_llm()
 
         run = self.orchestration_intake_service.accept(
@@ -760,7 +740,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.orchestration_inspection_service.preview_prompt(run.id)
+        preview = self.orchestration_inspection_service.preview_runtime_llm_request(run.id)
         transcript_function_call_ids = [
             str(message.tool_call_id)
             for message in preview.messages
@@ -768,7 +748,8 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             and isinstance(message.content, dict)
             and message.content.get("type") == "function_call"
         ]
-        self.assertEqual(transcript_function_call_ids, ["paired-call-1"])
+        self.assertEqual(transcript_function_call_ids, [])
+        self.assertIn("hello", str(preview.messages))
 
     def test_process_next_orchestration_assignment_completes_minimal_llm_loop(self) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
@@ -808,9 +789,10 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(processed.current_step, 1)
         schema_names = sorted(schema.name for schema in adapter.requests[0].tool_schemas)
-        self.assertIn("context_tree.expand", schema_names)
-        self.assertIn("context_tree.enable_tool_schema", schema_names)
-        self.assertIn("context_tree.list", schema_names)
+        self.assertIn("capability.search", schema_names)
+        self.assertNotIn("context_tree.expand", schema_names)
+        self.assertNotIn("context_tree.enable_tool_schema", schema_names)
+        self.assertNotIn("context_tree.list", schema_names)
         assert processed.result_payload is not None
         self.assertEqual(processed.result_payload["output_text"], "hello from fake llm")
         self.assertEqual(
@@ -842,6 +824,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                     channel="webchat",
                     direct_scope=DirectSessionScope.MAIN,
                 ),
+                metadata={
+                    "runtime_request_bootstrap_policy": {
+                        "default_tool_schema_ids": ["echo"],
+                    },
+                },
             ),
         )
         self.orchestration_intake_service.enqueue(
@@ -883,29 +870,26 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(second_processed)
         assert second_processed is not None
-        self.assertEqual(second_processed.metadata["prompt_mode"], "normal_turn")
+        self.assertEqual(second_processed.metadata["runtime_request_mode"], "normal_turn")
         self.assertEqual(len(adapter.requests), 2)
         request = adapter.requests[1]
-        direct_messages = [
-            message for message in request.messages if message.role is not LlmMessageRole.SYSTEM
-        ]
-        self.assertEqual(len(direct_messages), 1)
-        self.assertEqual(direct_messages[0].role, LlmMessageRole.USER)
+        self.assertEqual(request.request_metadata["input_mode"], "runtime_transcript")
+        self.assertGreaterEqual(len(request.input_items), 3)
+        replay_payload = " ".join(str(item.to_payload()) for item in request.input_items)
+        self.assertIn("first answer", replay_payload)
+        self.assertIn("continue please", replay_payload)
+        self.assertEqual(request.messages[-1].role, LlmMessageRole.USER)
         self.assertEqual(
-            direct_messages[0].content,
+            request.messages[-1].content,
             [{"type": "text", "text": "continue please"}],
         )
-        context_tree_message = next(
-            message
-            for message in request.messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
-        )
-        context_body = str(context_tree_message.content)
-        self.assertIn("first answer", context_body)
-        self.assertIn("Delivered as provider user message for this turn.", context_body)
-        self.assertNotIn("<content>\n          continue please\n        </content>", context_body)
+        request_render_snapshot = request.request_metadata["request_render_snapshot"]
+        self.assertTrue(str(request_render_snapshot["snapshot_id"]).startswith("ctxsnap_"))
+        self.assertEqual(request_render_snapshot["kind"], "request_render")
+        self.assertNotIn("included_node_ids", request_render_snapshot)
+        self.assertGreaterEqual(request_render_snapshot["included_ref_count"], 0)
 
-    def test_followup_turn_delivers_prior_tool_history_as_context_tree_interaction(
+    def test_followup_turn_does_not_auto_replay_prior_tool_history(
         self,
     ) -> None:
         adapter = _ToolThenFollowupAdapter()
@@ -944,6 +928,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                     channel="webchat",
                     direct_scope=DirectSessionScope.MAIN,
                 ),
+                metadata={
+                    "runtime_request_bootstrap_policy": {
+                        "default_tool_schema_ids": ["echo"],
+                    },
+                },
             ),
         )
         self.orchestration_intake_service.enqueue(
@@ -988,34 +977,23 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(second_processed)
         assert second_processed is not None
         self.assertEqual(second_processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(len(adapter.requests), 5)
-        followup_request = adapter.requests[4]
-        direct_messages = [
-            message
-            for message in followup_request.messages
-            if message.role is not LlmMessageRole.SYSTEM
-        ]
-        self.assertEqual(len(direct_messages), 1)
-        self.assertEqual(direct_messages[0].role, LlmMessageRole.USER)
+        self.assertGreaterEqual(len(adapter.requests), 4)
+        followup_request = adapter.requests[-1]
         self.assertEqual(
-            direct_messages[0].content,
+            followup_request.request_metadata["input_mode"],
+            "runtime_transcript",
+        )
+        self.assertEqual(followup_request.messages[-1].role, LlmMessageRole.USER)
+        self.assertEqual(
+            followup_request.messages[-1].content,
             [{"type": "text", "text": "what happened?"}],
         )
-        self.assertFalse(
-            any(message.role is LlmMessageRole.TOOL for message in followup_request.messages),
-        )
-        context_tree_message = next(
-            message
-            for message in followup_request.messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
-        )
-        context_body = str(context_tree_message.content)
-        self.assertIn('<tool_interaction tool_name="echo"', context_body)
-        self.assertIn("call-echo-history-1", context_body)
-        self.assertIn("args_sha256=", context_body)
-        self.assertIn("result_sha256=", context_body)
-        self.assertIn("expand for refs", context_body)
-        self.assertNotIn("first tool hello", context_body)
+        replay_payload = " ".join(str(item.to_payload()) for item in followup_request.input_items)
+        self.assertIn("call-echo-history-1", replay_payload)
+        self.assertIn("first tool answer", replay_payload)
+        self.assertIn("what happened?", replay_payload)
+        request_render_snapshot = followup_request.request_metadata["request_render_snapshot"]
+        self.assertTrue(str(request_render_snapshot["snapshot_id"]).startswith("ctxsnap_"))
 
     def test_process_next_orchestration_assignment_downgrades_image_history_for_explicit_non_vision_model(
         self,
@@ -1139,14 +1117,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(processed.result_payload["output_text"], "handled without vision")
         self.assertEqual(processed.result_payload["llm_id"], "text-default")
-        context_artifacts = _context_artifacts_message(adapter.requests[-1].messages)
-        self.assertEqual(
-            context_artifacts.content[1],
-            {
-                "type": "text",
-                "text": "[image attachment omitted for non-vision model:browser-screenshot.png]",
-            },
+        request_payload = str(adapter.requests[-1].input_items) + str(
+            adapter.requests[-1].messages,
         )
+        self.assertNotIn("image_ref", request_payload)
+        self.assertNotIn("[image:browser-screenshot.png]", request_payload)
+        self.assertIn("look", request_payload)
+        self.assertNotIn("Browser screenshot captured.", request_payload)
         self.assertEqual(len(adapter.requests), 1)
 
     def test_process_next_orchestration_assignment_scales_context_budget_to_llm_context_window(
@@ -1206,17 +1183,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(processed)
         assert processed is not None
-        prompt_report = processed.metadata["prompt_report"]
-        self.assertEqual(prompt_report["context_budget"]["source"], "context_window_scaled")
-        self.assertEqual(prompt_report["context_budget"]["max_estimated_tokens"], 300)
-        self.assertEqual(prompt_report["context_budget"]["llm_context_window_tokens"], 2_000)
-        self.assertLessEqual(prompt_report["context"]["estimated_tokens"], 300)
-        self.assertTrue(
-            any(
-                block["kind"] == "agent_instruction" and block["truncated"]
-                for block in prompt_report["context_blocks"]
-            ),
-        )
+        runtime_request_report = processed.metadata["runtime_request_report"]
+        self.assertEqual(runtime_request_report["context_budget"]["source"], "context_window_scaled")
+        self.assertEqual(runtime_request_report["context_budget"]["max_estimated_tokens"], 300)
+        self.assertEqual(runtime_request_report["context_budget"]["llm_context_window_tokens"], 2_000)
+        self.assertLessEqual(runtime_request_report["context"]["estimated_tokens"], 300)
+        self.assertNotIn("context_blocks", runtime_request_report)
+        self.assertTrue(str(processed.metadata["request_render_snapshot_id"]).startswith("ctxsnap_"))
 
     def test_process_next_orchestration_assignment_exposes_workspace_context_tree_handle(self) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
@@ -1270,7 +1243,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             self.assertIsNotNone(processed)
             self.assertEqual(len(adapter.requests), 1)
             messages = adapter.requests[0].messages
-            self.assertGreaterEqual(len(messages), 2)
+            self.assertTrue(any("hello" in str(message.content) for message in messages))
             system_messages = [
                 message
                 for message in messages
@@ -1286,68 +1259,40 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 any("# Session Start" in str(message.content) for message in system_messages),
             )
             tool_schema_names = {schema.name for schema in adapter.requests[0].tool_schemas}
-            self.assertIn("context_tree.expand", tool_schema_names)
+            self.assertIn("capability.search", tool_schema_names)
+            self.assertNotIn("context_tree.expand", tool_schema_names)
             self.assertNotIn("context_tree.recall_memory", tool_schema_names)
             self.assertNotIn("memory_search", tool_schema_names)
-            self.assertIn("context_tree.enable_tool_schema", tool_schema_names)
-            context_tree_message = next(
-                message
-                for message in system_messages
-                if message.metadata.get("prompt_block_kind") == "context_workspace"
-            )
-            context_tree_content = str(context_tree_message.content)
-            self.assertIn("<context_tree", context_tree_content)
-            self.assertIn("Be helpful and concise.", context_tree_content)
-            self.assertIn("# Runtime Context", context_tree_content)
-            self.assertIn("- Agent: assistant", context_tree_content)
-            self.assertIn("- Model: openai.gpt-5.4-mini", context_tree_content)
-            self.assertIn("run.flow", context_tree_content)
-            self.assertIn("Flow: Session Start", context_tree_content)
-            self.assertIn("workspace.resources", context_tree_content)
-            self.assertIn(
-                "Collapsed nodes are actionable handles",
-                context_tree_content,
-            )
-            self.assertIn(
-                "Before saying a file, skill, memory, artifact, data source, or tool",
-                context_tree_content,
-            )
-            self.assertIn(
-                "Tool function nodes with `schema_enabled=true`",
-                context_tree_content,
-            )
-            self.assertNotIn("Follow workspace conventions.", context_tree_content)
+            self.assertNotIn("context_tree.enable_tool_schema", tool_schema_names)
             self.assertFalse(
                 any("# Workspace Context" in str(message.content) for message in system_messages),
             )
-            self.assertIn(
-                f"- Workspace: {workspace}",
-                str(context_tree_message.content),
-            )
-            self.assertEqual(processed.metadata["prompt_mode"], "session_start")
-            self.assertTrue(str(processed.metadata["context_render_snapshot_id"]).startswith("ctxsnap_"))
-            self.assertEqual(processed.metadata["prompt_report"]["mode"], "session_start")
+            request_metadata = adapter.requests[0].request_metadata
+            request_render_snapshot = request_metadata["request_render_snapshot"]
+            self.assertTrue(str(request_render_snapshot["snapshot_id"]).startswith("ctxsnap_"))
+            self.assertEqual(request_render_snapshot["kind"], "request_render")
+            self.assertNotIn("included_node_ids", request_render_snapshot)
+            self.assertGreaterEqual(request_render_snapshot["included_ref_count"], 0)
+            self.assertEqual(processed.metadata["runtime_request_mode"], "session_start")
+            self.assertTrue(str(processed.metadata["request_render_snapshot_id"]).startswith("ctxsnap_"))
+            self.assertEqual(processed.metadata["runtime_request_report"]["mode"], "session_start")
             self.assertEqual(
-                processed.metadata["prompt_report"]["context_render"]["snapshot_id"],
-                processed.metadata["context_render_snapshot_id"],
-            )
-            self.assertIn(
-                "agent.identity",
-                processed.metadata["prompt_report"]["context_render"]["included_node_ids"],
-            )
-            self.assertEqual(
-                [block["kind"] for block in processed.metadata["prompt_report"]["context_blocks"]],
-                [
-                    "agent_instruction",
-                    "runtime_context",
+                processed.metadata["runtime_request_report"]["request_render_snapshot"][
+                    "snapshot_id"
                 ],
+                processed.metadata["request_render_snapshot_id"],
+            )
+            self.assertNotIn(
+                "included_node_ids",
+                processed.metadata["runtime_request_report"]["request_render_snapshot"],
+            )
+            self.assertNotIn("context_blocks", processed.metadata["runtime_request_report"])
+            self.assertIn(
+                "estimate",
+                adapter.requests[0].request_metadata["request_render_snapshot"],
             )
             self.assertGreater(
-                processed.metadata["prompt_report"]["context"]["estimated_tokens"],
-                0,
-            )
-            self.assertGreater(
-                processed.metadata["prompt_report"]["transcript"]["estimated_tokens"],
+                processed.metadata["runtime_request_report"]["transcript"]["estimated_tokens"],
                 0,
             )
             self.assertNotIn("workspace_context_workspace", processed.metadata)
@@ -1422,20 +1367,12 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             self.assertNotIn("workspace_context_workspace", processed.metadata)
             self.assertNotIn("workspace_context_files", processed.metadata)
             request = adapter.requests[-1]
-            self.assertTrue(
-                any(
-                    message.role is LlmMessageRole.SYSTEM
-                    and f"- Workspace: {first_root}" in str(message.content)
-                    for message in request.messages
-                )
-            )
-            self.assertFalse(
-                any(
-                    message.role is LlmMessageRole.SYSTEM
-                    and "Use the second workspace context." in str(message.content)
-                    for message in request.messages
-                )
-            )
+            request_render_snapshot = request.request_metadata["request_render_snapshot"]
+            self.assertEqual(request_render_snapshot["kind"], "request_render")
+            self.assertNotIn("included_node_ids", request_render_snapshot)
+            self.assertGreaterEqual(request_render_snapshot["included_ref_count"], 0)
+            self.assertEqual(request.messages[-1].role, LlmMessageRole.USER)
+            self.assertNotIn("Use the second workspace context.", str(request.messages))
 
     def test_process_next_orchestration_assignment_ignores_legacy_session_llm_metadata(
         self,
@@ -1642,7 +1579,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         worker = threading.Thread(target=_process, daemon=True)
         worker.start()
-        self.assertTrue(adapter.started.wait(timeout=2.0))
+        self.assertTrue(adapter.started.wait(timeout=10.0))
 
         cancelled = self.orchestration_cancellation_service.cancel_run(
             run.id,

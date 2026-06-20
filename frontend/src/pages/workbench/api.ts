@@ -5,8 +5,8 @@ import {
 } from "@/mocks/fixtures/runtime";
 import { ApiClientError, buildApiUrl, dataMode, requestJson } from "@/shared/api/client";
 import type {
-  RunPromptInputPreview,
-} from "@/shared/runtime/promptPreview";
+  RuntimeLlmRequestPreview,
+} from "@/shared/runtime/runtimeRequestPreview";
 import type {
   TurnStepView,
   WorkbenchLinkedEntityDetail,
@@ -53,6 +53,7 @@ export interface EventStreamHandlers {
 export interface LoadWorkbenchOptions {
   runId?: string | null;
   sessionKey?: string | null;
+  activeTurnId?: string | null;
 }
 
 export interface CreateTurnPayload {
@@ -187,7 +188,7 @@ export interface WorkbenchContextNode {
     collapsed: boolean;
     loaded: boolean;
     pinned: boolean;
-    prompt_visible: boolean;
+    snapshot_visible: boolean;
     schema_enabled: boolean;
     opened: boolean;
     consumed: boolean;
@@ -210,13 +211,13 @@ export interface WorkbenchContextTree {
   estimate: WorkbenchContextEstimate;
 }
 
-export interface WorkbenchContextRenderSnapshot {
+export interface WorkbenchContextSnapshot {
   id: string;
   workspace_id: string;
   session_key: string;
   run_id: string;
   tree_revision: number;
-  prompt_body: string;
+  debug_body?: string;
   provider_attachments: Record<string, unknown>;
   estimate: WorkbenchContextEstimate;
   included_node_ids: string[];
@@ -267,16 +268,35 @@ export async function loadWorkbenchData(options: LoadWorkbenchOptions = {}): Pro
     };
   }
 
-  const [run, steps] = await Promise.all([
-    requestJson<WorkbenchRunView>(`/ui/workbench/runs/${encodeURIComponent(selectedRunId)}`),
-    requestJson<TurnStepView[]>(`/ui/workbench/runs/${encodeURIComponent(selectedRunId)}/steps`),
-  ]);
+  const run = await requestJson<WorkbenchRunView>(
+    `/ui/workbench/runs/${encodeURIComponent(selectedRunId)}?include_timeline=false`,
+  );
+  const requestedTurnId = options.activeTurnId?.trim() || null;
+  const selectedTurnId = (
+    requestedTurnId && run.turns.some((turn) => turn.turn_id === requestedTurnId)
+      ? requestedTurnId
+      : run.current_turn_id
+  );
+  const steps = await loadWorkbenchRunSteps(selectedRunId, selectedTurnId);
   return {
     home,
     run,
     steps,
     source: "api",
   };
+}
+
+export function loadWorkbenchRunSteps(
+  runId: string,
+  turnId?: string | null,
+): Promise<TurnStepView[]> {
+  const query = new URLSearchParams();
+  if (turnId) query.set("turn_id", turnId);
+  const queryString = query.toString();
+  const suffix = queryString ? `?${queryString}` : "";
+  return requestJson<TurnStepView[]>(
+    `/ui/workbench/runs/${encodeURIComponent(runId)}/steps${suffix}`,
+  );
 }
 
 export function loadWorkbenchHome(options: LoadWorkbenchOptions = {}): Promise<WorkbenchHomeReadModel> {
@@ -298,14 +318,14 @@ export function loadWorkbenchLinkedEntityDetail(
 }
 
 export function createWorkbenchTurn(payload: CreateTurnPayload): Promise<TurnCommandResponse> {
-  return requestJson<TurnCommandResponse>("/turns", {
+  return requestJson<TurnCommandResponse>("/ui/workbench/turns", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export function cancelWorkbenchTurn(runId: string, reason: string): Promise<TurnCommandResponse> {
-  return requestJson<TurnCommandResponse>(`/turns/${encodeURIComponent(runId)}/cancel`, {
+  return requestJson<TurnCommandResponse>(`/ui/workbench/turns/${encodeURIComponent(runId)}/cancel`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });
@@ -317,7 +337,7 @@ export function resolveWorkbenchApproval(
   decision: ApprovalDecision,
 ): Promise<TurnCommandResponse> {
   return requestJson<TurnCommandResponse>(
-    `/turns/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}`,
+    `/ui/workbench/turns/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(requestId)}`,
     {
       method: "POST",
       body: JSON.stringify({ decision }),
@@ -326,21 +346,21 @@ export function resolveWorkbenchApproval(
 }
 
 export function listWorkbenchTools(): Promise<WorkbenchToolSummary[]> {
-  return requestJson<WorkbenchToolSummary[]>("/tools?enabled_only=true");
+  return requestJson<WorkbenchToolSummary[]>("/ui/workbench/tools?enabled_only=true");
 }
 
 export function listWorkbenchAgents(): Promise<WorkbenchAgentProfile[]> {
-  return requestJson<WorkbenchAgentProfile[]>("/agents");
+  return requestJson<WorkbenchAgentProfile[]>("/ui/workbench/agents");
 }
 
 export function listWorkbenchModels(): Promise<WorkbenchLlmProfile[]> {
-  return requestJson<WorkbenchLlmProfile[]>("/llms");
+  return requestJson<WorkbenchLlmProfile[]>("/ui/workbench/models");
 }
 
 export async function loadWorkbenchContextTree(sessionKey: string): Promise<WorkbenchContextTree | null> {
   try {
     return await requestJson<WorkbenchContextTree>(
-      `/context-workspaces/by-session/${encodeURIComponent(sessionKey)}/tree`,
+      `/ui/workbench/context-tree/by-session/${encodeURIComponent(sessionKey)}`,
     );
   } catch (error) {
     if (error instanceof ApiClientError && error.status === 404) {
@@ -350,12 +370,14 @@ export async function loadWorkbenchContextTree(sessionKey: string): Promise<Work
   }
 }
 
-export async function loadWorkbenchContextRenderSnapshot(
+export async function loadWorkbenchContextSnapshot(
   runId: string,
-): Promise<WorkbenchContextRenderSnapshot | null> {
+  options: { includeDebugBody?: boolean } = {},
+): Promise<WorkbenchContextSnapshot | null> {
   try {
-    const payload = await requestJson<{ snapshot: WorkbenchContextRenderSnapshot }>(
-      `/context-workspaces/runs/${encodeURIComponent(runId)}/render-snapshot`,
+    const query = options.includeDebugBody ? "?include_debug_body=true" : "";
+    const payload = await requestJson<{ snapshot: WorkbenchContextSnapshot }>(
+      `/ui/workbench/context-snapshots/runs/${encodeURIComponent(runId)}${query}`,
     );
     return payload.snapshot;
   } catch {
@@ -363,12 +385,14 @@ export async function loadWorkbenchContextRenderSnapshot(
   }
 }
 
-export async function loadWorkbenchContextRenderSnapshotById(
+export async function loadWorkbenchContextSnapshotById(
   snapshotId: string,
-): Promise<WorkbenchContextRenderSnapshot | null> {
+  options: { includeDebugBody?: boolean } = {},
+): Promise<WorkbenchContextSnapshot | null> {
   try {
-    const payload = await requestJson<{ snapshot: WorkbenchContextRenderSnapshot }>(
-      `/context-workspaces/render-snapshots/${encodeURIComponent(snapshotId)}`,
+    const query = options.includeDebugBody ? "?include_debug_body=true" : "";
+    const payload = await requestJson<{ snapshot: WorkbenchContextSnapshot }>(
+      `/ui/workbench/context-snapshots/${encodeURIComponent(snapshotId)}${query}`,
     );
     return payload.snapshot;
   } catch {
@@ -376,24 +400,24 @@ export async function loadWorkbenchContextRenderSnapshotById(
   }
 }
 
-export async function loadWorkbenchPromptPreview(runId: string): Promise<RunPromptInputPreview | null> {
+export async function loadWorkbenchRuntimeRequestPreview(runId: string): Promise<RuntimeLlmRequestPreview | null> {
   try {
-    return await requestJson<RunPromptInputPreview>(
-      `/turns/${encodeURIComponent(runId)}/prompt-preview`,
+    return await requestJson<RuntimeLlmRequestPreview>(
+      `/ui/workbench/runs/${encodeURIComponent(runId)}/llm-request-preview`,
     );
   } catch {
     return null;
   }
 }
 
-export async function loadWorkbenchInvocationPromptPreview(
+export async function loadWorkbenchInvocationRuntimeRequestPreview(
   invocationId: string,
   runId: string,
-): Promise<RunPromptInputPreview | null> {
+): Promise<RuntimeLlmRequestPreview | null> {
   try {
     const query = new URLSearchParams({ run_id: runId });
-    return await requestJson<RunPromptInputPreview>(
-      `/llms/calls/${encodeURIComponent(invocationId)}/prompt-preview?${query.toString()}`,
+    return await requestJson<RuntimeLlmRequestPreview>(
+      `/ui/workbench/llm-invocations/${encodeURIComponent(invocationId)}/llm-request-preview?${query.toString()}`,
     );
   } catch {
     return null;
@@ -407,7 +431,7 @@ export function applyWorkbenchContextAction(
   runId: string | null,
 ): Promise<{ workspace: WorkbenchContextWorkspace; node: WorkbenchContextNode; action: string; operation_id: string }> {
   return requestJson(
-    `/context-workspaces/by-session/${encodeURIComponent(sessionKey)}/nodes/${encodeURIComponent(nodeId)}/actions/${encodeURIComponent(action)}`,
+    `/ui/workbench/context-tree/by-session/${encodeURIComponent(sessionKey)}/nodes/${encodeURIComponent(nodeId)}/actions/${encodeURIComponent(action)}`,
     {
       method: "POST",
       body: JSON.stringify({

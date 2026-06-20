@@ -4,10 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from crxzipple.modules.llm.domain import (
-    LlmMessagePhase,
-    LlmMessageRole,
     LlmResponseItem,
-    LlmResponseItemKind,
     ToolCallIntent,
 )
 from crxzipple.modules.orchestration.domain import (
@@ -16,6 +13,10 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationValidationError,
 )
 from crxzipple.modules.orchestration.application.ports import SessionRecorderPort
+from crxzipple.modules.session.application.runtime_response_projection import (
+    ProjectLlmResponseItemsInput,
+    RuntimeResponseProjector,
+)
 from crxzipple.modules.session.application import (
     AppendSessionItemInput,
     AppendSessionItemsInput,
@@ -24,7 +25,6 @@ from crxzipple.modules.session.application import (
 from crxzipple.modules.session.domain import (
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
 )
 from crxzipple.modules.tool.application.result_envelope import (
     TOOL_RESULT_ENVELOPE_METADATA_KEY,
@@ -63,10 +63,19 @@ class SessionProtocolRecord:
     item_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeResponseRecord:
+    item_ids: tuple[str, ...] = ()
+    assistant_progress_item_ids: tuple[str, ...] = ()
+    tool_calls: tuple[ToolCallIntent, ...] = ()
+    tool_call_session_item_ids_by_call_id: dict[str, str] | None = None
+
+
 @dataclass(slots=True)
 class OrchestrationSessionRecorder:
     session_service: SessionRecorderPort
     execution_item_lookup: ExecutionStepItemLookupPort | None = None
+    runtime_response_projector: RuntimeResponseProjector = RuntimeResponseProjector()
 
     def ensure_inbound_message(
         self,
@@ -111,12 +120,6 @@ class OrchestrationSessionRecorder:
                             kind=SessionItemKind.USER_MESSAGE,
                             phase=SessionItemPhase.COMMENTARY,
                             content_payload={"blocks": inbound_blocks},
-                            visibility=SessionItemVisibility(
-                                model_visible=True,
-                                user_visible=True,
-                                chat_visible=True,
-                                trace_visible=True,
-                            ),
                             source_module="orchestration",
                             source_kind="orchestration_run",
                             source_id=run.id,
@@ -188,12 +191,6 @@ class OrchestrationSessionRecorder:
                             else SessionItemPhase.FINAL_ANSWER
                         ),
                         content_payload=content_payload,
-                        visibility=SessionItemVisibility(
-                            model_visible=True,
-                            user_visible=finish_reason != "tool_calls",
-                            chat_visible=finish_reason != "tool_calls",
-                            trace_visible=True,
-                        ),
                         source_module="llm",
                         source_kind="llm_invocation",
                         source_id=invocation_id,
@@ -213,66 +210,38 @@ class OrchestrationSessionRecorder:
         active_session_id: str,
         invocation_id: str,
         response_items: tuple[LlmResponseItem, ...],
-    ) -> tuple[str, ...]:
-        inputs = tuple(
-            self._llm_response_item_input(
+    ) -> RuntimeResponseRecord:
+        projected = self.runtime_response_projector.project_llm_response_items(
+            ProjectLlmResponseItemsInput(
                 session_key=session_key,
                 active_session_id=active_session_id,
                 invocation_id=invocation_id,
-                response_item=item,
+                response_items=response_items,
             )
-            for item in response_items
-            if _should_record_llm_response_item(item)
         )
+        inputs = projected.items
         if not inputs:
-            return ()
+            return RuntimeResponseRecord(tool_calls=projected.tool_calls)
         items = self.session_service.append_items(
             AppendSessionItemsInput(items=inputs),
         )
-        return tuple(str(item.id) for item in items)
-
-    def _llm_response_item_input(
-        self,
-        *,
-        session_key: str,
-        active_session_id: str,
-        invocation_id: str,
-        response_item: LlmResponseItem,
-    ) -> AppendSessionItemInput:
-        kind = _session_item_kind_from_llm_response_item(response_item.kind)
-        phase = _session_item_phase_from_llm_phase(response_item.phase)
-        role = _session_item_role_from_llm_response_item(response_item)
-        metadata: dict[str, object] = {
-            "llm_invocation_id": invocation_id,
-            "llm_response_sequence_no": response_item.sequence_no,
+        assistant_progress_item_ids = tuple(
+            str(item.id)
+            for item in items
+            if _is_assistant_progress_session_item(item)
+        )
+        tool_call_session_item_ids_by_call_id = {
+            str(item.call_id): str(item.id)
+            for item in items
+            if _is_tool_call_session_item(item)
+            and isinstance(getattr(item, "call_id", None), str)
+            and getattr(item, "call_id").strip()
         }
-        if response_item.completed_at is not None:
-            metadata["llm_response_completed_at"] = response_item.completed_at.isoformat()
-        return AppendSessionItemInput(
-            session_key=session_key,
-            session_id=active_session_id,
-            role=role,
-            kind=kind,
-            phase=phase,
-            content_payload=dict(response_item.content_payload),
-            visibility=SessionItemVisibility(
-                model_visible=response_item.model_visible,
-                user_visible=response_item.user_visible,
-                chat_visible=_session_item_chat_visible(
-                    kind=kind,
-                    phase=phase,
-                    user_visible=response_item.user_visible,
-                ),
-                trace_visible=True,
-            ),
-            source_module="llm",
-            source_kind="llm_response_item",
-            source_id=response_item.id,
-            provider_item_id=response_item.provider_item_id,
-            provider_item_type=response_item.provider_item_type,
-            call_id=response_item.call_id,
-            tool_name=response_item.tool_name,
-            metadata=metadata,
+        return RuntimeResponseRecord(
+            item_ids=tuple(str(item.id) for item in items),
+            assistant_progress_item_ids=assistant_progress_item_ids,
+            tool_calls=projected.tool_calls,
+            tool_call_session_item_ids_by_call_id=tool_call_session_item_ids_by_call_id,
         )
 
     def append_tool_call_messages(
@@ -319,12 +288,6 @@ class OrchestrationSessionRecorder:
                         "text": response_text,
                         "finish_reason": "tool_calls",
                     },
-                    visibility=SessionItemVisibility(
-                        model_visible=True,
-                        user_visible=False,
-                        chat_visible=False,
-                        trace_visible=True,
-                    ),
                     source_module="llm",
                     source_kind="llm_invocation",
                     source_id=invocation_id or None,
@@ -345,12 +308,6 @@ class OrchestrationSessionRecorder:
                         "tool_name": tool_call.name,
                         "arguments": dict(tool_call.arguments),
                     },
-                    visibility=SessionItemVisibility(
-                        model_visible=True,
-                        user_visible=False,
-                        chat_visible=False,
-                        trace_visible=True,
-                    ),
                     source_module="llm",
                     source_kind="llm_invocation",
                     source_id=invocation_id or None,
@@ -359,7 +316,6 @@ class OrchestrationSessionRecorder:
                     metadata={
                         "tool_call_id": tool_call.id,
                         "tool_name": tool_call.name,
-                        "fallback_source": "llm_result_tool_calls",
                     },
                 )
                 for tool_call in tool_calls
@@ -450,12 +406,6 @@ class OrchestrationSessionRecorder:
             content_payload=self._tool_result_payload(
                 tool_call=tool_call,
                 tool_run=tool_run,
-            ),
-            visibility=SessionItemVisibility(
-                model_visible=True,
-                user_visible=False,
-                chat_visible=False,
-                trace_visible=True,
             ),
             source_module="tool",
             source_kind=source_kind,
@@ -624,15 +574,15 @@ def _tool_result_payload_from_envelope(
     tool_run: ToolRun,
     envelope: dict[str, object],
 ) -> dict[str, object]:
-    model_payload = _dict_payload(envelope.get("model_visible_payload"))
+    provider_payload = _dict_payload(envelope.get("provider_replay_payload"))
     payload: dict[str, object] = {
         "tool_name": tool_call.name,
         "tool_call_id": tool_call.id,
         "tool_run_id": tool_run.id,
         "status": _non_empty_text(envelope.get("status")) or tool_run.status.value,
     }
-    if model_payload:
-        payload.update(model_payload)
+    if provider_payload:
+        payload.update(provider_payload)
     if "content" not in payload and "blocks" not in payload:
         summary = _non_empty_text(envelope.get("summary"))
         if summary is not None:
@@ -647,9 +597,9 @@ def _tool_result_payload_from_envelope(
     trace_payload = _dict_payload(envelope.get("trace_payload"))
     if trace_payload:
         payload["trace"] = trace_payload
-    user_payload = _dict_payload(envelope.get("user_visible_payload"))
-    if user_payload:
-        payload["user_visible"] = user_payload
+    user_summary_payload = _dict_payload(envelope.get("user_summary_payload"))
+    if user_summary_payload:
+        payload["user_summary"] = user_summary_payload
     return {
         key: value
         for key, value in payload.items()
@@ -707,10 +657,6 @@ def _list_of_text(value: object) -> list[str]:
     return result
 
 
-def _should_record_llm_response_item(item: LlmResponseItem) -> bool:
-    return item.model_visible or item.user_visible
-
-
 def _assistant_response_content_payload(
     *,
     response_text: str | None,
@@ -729,61 +675,6 @@ def _assistant_response_content_payload(
     if usage_payload is not None:
         content_payload["usage"] = usage_payload
     return content_payload
-
-
-def _session_item_kind_from_llm_response_item(
-    kind: LlmResponseItemKind,
-) -> SessionItemKind:
-    if kind is LlmResponseItemKind.ASSISTANT_MESSAGE:
-        return SessionItemKind.ASSISTANT_MESSAGE
-    if kind is LlmResponseItemKind.REASONING:
-        return SessionItemKind.REASONING
-    if kind is LlmResponseItemKind.TOOL_CALL:
-        return SessionItemKind.TOOL_CALL
-    if kind is LlmResponseItemKind.TOOL_RESULT:
-        return SessionItemKind.TOOL_RESULT
-    if kind is LlmResponseItemKind.PROVIDER_EXTERNAL_ITEM:
-        return SessionItemKind.PROVIDER_EXTERNAL_ITEM
-    if kind is LlmResponseItemKind.COMPACTION:
-        return SessionItemKind.COMPACTION
-    return SessionItemKind.UNKNOWN
-
-
-def _session_item_phase_from_llm_phase(phase: LlmMessagePhase) -> SessionItemPhase:
-    if phase is LlmMessagePhase.COMMENTARY:
-        return SessionItemPhase.COMMENTARY
-    if phase is LlmMessagePhase.FINAL_ANSWER:
-        return SessionItemPhase.FINAL_ANSWER
-    return SessionItemPhase.UNKNOWN
-
-
-def _session_item_role_from_llm_response_item(item: LlmResponseItem) -> str | None:
-    if item.role is not None:
-        return item.role.value
-    if item.kind in {
-        LlmResponseItemKind.ASSISTANT_MESSAGE,
-        LlmResponseItemKind.REASONING,
-        LlmResponseItemKind.TOOL_CALL,
-        LlmResponseItemKind.PROVIDER_EXTERNAL_ITEM,
-        LlmResponseItemKind.COMPACTION,
-    }:
-        return LlmMessageRole.ASSISTANT.value
-    if item.kind is LlmResponseItemKind.TOOL_RESULT:
-        return LlmMessageRole.TOOL.value
-    return None
-
-
-def _session_item_chat_visible(
-    *,
-    kind: SessionItemKind,
-    phase: SessionItemPhase,
-    user_visible: bool,
-) -> bool:
-    return bool(
-        user_visible
-        and kind is SessionItemKind.ASSISTANT_MESSAGE
-        and phase is SessionItemPhase.FINAL_ANSWER
-    )
 
 
 def _session_tool_result_metadata(metadata: dict[str, Any]) -> dict[str, object]:
@@ -843,6 +734,20 @@ def _json_safe_session_metadata(value: Any, *, depth: int = 0) -> object | None:
                 result[str(item_key)[:120]] = normalized_value
         return result
     return str(value)[:512]
+
+
+def _is_assistant_progress_session_item(item: Any) -> bool:
+    if item.kind is SessionItemKind.AGENT_PROGRESS:
+        return True
+    return (
+        item.kind is SessionItemKind.ASSISTANT_MESSAGE
+        and item.role == "assistant"
+        and item.phase is SessionItemPhase.COMMENTARY
+    )
+
+
+def _is_tool_call_session_item(item: Any) -> bool:
+    return item.kind is SessionItemKind.TOOL_CALL
 
 
 def _terminal_tool_run_status_message(tool_run: ToolRun) -> str:

@@ -10,8 +10,8 @@ from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     EnsureContextWorkspaceInput,
-    RecordContextRenderSnapshotInput,
-    RenderContextPromptInput,
+    RecordContextSnapshotInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.domain import (
     ContextAction,
@@ -21,8 +21,8 @@ from crxzipple.modules.context_workspace.domain import (
     ContextEstimate,
     ContextNode,
     ContextNodeNotFoundError,
-    ContextRenderSnapshot,
-    ContextRenderSnapshotNotFoundError,
+    ContextSnapshot,
+    ContextSnapshotNotFoundError,
     ContextWorkspace,
     ContextWorkspaceNotFoundError,
 )
@@ -45,7 +45,7 @@ class ContextActionRequest(BaseModel):
 
 class RecordSnapshotRequest(BaseModel):
     run_id: str = Field(min_length=1)
-    prompt_body: str = Field(min_length=1)
+    debug_body: str = Field(min_length=1)
     provider_attachments: dict[str, object] = Field(default_factory=dict)
     estimate: dict[str, object] = Field(default_factory=dict)
     included_node_ids: list[str] = Field(default_factory=list)
@@ -103,20 +103,20 @@ def get_estimate(
 
 
 @router.post("/by-session/{session_key}/render")
-def render_prompt_body(
+def render_observation(
     session_key: str,
     container: Annotated[AppContainer, Depends(get_container)],
     run_id: Annotated[str | None, Query()] = None,
 ) -> dict[str, object]:
     try:
-        result = container.require(AppKey.CONTEXT_RENDER_SERVICE).render_prompt_body(
-            RenderContextPromptInput(session_key=session_key, run_id=run_id),
+        result = container.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE).render_observation(
+            ContextObservationRenderInput(session_key=session_key, run_id=run_id),
         )
     except ContextWorkspaceNotFoundError as exc:
         raise _not_found(exc) from None
     return {
         "workspace": _workspace_payload(result.workspace),
-        "prompt_body": result.prompt_body,
+        "debug_body": result.debug_body,
         "estimate": result.estimate.to_payload(),
         "estimate_breakdown": dict(result.estimate_breakdown),
         "included_node_ids": list(result.included_node_ids),
@@ -130,18 +130,18 @@ def render_prompt_body(
     }
 
 
-@router.post("/by-session/{session_key}/render-snapshots")
-def record_render_snapshot(
+@router.post("/by-session/{session_key}/snapshots")
+def record_snapshot(
     session_key: str,
     payload: RecordSnapshotRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> dict[str, object]:
     try:
-        snapshot = container.require(AppKey.CONTEXT_RENDER_SERVICE).record_render_snapshot(
-            RecordContextRenderSnapshotInput(
+        snapshot = container.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE).record_snapshot(
+            RecordContextSnapshotInput(
                 session_key=session_key,
                 run_id=payload.run_id,
-                prompt_body=payload.prompt_body,
+                debug_body=payload.debug_body,
                 provider_attachments=payload.provider_attachments,
                 estimate=ContextEstimate.from_payload(payload.estimate),
                 included_node_ids=tuple(payload.included_node_ids),
@@ -159,32 +159,34 @@ def record_render_snapshot(
     return {"snapshot": _snapshot_payload(snapshot)}
 
 
-@router.get("/runs/{run_id}/render-snapshot")
-def get_render_snapshot(
+@router.get("/runs/{run_id}/snapshot")
+def get_snapshot(
     run_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
+    include_debug_body: Annotated[bool, Query()] = False,
 ) -> dict[str, object]:
     try:
-        snapshot = container.require(AppKey.CONTEXT_RENDER_SERVICE).get_snapshot_by_run(
+        snapshot = container.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE).get_snapshot_by_run(
             run_id,
         )
-    except ContextRenderSnapshotNotFoundError as exc:
+    except ContextSnapshotNotFoundError as exc:
         raise _not_found(exc) from None
-    return {"snapshot": _snapshot_payload(snapshot)}
+    return {"snapshot": _snapshot_payload(snapshot, include_debug_body=include_debug_body)}
 
 
-@router.get("/render-snapshots/{snapshot_id}")
-def get_render_snapshot_by_id(
+@router.get("/snapshots/{snapshot_id}")
+def get_snapshot_by_id(
     snapshot_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
+    include_debug_body: Annotated[bool, Query()] = False,
 ) -> dict[str, object]:
     try:
-        snapshot = container.require(AppKey.CONTEXT_RENDER_SERVICE).get_snapshot(
+        snapshot = container.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE).get_snapshot(
             snapshot_id,
         )
-    except ContextRenderSnapshotNotFoundError as exc:
+    except ContextSnapshotNotFoundError as exc:
         raise _not_found(exc) from None
-    return {"snapshot": _snapshot_payload(snapshot)}
+    return {"snapshot": _snapshot_payload(snapshot, include_debug_body=include_debug_body)}
 
 
 @router.post("/by-session/{session_key}/nodes/{node_id}/actions/{action}")
@@ -285,14 +287,17 @@ def _tree_payload(
     }
 
 
-def _snapshot_payload(snapshot: ContextRenderSnapshot) -> dict[str, object]:
-    return {
+def _snapshot_payload(
+    snapshot: ContextSnapshot,
+    *,
+    include_debug_body: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "id": snapshot.id,
         "workspace_id": snapshot.workspace_id,
         "session_key": snapshot.session_key,
         "run_id": snapshot.run_id,
         "tree_revision": snapshot.tree_revision,
-        "prompt_body": snapshot.prompt_body,
         "provider_attachments": dict(snapshot.provider_attachments),
         "estimate": snapshot.estimate.to_payload(),
         "included_node_ids": list(snapshot.included_node_ids),
@@ -307,6 +312,9 @@ def _snapshot_payload(snapshot: ContextRenderSnapshot) -> dict[str, object]:
         "metadata": dict(snapshot.metadata),
         "created_at": snapshot.created_at.isoformat(),
     }
+    if include_debug_body:
+        payload["debug_body"] = snapshot.debug_body
+    return payload
 
 
 __all__ = ["router"]

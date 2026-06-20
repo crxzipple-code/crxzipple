@@ -27,6 +27,7 @@ from crxzipple.interfaces.http.app import create_app
 from crxzipple.interfaces.http.conversations import _normalize_preview_text
 from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.agent.infrastructure import derive_agent_home_root
+from crxzipple.modules.browser.infrastructure.engines import CdpControlEngine
 from crxzipple.modules.llm.application import LlmStreamEvent
 from crxzipple.modules.llm.application.adapters import LlmAdapterResponse
 from crxzipple.modules.llm.domain import (
@@ -144,6 +145,27 @@ class _FakeInlineToolAdapter:
         )
 
 
+class _FakeCdpSocket:
+    def send(self, _payload: str) -> None:
+        return None
+
+    def recv(self) -> str:
+        return '{"id": 1, "result": {}}'
+
+    def close(self) -> None:
+        return None
+
+
+def _fake_ws_connect(_ws_url: str, *, timeout: float | None = None):  # noqa: ANN202
+    del timeout
+    return _FakeCdpSocket()
+
+
+def _fake_cdp_control_engine(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    kwargs.setdefault("ws_connect", _fake_ws_connect)
+    return CdpControlEngine(*args, **kwargs)
+
+
 class _FakeEffectApprovalAdapter:
     def __init__(self) -> None:
         self._expanded = False
@@ -248,8 +270,18 @@ class HttpModuleTestCase(unittest.TestCase):
             "crxzipple.modules.skills.infrastructure.filesystem.repository.DEFAULT_SYSTEM_SKILLS_DIR",
             skills_root / "system",
         )
+        self._browser_playwright_patcher = patch(
+            "crxzipple.app.assembly.browser.PlaywrightCdpSessionPool",
+            FakePlaywrightCdpSessionPool,
+        )
+        self._browser_cdp_control_patcher = patch(
+            "crxzipple.app.assembly.browser.CdpControlEngine",
+            _fake_cdp_control_engine,
+        )
         self._global_skills_patcher.start()
         self._system_skills_patcher.start()
+        self._browser_playwright_patcher.start()
+        self._browser_cdp_control_patcher.start()
         system_skill_dir = skills_root / "system" / "memory-recall"
         _write_skill_package(
             system_skill_dir,
@@ -296,6 +328,8 @@ class HttpModuleTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self._client_context.__exit__(None, None, None)
         self.harness.close()
+        self._browser_cdp_control_patcher.stop()
+        self._browser_playwright_patcher.stop()
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
         self._skills_tempdir.cleanup()

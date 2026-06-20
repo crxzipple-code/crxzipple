@@ -507,10 +507,11 @@ def complete_llm_execution_step(
             session_item_id=item_id,
             item_index=next_item_index,
             summary_payload={
+                **(summary_payload or {}),
                 "message_role": "assistant",
                 "llm_invocation_id": normalized_invocation_id,
                 "message_kind": "assistant_progress",
-                **(summary_payload or {}),
+                "assistant_progress_item_ids": [item_id],
             },
         )
         if created:
@@ -1234,12 +1235,13 @@ def _tool_call_summary(link: dict[str, object]) -> dict[str, object]:
     return {
         key: value
         for key, value in {
-            "tool_call_id": link.get("tool_call_id"),
-            "tool_name": link.get("tool_name"),
-            "tool_id": link.get("tool_id"),
-            "mode": link.get("mode"),
-            "strategy": link.get("strategy"),
-            "environment": link.get("environment"),
+        "tool_call_id": link.get("tool_call_id"),
+        "tool_name": link.get("tool_name"),
+        "tool_id": link.get("tool_id"),
+        "call_session_item_id": link.get("call_session_item_id"),
+        "mode": link.get("mode"),
+        "strategy": link.get("strategy"),
+        "environment": link.get("environment"),
         }.items()
         if value is not None
     }

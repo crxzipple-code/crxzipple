@@ -4,17 +4,18 @@ from datetime import datetime
 from typing import Any
 
 from crxzipple.modules.context_workspace.application import (
-    ContextRenderService,
+    ContextSliceBuilderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
-    RecordContextRenderSnapshotInput,
-    RenderContextPromptInput,
+    RecordContextSnapshotInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
-    InMemoryContextRenderSnapshotRepository,
+    InMemoryContextSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
 from crxzipple.modules.operations.application.projections import (
@@ -34,25 +35,25 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
             agent_id="assistant",
         ),
     )
-    rendered = services["render"].render_prompt_body(
-        RenderContextPromptInput(session_key="session:context", run_id="run:context"),
+    rendered = services["observation"].render_observation(
+        ContextObservationRenderInput(session_key="session:context", run_id="run:context"),
     )
-    services["render"].record_render_snapshot(
-        RecordContextRenderSnapshotInput(
+    services["observation"].record_snapshot(
+        RecordContextSnapshotInput(
             session_key="session:context",
             run_id="run:context",
-            prompt_body=rendered.prompt_body,
+            debug_body=rendered.debug_body,
             estimate=rendered.estimate,
             included_node_ids=rendered.included_node_ids,
             metadata={
                 "history_delivery": "context_tree",
-                "direct_transcript_message_count": 1,
-                "direct_transcript_estimated_tokens": 12,
+                "draft_input_message_count": 1,
+                "draft_input_estimated_tokens": 12,
                 "mirrored_tool_schema_estimated_tokens": 34,
                 "tool_schema_mirror_budget_status": "limited",
                 "tool_schema_mirror_skipped_count": 2,
-                "rendered_prompt_estimated_tokens": 56,
-                "estimated_provider_prompt_tokens": 102,
+                "debug_body_estimated_tokens": 56,
+                "estimated_provider_input_tokens": 102,
                 "duplicate_tool_delivery_risk": True,
                 "tree_session_item_count": 2,
                 "tree_tool_interaction_count": 1,
@@ -73,7 +74,8 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
     provider = ContextWorkspaceOperationsReadModelProvider(
         workspace_service=services["workspace"],
         tree_service=services["tree"],
-        render_service=services["render"],
+        observation_snapshot_service=services["observation"],
+        slice_builder=services["slice"],
     )
 
     page = provider.page()
@@ -85,37 +87,57 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
     assert sections["workspaces"].rows[0].cells["session"] == "session:context"
     assert sections["visible_nodes"].total >= 1
     assert "content" not in sections["visible_nodes"].rows[0].cells
-    assert sections["render_snapshots"].rows[0].cells["run"] == "run:context"
-    assert sections["render_snapshots"].rows[0].cells["history"] == "context_tree"
-    assert sections["render_snapshots"].rows[0].cells["tree_items"] == "2"
-    assert sections["render_snapshots"].rows[0].cells["evidence"] == "4"
-    assert sections["render_snapshots"].rows[0].cells["folded"] == "3"
-    assert sections["render_snapshots"].rows[0].cells["session_tokens"] == "128"
-    assert sections["render_snapshots"].rows[0].cells["range_warnings"] == "1"
-    assert sections["render_snapshots"].rows[0].cells["range_limited"] == "2"
-    assert sections["render_snapshots"].rows[0].cells["session_refs"] == "2"
+    assert sections["node_status"].total >= 1
+    node_status_rows = [row.cells for row in sections["node_status"].rows]
+    context_workspace_root_row = next(
+        row
+        for row in node_status_rows
+        if row["owner"] == "context_workspace" and row["kind"] == "runtime_root"
+    )
+    assert context_workspace_root_row["session"] == "session:context"
+    assert context_workspace_root_row["total"] == "1"
+    assert context_workspace_root_row["snapshot_visible"] == "1"
+    assert context_workspace_root_row["collapsed"] == "0"
+    assert "content" not in context_workspace_root_row
+    assert sections["snapshots"].rows[0].cells["run"] == "run:context"
+    assert sections["snapshots"].rows[0].cells["history"] == "context_tree"
+    assert sections["snapshots"].rows[0].cells["tree_items"] == "2"
+    assert sections["snapshots"].rows[0].cells["evidence"] == "4"
+    assert sections["snapshots"].rows[0].cells["folded"] == "3"
+    assert sections["snapshots"].rows[0].cells["session_tokens"] == "128"
+    assert sections["snapshots"].rows[0].cells["range_warnings"] == "1"
+    assert sections["snapshots"].rows[0].cells["range_limited"] == "2"
+    assert sections["snapshots"].rows[0].cells["session_refs"] == "2"
     assert (
-        sections["render_snapshots"].rows[0].cells["current_node"]
+        sections["snapshots"].rows[0].cells["current_node"]
         == "session.item.active.2"
     )
-    assert sections["prompt_budget"].rows[0].cells["provider_tokens"] == "102"
-    assert sections["prompt_budget"].rows[0].cells["tree_tokens"] == "56"
-    assert sections["prompt_budget"].rows[0].cells["direct_tokens"] == "12"
-    assert sections["prompt_budget"].rows[0].cells["schema_tokens"] == "34"
-    assert sections["prompt_budget"].rows[0].cells["schema_budget_status"] == "limited"
-    assert sections["prompt_budget"].rows[0].cells["schema_budget_skipped"] == "2"
-    assert sections["prompt_budget"].rows[0].cells["duplicate_risk"] == "yes"
+    assert sections["context_budget"].rows[0].cells["provider_tokens"] == "102"
+    assert sections["context_budget"].rows[0].cells["tree_tokens"] == "56"
+    assert sections["context_budget"].rows[0].cells["draft_input_tokens"] == "12"
+    assert sections["context_budget"].rows[0].cells["schema_tokens"] == "34"
+    assert sections["context_budget"].rows[0].cells["schema_budget_status"] == "limited"
+    assert sections["context_budget"].rows[0].cells["schema_budget_skipped"] == "2"
+    assert sections["context_budget"].rows[0].cells["duplicate_risk"] == "yes"
+    assert sections["observation_slices"].rows[0].cells["audience"] == (
+        "operations_projection"
+    )
+    assert sections["observation_slices"].rows[0].cells["session"] == (
+        "session:context"
+    )
+    assert sections["observation_slices"].rows[0].cells["run"] == "run:context"
     assert overview.module == "context_workspace"
     assert overview.queue[0]["session"] == "session:context"
     assert next(metric for metric in page.metrics if metric.id == "snapshot_tokens").value == "102"
     assert next(metric for metric in page.metrics if metric.id == "session_range_risks").value == "3"
+    assert next(metric for metric in page.metrics if metric.id == "observation_slices").value == "1"
 
 
 def test_context_workspace_projection_is_materialized_as_operations_module() -> None:
     provider = ContextWorkspaceOperationsReadModelProvider(
         workspace_service=None,
         tree_service=None,
-        render_service=None,
+        observation_snapshot_service=None,
     )
     store = _FakeProjectionStore()
     materializer = OperationsProjectionMaterializer(
@@ -139,7 +161,7 @@ def _context_services() -> dict[str, Any]:
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
     operations = InMemoryContextOperationRepository()
-    snapshots = InMemoryContextRenderSnapshotRepository()
+    snapshots = InMemoryContextSnapshotRepository()
     return {
         "workspace": ContextWorkspaceService(
             workspace_repository=workspaces,
@@ -150,10 +172,14 @@ def _context_services() -> dict[str, Any]:
             node_repository=nodes,
             operation_repository=operations,
         ),
-        "render": ContextRenderService(
+        "observation": ContextObservationSnapshotService(
             workspace_repository=workspaces,
             node_repository=nodes,
             snapshot_repository=snapshots,
+        ),
+        "slice": ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
         ),
     }
 

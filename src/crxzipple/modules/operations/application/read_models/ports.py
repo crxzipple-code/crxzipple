@@ -160,6 +160,8 @@ class OperationsLlmQueryPort(Protocol):
         after_sequence: int | None = None,
     ) -> list[Any]: ...
 
+    def response_event_retention_policy(self) -> Any: ...
+
 
 class OperationsAgentProfilePort(Protocol):
     def list_profiles(self) -> list[Any]: ...
@@ -212,13 +214,17 @@ class OperationsContextTreePort(Protocol):
     def list_tree(self, session_key: str) -> Any: ...
 
 
-class OperationsContextRenderPort(Protocol):
+class OperationsContextObservationSnapshotPort(Protocol):
     def list_recent_snapshots(
         self,
         *,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[Any, ...]: ...
+
+
+class OperationsContextSliceBuilderPort(Protocol):
+    def build_slice(self, **kwargs: Any) -> Any: ...
 
 
 class OperationsSkillCatalogPort(Protocol):

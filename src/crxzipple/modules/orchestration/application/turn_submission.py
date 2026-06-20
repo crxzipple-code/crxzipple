@@ -207,15 +207,15 @@ def build_turn_options(
     )
 
 
-def prompt_bootstrap_metadata_for_content(
+def runtime_request_bootstrap_metadata_for_content(
     content: Any,
     *,
     metadata: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     payload = dict(metadata or {})
-    if _has_explicit_prompt_bootstrap(payload):
-        explicit_policy = _explicit_prompt_bootstrap_policy(payload)
-        payload["prompt_bootstrap_policy"] = _normalize_prompt_bootstrap_policy(
+    if _has_explicit_runtime_request_bootstrap(payload):
+        explicit_policy = _explicit_runtime_request_bootstrap_policy(payload)
+        payload["runtime_request_bootstrap_policy"] = _normalize_runtime_request_bootstrap_policy(
             explicit_policy,
         )
         return payload
@@ -223,7 +223,7 @@ def prompt_bootstrap_metadata_for_content(
     return payload
 
 
-def _normalize_prompt_bootstrap_policy(
+def _normalize_runtime_request_bootstrap_policy(
     policy: Mapping[str, object],
 ) -> dict[str, object]:
     payload = dict(policy)
@@ -240,7 +240,7 @@ def _normalize_prompt_bootstrap_policy(
     else:
         payload.pop("default_tool_schema_ids", None)
     if "default_tool_schema_source" not in payload and payload:
-        payload["default_tool_schema_source"] = "prompt_bootstrap_policy"
+        payload["default_tool_schema_source"] = "runtime_request_bootstrap_policy"
     return payload
 
 
@@ -255,28 +255,28 @@ def _dedupe_preserving_order(values: tuple[str, ...]) -> list[str]:
     return result
 
 
-def _has_explicit_prompt_bootstrap(metadata: Mapping[str, object]) -> bool:
-    if isinstance(metadata.get("prompt_bootstrap_policy"), Mapping):
+def _has_explicit_runtime_request_bootstrap(metadata: Mapping[str, object]) -> bool:
+    if isinstance(metadata.get("runtime_request_bootstrap_policy"), Mapping):
         return True
     runtime_task_policy = metadata.get("runtime_task_policy")
     if not isinstance(runtime_task_policy, Mapping):
         return False
-    return isinstance(runtime_task_policy.get("prompt_bootstrap"), Mapping)
+    return isinstance(runtime_task_policy.get("runtime_request_bootstrap"), Mapping)
 
 
-def _explicit_prompt_bootstrap_policy(
+def _explicit_runtime_request_bootstrap_policy(
     metadata: Mapping[str, object],
 ) -> dict[str, object]:
     runtime_task_policy = metadata.get("runtime_task_policy")
-    runtime_prompt_bootstrap: Mapping[str, object] = {}
+    runtime_task_bootstrap: Mapping[str, object] = {}
     if isinstance(runtime_task_policy, Mapping):
-        raw_runtime_prompt_bootstrap = runtime_task_policy.get("prompt_bootstrap")
-        if isinstance(raw_runtime_prompt_bootstrap, Mapping):
-            runtime_prompt_bootstrap = raw_runtime_prompt_bootstrap
-    prompt_bootstrap = metadata.get("prompt_bootstrap_policy")
-    if isinstance(prompt_bootstrap, Mapping):
-        return {**dict(runtime_prompt_bootstrap), **dict(prompt_bootstrap)}
-    return dict(runtime_prompt_bootstrap)
+        raw_runtime_request_bootstrap = runtime_task_policy.get("runtime_request_bootstrap")
+        if isinstance(raw_runtime_request_bootstrap, Mapping):
+            runtime_task_bootstrap = raw_runtime_request_bootstrap
+    explicit_bootstrap = metadata.get("runtime_request_bootstrap_policy")
+    if isinstance(explicit_bootstrap, Mapping):
+        return {**dict(runtime_task_bootstrap), **dict(explicit_bootstrap)}
+    return dict(runtime_task_bootstrap)
 
 
 def build_inbound_instruction(
@@ -361,7 +361,7 @@ def build_accept_run_input(
     max_steps: int = 99,
     metadata: Mapping[str, object] | None = None,
 ) -> AcceptOrchestrationRunInput:
-    normalized_metadata = prompt_bootstrap_metadata_for_content(
+    normalized_metadata = runtime_request_bootstrap_metadata_for_content(
         content,
         metadata=metadata,
     )
@@ -416,7 +416,7 @@ def build_submit_turn_input(
     reset_policy: SessionResetPolicy | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> SubmitOrchestrationTurnInput:
-    normalized_metadata = prompt_bootstrap_metadata_for_content(
+    normalized_metadata = runtime_request_bootstrap_metadata_for_content(
         content,
         metadata=metadata,
     )
@@ -472,7 +472,7 @@ def submit_turn(
     reply_metadata: dict[str, object] | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> OrchestrationRun:
-    normalized_metadata = prompt_bootstrap_metadata_for_content(
+    normalized_metadata = runtime_request_bootstrap_metadata_for_content(
         content,
         metadata=metadata,
     )

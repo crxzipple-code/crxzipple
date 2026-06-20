@@ -21,7 +21,7 @@ from crxzipple.modules.orchestration.domain.value_objects import (
     PendingApprovalRequest,
 )
 from crxzipple.modules.session.application import AppendSessionItemInput
-from crxzipple.modules.session.domain import SessionItemKind, SessionItemVisibility
+from crxzipple.modules.session.domain import SessionItemKind
 
 
 @dataclass(slots=True)
@@ -157,10 +157,6 @@ class ApprovalResolutionService:
                 session_id=run.active_session_id,
                 kind=SessionItemKind.TOOL_RESULT,
                 role="tool",
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    trace_visible=True,
-                ),
                 content_payload={
                     "tool_name": tool_name,
                     "tool_call_id": request.request_id,

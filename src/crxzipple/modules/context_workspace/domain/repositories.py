@@ -4,7 +4,8 @@ from typing import Protocol
 
 from crxzipple.modules.context_workspace.domain.entities import (
     ContextNode,
-    ContextRenderSnapshot,
+    ContextRequestRenderSnapshot,
+    ContextSnapshot,
     ContextTreeOperation,
     ContextWorkspace,
 )
@@ -43,6 +44,18 @@ class ContextNodeRepository(Protocol):
 
     def list_for_workspace(self, workspace_id: str) -> tuple[ContextNode, ...]: ...
 
+    def list_enabled_tool_schema_nodes(
+        self,
+        workspace_id: str,
+    ) -> tuple[ContextNode, ...]: ...
+
+    def list_tool_nodes_by_kind(
+        self,
+        workspace_id: str,
+        *,
+        kinds: tuple[str, ...],
+    ) -> tuple[ContextNode, ...]: ...
+
 
 class ContextOperationRepository(Protocol):
     def add(self, operation: ContextTreeOperation) -> None: ...
@@ -55,24 +68,40 @@ class ContextOperationRepository(Protocol):
     ) -> tuple[ContextTreeOperation, ...]: ...
 
 
-class ContextRenderSnapshotRepository(Protocol):
-    def add(self, snapshot: ContextRenderSnapshot) -> None: ...
+class ContextSnapshotRepository(Protocol):
+    def add(self, snapshot: ContextSnapshot) -> None: ...
 
-    def get(self, snapshot_id: str) -> ContextRenderSnapshot | None: ...
+    def get(self, snapshot_id: str) -> ContextSnapshot | None: ...
 
-    def get_by_run(self, run_id: str) -> ContextRenderSnapshot | None: ...
+    def get_by_run(self, run_id: str) -> ContextSnapshot | None: ...
 
     def list_recent(
         self,
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[ContextRenderSnapshot, ...]: ...
+    ) -> tuple[ContextSnapshot, ...]: ...
+
+
+class ContextRequestRenderSnapshotRepository(Protocol):
+    def add(self, snapshot: ContextRequestRenderSnapshot) -> None: ...
+
+    def get(self, snapshot_id: str) -> ContextRequestRenderSnapshot | None: ...
+
+    def get_by_run(self, run_id: str) -> ContextRequestRenderSnapshot | None: ...
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[ContextRequestRenderSnapshot, ...]: ...
 
 
 __all__ = [
     "ContextNodeRepository",
     "ContextOperationRepository",
-    "ContextRenderSnapshotRepository",
+    "ContextRequestRenderSnapshotRepository",
+    "ContextSnapshotRepository",
     "ContextWorkspaceRepository",
 ]

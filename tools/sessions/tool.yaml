@@ -1,6 +1,6 @@
 kind: local_package
 namespace: sessions
-prompt:
+runtime_request:
   title: Session Runtime
   summary: Inspect session state, transcript, run flow, follow-up routing, and session-tree activity.
   groups:

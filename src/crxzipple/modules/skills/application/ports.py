@@ -4,7 +4,7 @@ from typing import Protocol
 
 from crxzipple.modules.skills.application.models import (
     InstalledSkill,
-    SkillCatalogPrompt,
+    SkillRuntimeRequestCatalog,
     SkillCreateRequest,
     SkillDraft,
     SkillDraftAuditRecord,
@@ -19,7 +19,7 @@ from crxzipple.modules.skills.application.models import (
     SkillSyncResult,
     SkillUpdateRequest,
 )
-from crxzipple.modules.skills.application.prompt_resolver import SkillPromptResolution
+from crxzipple.modules.skills.application.runtime_request_resolver import SkillRuntimeRequestResolution
 from crxzipple.modules.skills.domain import (
     SkillEnablementPolicy,
     SkillInstallation,
@@ -31,12 +31,12 @@ from crxzipple.modules.skills.domain import (
 
 
 class SkillCatalogPort(Protocol):
-    def build_prompt_catalog(
+    def build_runtime_request_catalog(
         self,
         *,
         workspace_dir: str | None,
         surface: str,
-    ) -> SkillCatalogPrompt | None: ...
+    ) -> SkillRuntimeRequestCatalog | None: ...
 
     def list_available(
         self,
@@ -46,7 +46,7 @@ class SkillCatalogPort(Protocol):
         include_disabled: bool = False,
     ) -> tuple[SkillPackage, ...]: ...
 
-    def resolve_prompt_catalog(
+    def resolve_runtime_request_catalog(
         self,
         *,
         workspace_dir: str | None,
@@ -57,7 +57,7 @@ class SkillCatalogPort(Protocol):
         run_id: str | None = None,
         session_key: str | None = None,
         active_session_id: str | None = None,
-    ) -> SkillPromptResolution: ...
+    ) -> SkillRuntimeRequestResolution: ...
 
 
 class SkillReadPort(Protocol):

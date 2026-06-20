@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
@@ -58,12 +58,17 @@ class AuthorizationApplicationService:
     ) = None
     audit_repository: AuthorizationAuditRepository | None = None
     enabled: bool = False
+    _policy_snapshot_cache: tuple[AuthorizationPolicy, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def is_enabled(self) -> bool:
         return self.enabled
 
     def list_policies(self) -> list[AuthorizationPolicy]:
-        return self.policy_repository.list()
+        return list(self._policy_snapshot())
 
     def check(self, request: AuthorizationRequest) -> AuthorizationDecision:
         if not self.enabled:
@@ -72,7 +77,7 @@ class AuthorizationApplicationService:
                 reason="authorization disabled",
                 code=AuthorizationDecisionCode.AUTHORIZATION_DISABLED,
             )
-        return self.evaluator.evaluate(request, self.policy_repository.list())
+        return self.evaluator.evaluate(request, list(self._policy_snapshot()))
 
     def authorize(self, request: AuthorizationRequest) -> AuthorizationDecision:
         decision = self.check(request)
@@ -296,7 +301,15 @@ class AuthorizationApplicationService:
                 reason="authorization disabled for policy matching",
                 code=AuthorizationDecisionCode.NO_MATCH,
             )
-        return self.evaluator.evaluate(request, self.policy_repository.list())
+        return self.evaluator.evaluate(request, list(self._policy_snapshot()))
+
+    def _policy_snapshot(self) -> tuple[AuthorizationPolicy, ...]:
+        if self._policy_snapshot_cache is None:
+            self._policy_snapshot_cache = tuple(self.policy_repository.list())
+        return self._policy_snapshot_cache
+
+    def _invalidate_policy_snapshot(self) -> None:
+        self._policy_snapshot_cache = None
 
     def _store_temporary_grant(
         self,
@@ -341,6 +354,7 @@ class AuthorizationApplicationService:
     ) -> AuthorizationPolicy:
         before = self.policy_repository.get(policy.id)
         self.policy_repository.upsert(policy)
+        self._invalidate_policy_snapshot()
         self._record_audit(
             action="policy.upsert",
             status="succeeded",
@@ -364,6 +378,7 @@ class AuthorizationApplicationService:
         if self.policy_repository.get(policy.id) is not None:
             raise ValueError(f"Authorization policy '{policy.id}' already exists.")
         self.policy_repository.upsert(policy)
+        self._invalidate_policy_snapshot()
         self._record_audit(
             action="policy.create",
             status="succeeded",
@@ -389,6 +404,7 @@ class AuthorizationApplicationService:
                 f"Authorization policy '{policy.id}' was not found.",
             )
         self.policy_repository.upsert(policy)
+        self._invalidate_policy_snapshot()
         self._record_audit(
             action="policy.update",
             status="succeeded",
@@ -417,6 +433,7 @@ class AuthorizationApplicationService:
             )
         after = replace(before, enabled=enabled)
         self.policy_repository.upsert(after)
+        self._invalidate_policy_snapshot()
         self._record_audit(
             action="policy.enable" if enabled else "policy.disable",
             status="succeeded",
@@ -443,6 +460,7 @@ class AuthorizationApplicationService:
                 f"Authorization policy '{policy_id}' was not found.",
             )
         self.policy_repository.delete(policy_id)
+        self._invalidate_policy_snapshot()
         self._record_audit(
             action="policy.delete",
             status="succeeded",
@@ -472,6 +490,7 @@ class AuthorizationApplicationService:
         for policy in policies:
             self.policy_repository.upsert(policy)
             imported.append(policy)
+        self._invalidate_policy_snapshot()
         self._record_audit(
             action="policy.import",
             status="succeeded",
@@ -499,7 +518,7 @@ class AuthorizationApplicationService:
             "version": 1,
             "policies": [
                 _policy_payload(policy)
-                for policy in self.policy_repository.list()
+                for policy in self._policy_snapshot()
             ],
         }
 
@@ -514,7 +533,7 @@ class AuthorizationApplicationService:
     ) -> AuthorizationDecision:
         decision = self.evaluator.evaluate(
             request,
-            list(policies if policies is not None else self.policy_repository.list()),
+            list(policies if policies is not None else self._policy_snapshot()),
         )
         self._record_audit(
             action="decision.dry_run",
@@ -537,7 +556,7 @@ class AuthorizationApplicationService:
         actor_id: str | None = None,
         reason: str = "",
     ) -> AuthorizationImpactPreview:
-        current_policies = self.policy_repository.list()
+        current_policies = list(self._policy_snapshot())
         before = self.evaluator.evaluate(request, current_policies)
 
         remove_ids = {

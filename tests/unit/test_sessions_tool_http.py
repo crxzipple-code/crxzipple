@@ -28,7 +28,6 @@ from crxzipple.modules.session.application import (
 )
 from crxzipple.modules.session.domain import (
     SessionItemKind,
-    SessionItemVisibility,
 )
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 from tests.unit.tool_test_support import *  # noqa: F403
@@ -125,7 +124,6 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         text: str,
         session_id: str | None = None,
         kind: SessionItemKind | None = None,
-        visibility: SessionItemVisibility | None = None,
         source_kind: str | None = None,
         source_id: str | None = None,
     ) -> None:
@@ -134,19 +132,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
         if role == "user":
             item_kind = kind or SessionItemKind.USER_MESSAGE
-        item_visibility = visibility or SessionItemVisibility(
-            model_visible=True,
-            user_visible=role in {"assistant", "user"},
-            chat_visible=role in {"assistant", "user"},
-            trace_visible=True,
-        )
         self.session_service.append_item(
             AppendSessionItemInput(
                 session_key=session_key,
                 session_id=session_id,
                 role=role,
                 kind=item_kind,
-                visibility=item_visibility,
                 source_module="test",
                 source_kind=source_kind,
                 source_id=source_id,
@@ -230,12 +221,6 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="tool",
             text="internal tool result",
             kind=SessionItemKind.TOOL_RESULT,
-            visibility=SessionItemVisibility(
-                model_visible=False,
-                user_visible=False,
-                chat_visible=False,
-                trace_visible=True,
-            ),
             source_kind="tool_run",
             source_id="run-1",
         )
@@ -261,8 +246,8 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(metadata["session"]["key"], session.id)
         self.assertEqual(metadata["active_instance"]["id"], session.active_session_id)
         self.assertEqual(metadata["counts"]["instance_count"], 1)
-        self.assertEqual(metadata["counts"]["active_visible_item_count"], 1)
-        self.assertEqual(metadata["counts"]["visible_item_count"], 1)
+        self.assertEqual(metadata["counts"]["active_unarchived_item_count"], 2)
+        self.assertEqual(metadata["counts"]["unarchived_item_count"], 2)
         self.assertEqual(metadata["counts"]["total_item_count"], 3)
         self.assertEqual(
             metadata["compaction"]["summary"],
@@ -368,12 +353,6 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="tool",
             text="active internal tool",
             kind=SessionItemKind.TOOL_RESULT,
-            visibility=SessionItemVisibility(
-                model_visible=False,
-                user_visible=False,
-                chat_visible=False,
-                trace_visible=True,
-            ),
             source_kind="tool_run",
             source_id="run-2",
         )
@@ -395,14 +374,14 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertTrue(metadata["active_session_only"])
         self.assertIsNone(metadata["session_id"])
         self.assertEqual(metadata["active_session_id"], active_session_id)
-        self.assertEqual(metadata["available_count"], 1)
-        self.assertEqual(metadata["returned_count"], 1)
-        self.assertEqual(len(metadata["items"]), 1)
+        self.assertEqual(metadata["available_count"], 2)
+        self.assertEqual(metadata["returned_count"], 2)
+        self.assertEqual(len(metadata["items"]), 2)
         self.assertEqual(metadata["items"][0]["session_id"], active_session_id)
         rendered = tool_run.result.blocks[0]["text"]
         self.assertIn("active visible message", rendered)
         self.assertNotIn("old instance context", rendered)
-        self.assertNotIn("active internal tool", rendered)
+        self.assertIn("active internal tool", rendered)
         self.assertNotIn("archive this active message", rendered)
 
     def test_sessions_history_supports_explicit_session_id_and_include_archived(self) -> None:
@@ -550,7 +529,6 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             ListSessionItemsInput(
                 session_key=target.id,
                 active_session_only=False,
-                chat_visible=True,
             ),
         )
         self.assertEqual(len(messages), 2)
@@ -645,7 +623,6 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             ListSessionItemsInput(
                 session_key=child_session.id,
                 active_session_only=False,
-                chat_visible=True,
             ),
         )
         self.assertEqual(len(messages), 2)
@@ -909,13 +886,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         assert requester_followup is not None
         self.assertEqual(requester_followup.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(requester_followup.session_key, requester.id)
-        self.assertEqual(requester_followup.metadata["prompt_mode"], "recovery_resume")
+        self.assertEqual(requester_followup.metadata["runtime_request_mode"], "recovery_resume")
 
         requester_messages = self.session_service.list_items(
             ListSessionItemsInput(
                 session_key=requester.id,
                 active_session_only=False,
-                chat_visible=True,
             ),
         )
         self.assertEqual([item.role for item in requester_messages], ["user", "assistant"])

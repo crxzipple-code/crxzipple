@@ -15,57 +15,12 @@ capabilities:
 - artifact.read
 - artifact.write
 - runtime_settings.read
-prompt:
+runtime_request:
   title: Browser Automation
-  summary: Use the Browser for verifiable browser evidence, not just a DOM snapshot tool. For data-heavy websites, navigate
-    or observe once to get bearings, then use runtime/code and network evidence to locate the site's data path before state-changing
+  summary: Use the Browser for verifiable browser facts, not just a DOM snapshot tool. For data-heavy websites, navigate
+    or observe once to get bearings, then use runtime/code and network facts to locate the site's data path before state-changing
     page actions. Avoid repeated tab inventory once a target is known. Expand form, overlay/date-picker, DOM, storage, diagnostics,
-    tabs, or trace groups only when the evidence path requires them.
-  evidence_path_ladder:
-  - key: orient
-    title: Orient In Browser State
-    summary: Start with the live page, tabs, console, visible controls, and runtime hints. Treat the first observation as
-      a map, not proof that hidden or script-driven behavior is absent.
-    tool_ids:
-    - browser.observe
-    - browser.tabs.list
-  - key: runtime_and_code
-    title: Inspect Runtime And Frontend Code
-    summary: When a site is script-driven, inspect live runtime objects, resource trees, scripts, and request-building code
-      before repeating fragile form clicks.
-    tool_ids:
-    - browser.runtime.inspect
-    - browser.script.find_request
-    - browser.code.search
-    - browser.script.extract_request
-    - browser.runtime.probe_client
-    - browser.runtime.call_client
-    - browser.script.inspect
-  - key: network_truth
-    title: Trace Network Truth
-    summary: Use captured requests, page-context fetches, response bodies, and replayable requests to verify data returned
-      by the site.
-    tool_ids:
-    - browser.network.inspect
-    - browser.network.fetch_as_page
-    - browser.network.replay_request
-  - key: stateful_interaction
-    title: Act With Evidence
-    summary: When page interaction is needed, perform one state-changing action at a time and verify the before/after state,
-      network, storage, or lifecycle delta.
-    tool_ids:
-    - browser.action.trace
-    - browser.form.inspect
-    - browser.overlay.observe
-    - browser.dom.clickability
-  - key: diagnose_blockers
-    title: Diagnose Blockers
-    summary: Use storage, service worker, page errors, performance metrics, and traces to explain auth/session/runtime failures.
-    tool_ids:
-    - browser.storage.indexeddb.list
-    - browser.service_worker.inspect
-    - browser.page.errors
-    - browser.performance.metrics
+    tabs, or trace groups only when the current observation leaves a concrete gap.
   groups:
     navigation:
       order: 10
@@ -80,7 +35,7 @@ prompt:
       default_tool_schema_ids:
       - browser.navigate
       default_tool_schema_max_count: 1
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.navigation
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.navigation
     observation:
       order: 15
       title: Browser Observation
@@ -92,7 +47,7 @@ prompt:
       default_tool_schema_ids:
       - browser.observe
       default_tool_schema_max_count: 1
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.observation
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.observation
     action_trace:
       order: 35
       title: Action Trace
@@ -104,7 +59,7 @@ prompt:
       default_tool_schema_ids:
       - browser.action.trace
       default_tool_schema_max_count: 1
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.action_trace
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.action_trace
     native_script:
       order: 37
       title: Native Browser Script
@@ -116,7 +71,7 @@ prompt:
       default_tool_schema_ids:
       - browser.native.run
       default_tool_schema_max_count: 1
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.native_script
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.native_script
     page_interaction:
       order: 50
       title: Page Interaction
@@ -133,7 +88,7 @@ prompt:
       - browser.click
       - browser.type
       default_tool_schema_max_count: 4
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.page_interaction
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.page_interaction
     forms_overlays:
       order: 40
       title: Forms & Overlays
@@ -150,7 +105,7 @@ prompt:
       - browser.form.fill
       - browser.overlay.select
       default_tool_schema_max_count: 4
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.forms_overlays
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.forms_overlays
     dom_inspection:
       order: 45
       title: DOM Inspection
@@ -168,13 +123,13 @@ prompt:
       - browser.dom.clickability
       - browser.dom.mutation_wait
       default_tool_schema_max_count: 3
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.dom_inspection
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.dom_inspection
     network:
       order: 25
       title: Network Capture & Replay
       summary: 'Capture and inspect requests, response/request bodies, page-context fetches, and replay when UI behavior or
         data must be verified beyond DOM text. For data-heavy sites, pair this with Code & Runtime Insight before filling
-        forms: start a capture, trigger a runtime client method or one focused page action, list filtered requests, then read
+        forms: start a capture, trigger one focused page action or page-context evaluation, list filtered requests, then read
         body or replay the selected request.'
       function_ids:
       - browser.network.inspect
@@ -195,24 +150,20 @@ prompt:
       - browser.network.fetch_as_page
       - browser.network.replay_request
       default_tool_schema_max_count: 6
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.network
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.network
     code_insight:
       order: 20
       title: Code & Runtime Insight
       summary: 'Analyze runtime state and live frontend scripts through DevTools to understand app state, handlers, endpoints,
         and request construction with bounded script evidence. Treat script/code search as an index: after a candidate appears,
-        inspect, evaluate, capture, fetch, or replay it instead of widening keyword searches. After runtime.probe_client finds
-        a callable frontend data method, prefer browser.runtime.call_client over hand-written evaluate; use browser.evaluate
-        only for deliberate custom page-context summaries. For data-heavy sites such as airline, booking, shopping, or dashboard
-        pages, prefer this group immediately after the first observe before filling visible forms.'
+        inspect, evaluate, capture, fetch, or replay it instead of widening keyword searches. Use browser.evaluate only for
+        deliberate compact page-context summaries; prefer network capture/replay when request evidence is required.'
       function_ids:
       - browser.runtime.inspect
       - browser.script.list
       - browser.script.find_request
       - browser.code.search
       - browser.script.extract_request
-      - browser.runtime.probe_client
-      - browser.runtime.call_client
       - browser.script.inspect
       - browser.evaluate
       default_tool_schema_ids:
@@ -220,12 +171,10 @@ prompt:
       - browser.script.find_request
       - browser.code.search
       - browser.script.extract_request
-      - browser.runtime.probe_client
-      - browser.runtime.call_client
       - browser.script.inspect
       - browser.evaluate
-      default_tool_schema_max_count: 8
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.code_insight
+      default_tool_schema_max_count: 6
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.code_insight
     storage:
       order: 55
       title: Storage & Workers
@@ -244,7 +193,7 @@ prompt:
       - browser.storage.cache.list
       - browser.service_worker.list
       default_tool_schema_max_count: 3
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.storage
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.storage
     context_leases:
       order: 60
       title: Context Leases
@@ -260,7 +209,7 @@ prompt:
       - browser.context.current
       - browser.context.reconcile
       default_tool_schema_max_count: 3
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.context_leases
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.context_leases
     environment:
       order: 70
       title: Environment Controls
@@ -277,7 +226,7 @@ prompt:
       - browser.emulation.reset
       - browser.network_conditions.set
       default_tool_schema_max_count: 3
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.environment
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.environment
     diagnostics:
       order: 80
       title: Diagnostics & Tracing
@@ -296,7 +245,7 @@ prompt:
       - browser.page.errors
       - browser.performance.metrics
       default_tool_schema_max_count: 3
-      default_tool_schema_source: bundled.local_package.browser.prompt_group.diagnostics
+      default_tool_schema_source: bundled.local_package.browser.runtime_request_group.diagnostics
   default_tool_schema_policy:
     priority: 20
   default_tool_schema_group_refs:
@@ -6077,224 +6026,6 @@ local_tools:
   - browser.profile_read
   - browser.code_read
   - browser.runtime_readiness
-- id: browser.runtime.probe_client
-  name: Browser Runtime Probe Client
-  description: Read-only probe for a page-context client object or method such as $nuxt.$http.shopping.getShopping. It resolves
-    the object path, lists keys/methods, reports whether a method is callable, and returns a bounded function source preview.
-    Use after script request extraction identifies a candidate client path, then call the resolved method with browser.runtime.call_client
-    or verify behavior with network capture/replay.
-  provider_name: crxzipple.browser
-  entrypoint: tools.browser.local:create_browser_manifest_handler
-  tool_kind: function
-  parameters:
-  - name: profile
-    data_type: string
-    description: Browser profile to use. Omit this for normal browser work; the runtime/session/agent/browser default profile
-      is used automatically. Only pass a concrete configured profile name when the user explicitly asks for one; 'default'
-      is not a profile name.
-    required: false
-    json_schema:
-      type: string
-      description: Browser profile to use. Omit this for normal browser work; the runtime/session/agent/browser default profile
-        is used automatically. Only pass a concrete configured profile name when the user explicitly asks for one; 'default'
-        is not a profile name.
-  - name: profile_pool
-    data_type: string
-    description: Browser profile pool to allocate from. Use this for isolated multi-profile browser work.
-    required: false
-    json_schema:
-      type: string
-      description: Browser profile pool to allocate from. Use this for isolated multi-profile browser work.
-  - name: target_id
-    data_type: string
-    description: Optional live browser tab identifier.
-    required: false
-    json_schema:
-      type: string
-      description: Optional live browser tab identifier.
-  - name: object_path
-    data_type: string
-    description: Page-context object path to resolve, for example $nuxt.$http.shopping.
-    required: true
-    json_schema:
-      type: string
-      description: Page-context object path to resolve, for example $nuxt.$http.shopping.
-  - name: method_name
-    data_type: string
-    description: Optional method name under object_path to describe.
-    required: false
-    json_schema:
-      type: string
-      description: Optional method name under object_path to describe.
-  - name: limit
-    data_type: integer
-    description: Maximum keys or methods to describe.
-    required: false
-    json_schema:
-      type: integer
-      minimum: 1
-      maximum: 80
-      default: 20
-      description: Maximum keys or methods to describe.
-  - name: preview_chars
-    data_type: integer
-    description: Maximum function source preview characters.
-    required: false
-    json_schema:
-      type: integer
-      minimum: 120
-      maximum: 4000
-      default: 800
-      description: Maximum function source preview characters.
-  - name: include_source_preview
-    data_type: boolean
-    description: Include bounded function source preview when available.
-    required: false
-    json_schema:
-      type: boolean
-      description: Include bounded function source preview when available.
-  - name: timeout_ms
-    data_type: integer
-    description: Optional timeout in milliseconds.
-    required: false
-    json_schema:
-      type: integer
-      description: Optional timeout in milliseconds.
-  tags:
-  - browser
-  - builtin
-  - system-managed
-  required_effect_ids:
-  - local_tool_access
-  runtime_requirement_sets:
-  - - browser-profile-runtime
-  context_requirements:
-  - session_key
-  - agent_id
-  timeout_seconds: 30
-  requires_confirmation: false
-  mutates_state: false
-  supports_parallel: true
-  resource_scope: browser.target
-  supported_modes:
-  - inline
-  supported_strategies:
-  - async
-  supported_environments:
-  - local
-  runtime_key: browser.runtime.probe_client
-  capabilities:
-  - browser.profile_read
-  - browser.code_read
-  - browser.runtime_readiness
-- id: browser.runtime.call_client
-  name: Browser Runtime Call Client
-  description: Call a resolved page-context client method such as $nuxt.$http.shopping.getShopping with JSON arguments and
-    return a bounded structured result. Use after browser.runtime.probe_client identifies a callable frontend data method.
-    Prefer this to hand-written browser.evaluate for page client APIs; use network capture only when request evidence is still
-    needed.
-  provider_name: crxzipple.browser
-  entrypoint: tools.browser.local:create_browser_manifest_handler
-  tool_kind: function
-  parameters:
-  - name: profile
-    data_type: string
-    description: Browser profile to use. Omit this for normal browser work; the runtime/session/agent/browser default profile
-      is used automatically. Only pass a concrete configured profile name when the user explicitly asks for one; 'default'
-      is not a profile name.
-    required: false
-    json_schema:
-      type: string
-      description: Browser profile to use. Omit this for normal browser work; the runtime/session/agent/browser default profile
-        is used automatically. Only pass a concrete configured profile name when the user explicitly asks for one; 'default'
-        is not a profile name.
-  - name: profile_pool
-    data_type: string
-    description: Browser profile pool to allocate from. Use this for isolated multi-profile browser work.
-    required: false
-    json_schema:
-      type: string
-      description: Browser profile pool to allocate from. Use this for isolated multi-profile browser work.
-  - name: target_id
-    data_type: string
-    description: Optional live browser tab identifier.
-    required: false
-    json_schema:
-      type: string
-      description: Optional live browser tab identifier.
-  - name: object_path
-    data_type: string
-    description: Page-context object path to resolve, for example $nuxt.$http.shopping.
-    required: true
-    json_schema:
-      type: string
-      description: Page-context object path to resolve, for example $nuxt.$http.shopping.
-  - name: method_name
-    data_type: string
-    description: Optional method name under object_path to call. Omit when object_path itself is callable.
-    required: false
-    json_schema:
-      type: string
-      description: Optional method name under object_path to call. Omit when object_path itself is callable.
-  - name: arguments
-    data_type: array
-    description: JSON argument list passed to the client method.
-    required: false
-    json_schema:
-      type: array
-      description: JSON argument list passed to the client method.
-      items: {}
-  - name: argument
-    data_type: string
-    description: Single JSON argument passed to the client method when arguments is omitted.
-    required: false
-    json_schema:
-      description: Single JSON argument passed to the client method when arguments is omitted.
-  - name: max_result_chars
-    data_type: integer
-    description: Maximum serialized result characters returned before preview truncation.
-    required: false
-    json_schema:
-      type: integer
-      minimum: 1000
-      maximum: 200000
-      default: 60000
-      description: Maximum serialized result characters returned before preview truncation.
-  - name: timeout_ms
-    data_type: integer
-    description: Optional timeout in milliseconds.
-    required: false
-    json_schema:
-      type: integer
-      description: Optional timeout in milliseconds.
-  tags:
-  - browser
-  - builtin
-  - system-managed
-  required_effect_ids:
-  - local_tool_access
-  runtime_requirement_sets:
-  - - browser-profile-runtime
-  context_requirements:
-  - session_key
-  - agent_id
-  timeout_seconds: 30
-  requires_confirmation: false
-  mutates_state: false
-  supports_parallel: false
-  resource_scope: browser.target
-  supported_modes:
-  - inline
-  supported_strategies:
-  - async
-  supported_environments:
-  - local
-  runtime_key: browser.runtime.call_client
-  capabilities:
-  - browser.profile_read
-  - browser.code_read
-  - browser.runtime_readiness
-  serial_group_key: browser.target
 - id: browser.script.inspect
   name: Browser Script Inspect
   description: Inspect one live page script and return a bounded source preview. Use after list/search/find_request to examine

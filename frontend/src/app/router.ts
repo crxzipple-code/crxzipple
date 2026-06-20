@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 
 const OperationsShell = () => import("@/pages/operations/OperationsShell.vue");
 const SettingsShell = () => import("@/pages/settings/SettingsShell.vue");
-const TracePage = () => import("@/pages/trace/TracePage.vue");
+const TraceInspectorPage = () => import("@/pages/workbench/trace/TraceInspectorPage.vue");
 const WorkbenchPage = () => import("@/pages/workbench/WorkbenchPage.vue");
 
 export const router = createRouter({
@@ -28,14 +28,14 @@ export const router = createRouter({
       component: WorkbenchPage,
     },
     {
+      path: "/workbench/traces/:traceId?",
+      name: "workbench-trace-inspector",
+      component: TraceInspectorPage,
+    },
+    {
       path: "/operations/:module?",
       name: "operations",
       component: OperationsShell,
-    },
-    {
-      path: "/trace/:traceId?",
-      name: "trace",
-      component: TracePage,
     },
     {
       path: "/settings/:resource?",

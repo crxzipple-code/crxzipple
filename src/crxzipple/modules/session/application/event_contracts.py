@@ -35,7 +35,6 @@ def session_event_definitions() -> tuple[EventDefinition, ...]:
                 EventDefinitionField("provider_item_type", "Provider-native response item type.", "string"),
                 EventDefinitionField("call_id", "Tool call id for tool call/result items.", "string"),
                 EventDefinitionField("tool_name", "Tool name for tool call/result items.", "string"),
-                EventDefinitionField("visibility", "Model/user/chat/trace visibility flags.", "object", True),
                 EventDefinitionField("item", "Full session item payload.", "object", True),
             ),
             durability="persistent",

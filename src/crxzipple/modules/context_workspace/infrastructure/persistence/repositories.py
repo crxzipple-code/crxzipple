@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.context_workspace.domain import (
@@ -10,14 +11,16 @@ from crxzipple.modules.context_workspace.domain import (
     ContextEstimate,
     ContextNode,
     ContextNodeState,
-    ContextRenderSnapshot,
+    ContextRequestRenderSnapshot,
+    ContextSnapshot,
     ContextTreeOperation,
     ContextWorkspace,
 )
 from crxzipple.modules.context_workspace.infrastructure.persistence.models import (
     ContextNodeStateModel,
     ContextOperationModel,
-    ContextRenderSnapshotModel,
+    ContextRequestRenderSnapshotModel,
+    ContextSnapshotModel,
     ContextWorkspaceModel,
 )
 from crxzipple.shared.time import coerce_utc_datetime
@@ -115,6 +118,43 @@ class SqlAlchemyContextNodeRepository:
                     session.add(_node_model(node))
                 else:
                     _apply_node(model, node)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                self._save_many_individually(deduped_nodes)
+
+    def _save_many_individually(self, nodes: tuple[ContextNode, ...]) -> None:
+        for node in nodes:
+            self._save_one_with_retry(node)
+
+    def _save_one_with_retry(self, node: ContextNode) -> None:
+        with self._session_factory() as session:
+            model = _get_node_model(
+                session,
+                workspace_id=node.workspace_id,
+                node_id=node.id,
+            )
+            if model is None:
+                session.add(_node_model(node))
+            else:
+                _apply_node(model, node)
+            try:
+                session.commit()
+                return
+            except IntegrityError:
+                session.rollback()
+
+            model = _get_node_model(
+                session,
+                workspace_id=node.workspace_id,
+                node_id=node.id,
+            )
+            if model is None:
+                raise RuntimeError(
+                    "Context node upsert lost concurrent insert before retry.",
+                )
+            _apply_node(model, node)
             session.commit()
 
     def delete_subtrees(
@@ -180,6 +220,54 @@ class SqlAlchemyContextNodeRepository:
             ).all()
             return tuple(_node_from_model(model) for model in models)
 
+    def list_enabled_tool_schema_nodes(
+        self,
+        workspace_id: str,
+    ) -> tuple[ContextNode, ...]:
+        with self._session_factory() as session:
+            models = session.scalars(
+                select(ContextNodeStateModel)
+                .where(
+                    ContextNodeStateModel.workspace_id == workspace_id.strip(),
+                    ContextNodeStateModel.owner == "tool",
+                    ContextNodeStateModel.kind == "tool_function",
+                )
+                .order_by(
+                    ContextNodeStateModel.display_order.asc(),
+                    ContextNodeStateModel.node_id.asc(),
+                ),
+            ).all()
+            return tuple(
+                node
+                for model in models
+                for node in (_node_from_model(model),)
+                if node.state.schema_enabled
+            )
+
+    def list_tool_nodes_by_kind(
+        self,
+        workspace_id: str,
+        *,
+        kinds: tuple[str, ...],
+    ) -> tuple[ContextNode, ...]:
+        normalized_kinds = tuple(kind.strip() for kind in kinds if kind.strip())
+        if not normalized_kinds:
+            return ()
+        with self._session_factory() as session:
+            models = session.scalars(
+                select(ContextNodeStateModel)
+                .where(
+                    ContextNodeStateModel.workspace_id == workspace_id.strip(),
+                    ContextNodeStateModel.owner == "tool",
+                    ContextNodeStateModel.kind.in_(normalized_kinds),
+                )
+                .order_by(
+                    ContextNodeStateModel.display_order.asc(),
+                    ContextNodeStateModel.node_id.asc(),
+                ),
+            ).all()
+            return tuple(_node_from_model(model) for model in models)
+
 
 class SqlAlchemyContextOperationRepository:
     def __init__(self, session_factory: SessionFactory) -> None:
@@ -208,34 +296,34 @@ class SqlAlchemyContextOperationRepository:
             return tuple(_operation_from_model(model) for model in models)
 
 
-class SqlAlchemyContextRenderSnapshotRepository:
+class SqlAlchemyContextSnapshotRepository:
     def __init__(self, session_factory: SessionFactory) -> None:
         self._session_factory = session_factory
 
-    def add(self, snapshot: ContextRenderSnapshot) -> None:
+    def add(self, snapshot: ContextSnapshot) -> None:
         with self._session_factory() as session:
-            existing = session.get(ContextRenderSnapshotModel, snapshot.id)
+            existing = session.get(ContextSnapshotModel, snapshot.id)
             if existing is None:
                 session.add(_snapshot_model(snapshot))
             else:
                 _apply_snapshot(existing, snapshot)
             session.commit()
 
-    def get(self, snapshot_id: str) -> ContextRenderSnapshot | None:
+    def get(self, snapshot_id: str) -> ContextSnapshot | None:
         with self._session_factory() as session:
-            model = session.get(ContextRenderSnapshotModel, snapshot_id.strip())
+            model = session.get(ContextSnapshotModel, snapshot_id.strip())
             if model is None:
                 return None
             return _snapshot_from_model(model)
 
-    def get_by_run(self, run_id: str) -> ContextRenderSnapshot | None:
+    def get_by_run(self, run_id: str) -> ContextSnapshot | None:
         with self._session_factory() as session:
             model = session.scalar(
-                select(ContextRenderSnapshotModel)
-                .where(ContextRenderSnapshotModel.run_id == run_id.strip())
+                select(ContextSnapshotModel)
+                .where(ContextSnapshotModel.run_id == run_id.strip())
                 .order_by(
-                    ContextRenderSnapshotModel.created_at.desc(),
-                    ContextRenderSnapshotModel.snapshot_id.desc(),
+                    ContextSnapshotModel.created_at.desc(),
+                    ContextSnapshotModel.snapshot_id.desc(),
                 ),
             )
             if model is None:
@@ -247,18 +335,71 @@ class SqlAlchemyContextRenderSnapshotRepository:
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> tuple[ContextRenderSnapshot, ...]:
+    ) -> tuple[ContextSnapshot, ...]:
         with self._session_factory() as session:
             models = session.scalars(
-                select(ContextRenderSnapshotModel)
+                select(ContextSnapshotModel)
                 .order_by(
-                    ContextRenderSnapshotModel.created_at.desc(),
-                    ContextRenderSnapshotModel.snapshot_id.asc(),
+                    ContextSnapshotModel.created_at.desc(),
+                    ContextSnapshotModel.snapshot_id.asc(),
                 )
                 .offset(max(0, int(offset)))
                 .limit(max(1, min(int(limit), 500))),
             ).all()
             return tuple(_snapshot_from_model(model) for model in models)
+
+
+class SqlAlchemyContextRequestRenderSnapshotRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    def add(self, snapshot: ContextRequestRenderSnapshot) -> None:
+        with self._session_factory() as session:
+            existing = session.get(ContextRequestRenderSnapshotModel, snapshot.id)
+            if existing is None:
+                session.add(_request_render_snapshot_model(snapshot))
+            else:
+                _apply_request_render_snapshot(existing, snapshot)
+            session.commit()
+
+    def get(self, snapshot_id: str) -> ContextRequestRenderSnapshot | None:
+        with self._session_factory() as session:
+            model = session.get(ContextRequestRenderSnapshotModel, snapshot_id.strip())
+            if model is None:
+                return None
+            return _request_render_snapshot_from_model(model)
+
+    def get_by_run(self, run_id: str) -> ContextRequestRenderSnapshot | None:
+        with self._session_factory() as session:
+            model = session.scalar(
+                select(ContextRequestRenderSnapshotModel)
+                .where(ContextRequestRenderSnapshotModel.run_id == run_id.strip())
+                .order_by(
+                    ContextRequestRenderSnapshotModel.created_at.desc(),
+                    ContextRequestRenderSnapshotModel.snapshot_id.desc(),
+                ),
+            )
+            if model is None:
+                return None
+            return _request_render_snapshot_from_model(model)
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[ContextRequestRenderSnapshot, ...]:
+        with self._session_factory() as session:
+            models = session.scalars(
+                select(ContextRequestRenderSnapshotModel)
+                .order_by(
+                    ContextRequestRenderSnapshotModel.created_at.desc(),
+                    ContextRequestRenderSnapshotModel.snapshot_id.asc(),
+                )
+                .offset(max(0, int(offset)))
+                .limit(max(1, min(int(limit), 500))),
+            ).all()
+            return tuple(_request_render_snapshot_from_model(model) for model in models)
 
 
 def _get_node_model(
@@ -419,14 +560,14 @@ def _operation_from_model(model: ContextOperationModel) -> ContextTreeOperation:
     )
 
 
-def _snapshot_model(snapshot: ContextRenderSnapshot) -> ContextRenderSnapshotModel:
-    return ContextRenderSnapshotModel(
+def _snapshot_model(snapshot: ContextSnapshot) -> ContextSnapshotModel:
+    return ContextSnapshotModel(
         snapshot_id=snapshot.id,
         workspace_id=snapshot.workspace_id,
         session_key=snapshot.session_key,
         run_id=snapshot.run_id,
         tree_revision=snapshot.tree_revision,
-        prompt_body=snapshot.prompt_body,
+        debug_body=snapshot.debug_body,
         provider_attachments=dict(snapshot.provider_attachments),
         estimate=snapshot.estimate.to_payload(),
         included_node_ids=list(snapshot.included_node_ids),
@@ -444,15 +585,15 @@ def _snapshot_model(snapshot: ContextRenderSnapshot) -> ContextRenderSnapshotMod
 
 
 def _apply_snapshot(
-    model: ContextRenderSnapshotModel,
-    snapshot: ContextRenderSnapshot,
+    model: ContextSnapshotModel,
+    snapshot: ContextSnapshot,
 ) -> None:
     model.snapshot_id = snapshot.id
     model.workspace_id = snapshot.workspace_id
     model.session_key = snapshot.session_key
     model.run_id = snapshot.run_id
     model.tree_revision = snapshot.tree_revision
-    model.prompt_body = snapshot.prompt_body
+    model.debug_body = snapshot.debug_body
     model.provider_attachments = dict(snapshot.provider_attachments)
     model.estimate = snapshot.estimate.to_payload()
     model.included_node_ids = list(snapshot.included_node_ids)
@@ -468,14 +609,14 @@ def _apply_snapshot(
     model.created_at = snapshot.created_at
 
 
-def _snapshot_from_model(model: ContextRenderSnapshotModel) -> ContextRenderSnapshot:
-    return ContextRenderSnapshot(
+def _snapshot_from_model(model: ContextSnapshotModel) -> ContextSnapshot:
+    return ContextSnapshot(
         id=model.snapshot_id,
         workspace_id=model.workspace_id,
         session_key=model.session_key,
         run_id=model.run_id,
         tree_revision=model.tree_revision,
-        prompt_body=model.prompt_body,
+        debug_body=model.debug_body,
         provider_attachments=dict(model.provider_attachments or {}),
         estimate=ContextEstimate.from_payload(dict(model.estimate or {})),
         included_node_ids=tuple(model.included_node_ids or ()),
@@ -496,9 +637,105 @@ def _ref_tuple(refs: object) -> tuple[dict[str, object], ...]:
     return tuple(dict(ref) for ref in refs if isinstance(ref, dict))
 
 
+def _request_render_snapshot_model(
+    snapshot: ContextRequestRenderSnapshot,
+) -> ContextRequestRenderSnapshotModel:
+    return ContextRequestRenderSnapshotModel(
+        snapshot_id=snapshot.id,
+        workspace_id=snapshot.workspace_id,
+        session_key=snapshot.session_key,
+        run_id=snapshot.run_id,
+        tree_revision=snapshot.tree_revision,
+        turn_id=snapshot.turn_id,
+        step_id=snapshot.step_id,
+        llm_invocation_id=snapshot.llm_invocation_id,
+        provider=snapshot.provider,
+        transport=snapshot.transport,
+        model=snapshot.model,
+        renderer_id=snapshot.renderer_id,
+        renderer_version=snapshot.renderer_version,
+        session_frontier_revision=snapshot.session_frontier_revision,
+        input_item_refs=[dict(ref) for ref in snapshot.input_item_refs],
+        projected_input_items=[
+            dict(item) for item in snapshot.projected_input_items
+        ],
+        tool_schema_refs=[dict(ref) for ref in snapshot.tool_schema_refs],
+        resource_refs=[dict(ref) for ref in snapshot.resource_refs],
+        request_hash=snapshot.request_hash,
+        estimated_tokens=snapshot.estimated_tokens,
+        render_report=dict(snapshot.render_report),
+        timings=dict(snapshot.timings),
+        metadata_=dict(snapshot.metadata),
+        created_at=snapshot.created_at,
+    )
+
+
+def _apply_request_render_snapshot(
+    model: ContextRequestRenderSnapshotModel,
+    snapshot: ContextRequestRenderSnapshot,
+) -> None:
+    model.workspace_id = snapshot.workspace_id
+    model.session_key = snapshot.session_key
+    model.run_id = snapshot.run_id
+    model.tree_revision = snapshot.tree_revision
+    model.turn_id = snapshot.turn_id
+    model.step_id = snapshot.step_id
+    model.llm_invocation_id = snapshot.llm_invocation_id
+    model.provider = snapshot.provider
+    model.transport = snapshot.transport
+    model.model = snapshot.model
+    model.renderer_id = snapshot.renderer_id
+    model.renderer_version = snapshot.renderer_version
+    model.session_frontier_revision = snapshot.session_frontier_revision
+    model.input_item_refs = [dict(ref) for ref in snapshot.input_item_refs]
+    model.projected_input_items = [
+        dict(item) for item in snapshot.projected_input_items
+    ]
+    model.tool_schema_refs = [dict(ref) for ref in snapshot.tool_schema_refs]
+    model.resource_refs = [dict(ref) for ref in snapshot.resource_refs]
+    model.request_hash = snapshot.request_hash
+    model.estimated_tokens = snapshot.estimated_tokens
+    model.render_report = dict(snapshot.render_report)
+    model.timings = dict(snapshot.timings)
+    model.metadata_ = dict(snapshot.metadata)
+    model.created_at = snapshot.created_at
+
+
+def _request_render_snapshot_from_model(
+    model: ContextRequestRenderSnapshotModel,
+) -> ContextRequestRenderSnapshot:
+    return ContextRequestRenderSnapshot(
+        id=model.snapshot_id,
+        workspace_id=model.workspace_id,
+        session_key=model.session_key,
+        run_id=model.run_id,
+        tree_revision=model.tree_revision,
+        turn_id=model.turn_id,
+        step_id=model.step_id,
+        llm_invocation_id=model.llm_invocation_id,
+        provider=model.provider,
+        transport=model.transport,
+        model=model.model,
+        renderer_id=model.renderer_id,
+        renderer_version=model.renderer_version,
+        session_frontier_revision=model.session_frontier_revision,
+        input_item_refs=_ref_tuple(model.input_item_refs or ()),
+        projected_input_items=_ref_tuple(model.projected_input_items or ()),
+        tool_schema_refs=_ref_tuple(model.tool_schema_refs or ()),
+        resource_refs=_ref_tuple(model.resource_refs or ()),
+        request_hash=model.request_hash,
+        estimated_tokens=model.estimated_tokens,
+        render_report=dict(model.render_report or {}),
+        timings=dict(model.timings or {}),
+        metadata=dict(model.metadata_ or {}),
+        created_at=coerce_utc_datetime(model.created_at),
+    )
+
+
 __all__ = [
     "SqlAlchemyContextNodeRepository",
     "SqlAlchemyContextOperationRepository",
-    "SqlAlchemyContextRenderSnapshotRepository",
+    "SqlAlchemyContextRequestRenderSnapshotRepository",
+    "SqlAlchemyContextSnapshotRepository",
     "SqlAlchemyContextWorkspaceRepository",
 ]

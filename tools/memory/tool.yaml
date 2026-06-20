@@ -1,6 +1,6 @@
 kind: local_package
 namespace: memory
-prompt:
+runtime_request:
   title: Memory
   summary: Recall, inspect, write, and maintain governed memory scopes visible to the current agent.
 capabilities:

@@ -1,8 +1,8 @@
 kind: local_package
 namespace: command
-prompt:
+runtime_request:
   title: Command Execution
-  summary: Run shell commands for tests, builds, diagnostics, and managed process sessions inside the session-bound workspace. Prefer high-signal commands, narrow verification, explicit timeouts, and bounded output.
+  summary: Run shell commands as a local workspace runtime for tests, builds, diagnostics, environment probes, short scripts, network/resource inspection, and managed process sessions. Prefer high-signal commands, narrow verification, explicit timeouts, and bounded output.
   default_tool_schema_policy:
     priority: 10
   default_tool_schema_group_refs:
@@ -14,13 +14,13 @@ prompt:
     run_and_verify:
       order: 10
       title: Run And Verify
-      summary: Prefer high-signal commands, narrow verification, explicit timeouts, and max_output_tokens for potentially long output. Execute focused tests, builds, linters, searches, and diagnostics from the bound workspace. Use $CRXZIPPLE_PYTHON for Python probes or scripts so dependency checks match the runtime environment. Do not use long raw output as the default exploration surface.
+      summary: Use the bound shell as a local runtime for focused tests, builds, linters, searches, diagnostics, dependency checks, small Node/Python probes, downloaded resource inspection, and request reproduction. Prefer high-signal commands, narrow verification, explicit timeouts, and max_output_tokens for potentially long output. Use $CRXZIPPLE_PYTHON for Python probes or scripts so dependency checks match the runtime environment. Let stdout, stderr, and exit_code guide the next step instead of repeating the same probe.
       function_ids:
         - exec
       default_tool_schema_ids:
         - exec
       default_tool_schema_max_count: 1
-      default_tool_schema_source: bundled.local_package.command.prompt_group.run_and_verify
+      default_tool_schema_source: bundled.local_package.command.runtime_request_group.run_and_verify
     background_processes:
       order: 20
       title: Background Processes
@@ -30,7 +30,7 @@ prompt:
       default_tool_schema_ids:
         - process
       default_tool_schema_max_count: 1
-      default_tool_schema_source: bundled.local_package.command.prompt_group.background_processes
+      default_tool_schema_source: bundled.local_package.command.runtime_request_group.background_processes
 capabilities:
   - workspace.lookup
   - process.spawn
@@ -45,7 +45,7 @@ dependencies:
 local_tools:
   - id: exec
     name: Workspace Exec
-    description: Run a local shell command from the current bound workspace. Prefer focused, high-signal commands and set max_output_tokens for commands that may produce long output. Python commands inherit the CRXZipple runtime Python on PATH; use $CRXZIPPLE_PYTHON for precise interpreter checks.
+    description: Run a local shell command from the current bound workspace. Use it to inspect files, verify builds/tests, check installed runtime capabilities, run short Node/Python probes, inspect downloaded resources, or reproduce HTTP/API requests. Prefer focused, high-signal commands with explicit timeouts and max_output_tokens for long output. Python commands inherit the CRXZipple runtime Python on PATH; use $CRXZIPPLE_PYTHON for precise interpreter checks. Non-zero exits, stdout, and stderr are returned as evidence for the next step.
     provider_name: local_system
     entrypoint: tools.command.local:exec
     tool_kind: function

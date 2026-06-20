@@ -9,8 +9,10 @@ FILE_LINE_BUDGETS = {
     "frontend/src/pages/operations/modules/ToolOperationsPage.vue": 4300,
     "frontend/src/pages/operations/modules/tool/viewHelpers.ts": 700,
     "tests/unit/test_ui_http.py": 3300,
+    "tests/unit/test_ui_operations_http.py": 3400,
     "tests/unit/test_ui_operations_actions_http.py": 260,
     "tests/unit/test_browser_tool_http.py": 3200,
+    "tests/unit/test_browser_tool_http_advanced.py": 2200,
     "tests/browser/test_browser_tool_http.py": 3200,
 }
 

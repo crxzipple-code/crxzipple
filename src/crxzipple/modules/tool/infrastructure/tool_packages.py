@@ -443,12 +443,18 @@ def _registration_for_local_handler(
     )
 
 
-def _load_namespace(manifest_path: Path) -> ToolNamespaceDefinition:
-    payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+def _load_yaml_mapping(manifest_path: Path) -> dict[str, object]:
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    payload = yaml.load(manifest_path.read_text(encoding="utf-8"), Loader=loader)
     if not isinstance(payload, dict):
         raise ToolValidationError(
             f"Tool namespace manifest '{manifest_path}' must decode to a mapping.",
         )
+    return payload
+
+
+def _load_namespace(manifest_path: Path) -> ToolNamespaceDefinition:
+    payload = _load_yaml_mapping(manifest_path)
 
     namespace_name = str(payload.get("namespace", "")).strip()
     if not namespace_name:
@@ -474,7 +480,7 @@ def _load_namespace(manifest_path: Path) -> ToolNamespaceDefinition:
             manifest_path=str(manifest_path),
             package_kind=kind,
             capability_ids=package_capability_ids,
-            prompt=_load_prompt_metadata(payload.get("prompt"), manifest_path),
+            runtime_request=_load_runtime_request_metadata(payload.get("runtime_request"), manifest_path),
             local_handlers=_load_local_bindings(
                 payload,
                 manifest_path,
@@ -511,7 +517,7 @@ def _load_namespace(manifest_path: Path) -> ToolNamespaceDefinition:
             manifest_path=str(manifest_path),
             package_kind=kind,
             capability_ids=package_capability_ids,
-            prompt=_load_prompt_metadata(payload.get("prompt"), manifest_path),
+            runtime_request=_load_runtime_request_metadata(payload.get("runtime_request"), manifest_path),
             openapi=ToolOpenApiPlan(
                 namespace=namespace_name,
                 provider=_load_openapi_provider(payload, manifest_path),
@@ -681,43 +687,43 @@ def _load_provider_backend_plans(
     return tuple(backends)
 
 
-def _load_prompt_metadata(
-    raw_prompt: object,
+def _load_runtime_request_metadata(
+    raw_runtime_request: object,
     manifest_path: Path,
 ) -> dict[str, object]:
-    if raw_prompt in (None, {}):
+    if raw_runtime_request in (None, {}):
         return {}
-    if not isinstance(raw_prompt, dict):
+    if not isinstance(raw_runtime_request, dict):
         raise ToolValidationError(
-            f"Tool namespace manifest '{manifest_path}' field 'prompt' must be a mapping.",
+            f"Tool namespace manifest '{manifest_path}' field 'runtime_request' must be a mapping.",
         )
-    prompt: dict[str, object] = _stable_payload(raw_prompt)
+    runtime_request: dict[str, object] = _stable_payload(raw_runtime_request)
     for key in ("title", "summary"):
-        raw_value = raw_prompt.get(key)
+        raw_value = raw_runtime_request.get(key)
         if raw_value is None:
-            prompt.pop(key, None)
+            runtime_request.pop(key, None)
             continue
         value = str(raw_value).strip()
         if value:
-            prompt[key] = value
+            runtime_request[key] = value
         else:
-            prompt.pop(key, None)
-    raw_groups = raw_prompt.get("groups")
+            runtime_request.pop(key, None)
+    raw_groups = raw_runtime_request.get("groups")
     if raw_groups is not None:
         if not isinstance(raw_groups, dict):
             raise ToolValidationError(
-                f"Tool namespace manifest '{manifest_path}' field 'prompt.groups' must be a mapping.",
+                f"Tool namespace manifest '{manifest_path}' field 'runtime_request.groups' must be a mapping.",
             )
         groups: dict[str, object] = {}
         for raw_group_key, raw_group in raw_groups.items():
             group_key = str(raw_group_key).strip()
             if not group_key:
                 raise ToolValidationError(
-                    f"Tool namespace manifest '{manifest_path}' prompt group keys cannot be empty.",
+                    f"Tool namespace manifest '{manifest_path}' runtime_request group keys cannot be empty.",
                 )
             if not isinstance(raw_group, dict):
                 raise ToolValidationError(
-                    f"Tool namespace manifest '{manifest_path}' prompt group '{group_key}' must be a mapping.",
+                    f"Tool namespace manifest '{manifest_path}' runtime_request group '{group_key}' must be a mapping.",
                 )
             group_payload: dict[str, object] = _stable_payload(raw_group)
             for key in ("title", "summary"):
@@ -732,7 +738,7 @@ def _load_prompt_metadata(
                     group_payload.pop(key, None)
             function_ids = _parse_string_list(
                 raw_group.get("function_ids", []),
-                "prompt.groups.function_ids",
+                "runtime_request.groups.function_ids",
                 manifest_path,
             )
             raw_order = raw_group.get("order")
@@ -741,7 +747,7 @@ def _load_prompt_metadata(
                     group_payload["order"] = int(raw_order)
                 except (TypeError, ValueError) as exc:
                     raise ToolValidationError(
-                        f"Tool namespace manifest '{manifest_path}' prompt group '{group_key}' order must be an integer.",
+                        f"Tool namespace manifest '{manifest_path}' runtime_request group '{group_key}' order must be an integer.",
                     ) from exc
             if function_ids:
                 group_payload["function_ids"] = function_ids
@@ -749,10 +755,10 @@ def _load_prompt_metadata(
                 group_payload.pop("function_ids", None)
             groups[group_key] = group_payload
         if groups:
-            prompt["groups"] = groups
+            runtime_request["groups"] = groups
         else:
-            prompt.pop("groups", None)
-    return prompt
+            runtime_request.pop("groups", None)
+    return runtime_request
 
 
 def _load_dependency_requirements(

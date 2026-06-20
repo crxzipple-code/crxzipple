@@ -393,28 +393,14 @@ class BrowserObservationServiceTestCase(unittest.TestCase):
             result.payload["guidance"]["next_action"],
             "inspect-runtime-or-scripts",
         )
-        self.assertEqual(
-            result.payload["guidance"]["evidence_path_key"],
-            "runtime_and_code",
-        )
         self.assertIn(
             "browser.runtime.inspect",
             result.payload["guidance"]["suggested_tools"],
         )
-        self.assertEqual(
-            result.payload["guidance"]["primary_evidence_path"]["key"],
-            "runtime_and_code",
-        )
-        alternative_keys = {
-            item["key"]
-            for item in result.payload["guidance"]["alternative_evidence_paths"]
-        }
-        self.assertIn("stateful_interaction", alternative_keys)
-        self.assertIn("network_truth", alternative_keys)
-        evidence_path_keys = {
-            item["key"] for item in result.payload["guidance"]["evidence_paths"]
-        }
-        self.assertIn("diagnose_blockers", evidence_path_keys)
+        self.assertNotIn("evidence_path_key", result.payload["guidance"])
+        self.assertNotIn("primary_evidence_path", result.payload["guidance"])
+        self.assertNotIn("alternative_evidence_paths", result.payload["guidance"])
+        self.assertNotIn("evidence_paths", result.payload["guidance"])
         self.assertEqual(
             result.runtime_metadata["browser_observation_target_id"],
             "tab-1",
@@ -734,33 +720,6 @@ class BrowserObservationServiceTestCase(unittest.TestCase):
                                 "browser.code.search",
                                 "browser.network.inspect",
                             ],
-                            "evidence_path_key": "runtime_and_code",
-                            "primary_evidence_path": {
-                                "key": "runtime_and_code",
-                                "title": "Inspect Runtime And Frontend Code",
-                                "tool_ids": [
-                                    "browser.runtime.inspect",
-                                    "browser.script.find_request",
-                                ],
-                            },
-                            "alternative_evidence_paths": [
-                                {
-                                    "key": "network_truth",
-                                    "title": "Trace Network Truth",
-                                    "tool_ids": [
-                                        "browser.network.inspect",
-                                        "browser.network.replay_request",
-                                    ],
-                                },
-                                {
-                                    "key": "stateful_interaction",
-                                    "title": "Act With Evidence",
-                                    "tool_ids": [
-                                        "browser.action.trace",
-                                        "browser.form.inspect",
-                                    ],
-                                },
-                            ],
                         },
                         "errors": [],
                     },
@@ -795,18 +754,8 @@ class BrowserObservationServiceTestCase(unittest.TestCase):
         self.assertIn("r3: option \"Kunming\"", result.content[0]["text"])
         self.assertIn("Next: inspect-runtime-or-scripts", result.content[0]["text"])
         self.assertIn("Suggested tools: browser.runtime.inspect", result.content[0]["text"])
-        self.assertIn(
-            "Evidence path: runtime_and_code",
-            result.content[0]["text"],
-        )
-        self.assertIn(
-            "Alternative paths: network_truth",
-            result.content[0]["text"],
-        )
-        self.assertIn(
-            "network_truth",
-            result.content[0]["text"],
-        )
+        self.assertNotIn("Evidence path:", result.content[0]["text"])
+        self.assertNotIn("Alternative paths:", result.content[0]["text"])
         self.assertIn("Snapshot (interactive)", result.content[0]["text"])
 
     def test_browser_observe_handler_omits_raw_large_payloads_from_content(self) -> None:
@@ -876,11 +825,6 @@ class BrowserObservationServiceTestCase(unittest.TestCase):
                         },
                         "guidance": {
                             "next_action": "inspect-network-truth",
-                            "primary_evidence_path": {
-                                "key": "network_truth",
-                                "title": "Trace Network Truth",
-                                "tool_ids": ["browser.network.list_requests"],
-                            },
                         },
                         "errors": [],
                     },
@@ -908,7 +852,7 @@ class BrowserObservationServiceTestCase(unittest.TestCase):
         self.assertIn("Observed page with bounded summaries.", text)
         self.assertIn("Runtime: 200 resource(s), 8 runtime frame(s)", text)
         self.assertIn("Network: 1 navigation entry, 200 resource entry", text)
-        self.assertIn("Evidence path: network_truth", text)
+        self.assertNotIn("Evidence path:", text)
         self.assertNotIn(raw_resource_secret, text)
         self.assertNotIn(raw_body_secret, text)
         self.assertNotIn(raw_snapshot_secret, text)

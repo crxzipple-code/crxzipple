@@ -394,7 +394,7 @@ OrchestrationEngine.advance_once
 新增或重组测试：
 
 - [x] `tests/unit/test_prompt_input_collector.py`
-- [x] `tests/unit/test_orchestration_provider_request_builder.py`
+- [x] `tests/unit/test_orchestration_runtime_llm_request_builder.py`
 - [x] `tests/unit/test_context_workspace_root_nodes.py`
 - [x] `tests/unit/test_context_render_xml_renderer.py`
 - [x] `tests/unit/test_context_provider_mirror.py`

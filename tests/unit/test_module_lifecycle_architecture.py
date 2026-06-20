@@ -325,10 +325,9 @@ def test_operations_source_read_model_context_is_explicitly_typed() -> None:
 
 def test_orchestration_does_not_reintroduce_retired_prompt_helpers() -> None:
     retired_paths = (
-        "src/crxzipple/modules/orchestration/application/prompt_input_collectr.py",
         "src/crxzipple/modules/orchestration/application/memory_context.py",
         "src/crxzipple/modules/orchestration/application/workspace_context.py",
-        "src/crxzipple/modules/orchestration/application/prompting/flow_prompts.py",
+        "src/crxzipple/modules/orchestration/application/flow_prompts.py",
     )
     forbidden_terms = (
         "PromptAssembler",

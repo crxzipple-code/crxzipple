@@ -1,25 +1,27 @@
 from __future__ import annotations
 
 from crxzipple.modules.skills.application.models import (
-    SkillCatalogPrompt,
+    SkillRuntimeRequestCatalog,
     SkillPackage,
 )
 
 
-def build_skill_catalog_prompt(
+def build_skill_runtime_request_catalog(
     available_skills: tuple[SkillPackage, ...],
-) -> SkillCatalogPrompt | None:
+) -> SkillRuntimeRequestCatalog | None:
     if not available_skills:
         return None
     lines = [
-        "# Available Skills",
+        "## Skills",
         "",
-        "The following optional skills are available for this run.",
-        "Use a skill only when it clearly matches the current task.",
-        "Skill requirements describe applicability, not permission grants.",
-        "Use skill_read to read SKILL.md or another file inside a skill package when that guidance would genuinely help.",
-        "You may read multiple skills or referenced files before deciding what to do.",
-        "Do not read every skill by default. Prefer the smallest useful set.",
+        "A skill is a local instruction package that can extend the agent with task-specific workflows, tool integrations, or domain guidance.",
+        "",
+        "### Available Skills",
+        "",
+        "The following skills are available for this run. Each entry includes its name, description, and source path.",
+        "If the user names a skill, or the task clearly matches a skill description, read that skill's SKILL.md with skill_read before acting.",
+        "When SKILL.md references relative files, use skill_read to read only the referenced files needed for the task.",
+        "Do not read every skill by default. Prefer the smallest useful set, and continue with normal tools when no skill applies.",
         "",
         "<available_skills>",
     ]
@@ -45,7 +47,17 @@ def build_skill_catalog_prompt(
             f"- {skill.name}: {skill.description} ({'; '.join(details)})",
         )
     lines.append("</available_skills>")
-    return SkillCatalogPrompt(
+    lines.extend(
+        (
+            "",
+            "### How to use skills",
+            "",
+            "- Use skill_read with path `SKILL.md` for the chosen skill before following its workflow.",
+            "- If multiple skills apply, read the minimal set that covers the task and follow them in a sensible order.",
+            "- If a required skill tool is unavailable or blocked, say what is missing and use the next best available route.",
+        ),
+    )
+    return SkillRuntimeRequestCatalog(
         content="\n".join(lines).strip(),
         metadata={
             "count": len(available_skills),

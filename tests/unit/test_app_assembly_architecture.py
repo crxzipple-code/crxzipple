@@ -131,15 +131,95 @@ def test_runtime_container_has_no_attribute_compatibility_surface() -> None:
     assert "setattr(" not in registry_text
 
 
-def test_orchestration_uses_prompt_input_collector_not_legacy_surface_builder() -> None:
+def test_orchestration_uses_runtime_request_draft_collector_not_legacy_surface_builder() -> None:
     violations: list[str] = []
     for path in _production_python_files(
         REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration",
         REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "orchestration.py",
     ):
         text = path.read_text(encoding="utf-8")
-        if "RunPromptInputBuilder" in text:
+        if "RuntimeLlmRequestDraftBuilder" in text:
             violations.append(str(path.relative_to(REPO_ROOT)))
+
+    assert violations == []
+
+
+def test_orchestration_application_does_not_embed_provider_specific_request_rendering() -> None:
+    provider_specific_terms = (
+        "openai",
+        "codex",
+        "anthropic",
+        "gemini",
+        "previous_response_id",
+        "responses",
+        "chat_completions",
+    )
+    allowed_paths: set[Path] = set()
+    violations: list[str] = []
+    for path in _production_python_files(
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration" / "application",
+    ):
+        relative = path.relative_to(REPO_ROOT)
+        if relative in allowed_paths:
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        for term in provider_specific_terms:
+            if term in text:
+                violations.append(f"{relative}: {term}")
+
+    assert violations == []
+
+
+def test_runtime_kernel_does_not_embed_generic_evidence_judges_or_task_specialization() -> None:
+    judge_terms = (
+        "EvidenceGate",
+        "EvidenceOutcomeClassifier",
+    )
+    kernel_roots = (
+        REPO_ROOT / "src" / "crxzipple" / "app" / "integration",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "context_workspace",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "llm",
+    )
+    task_patterns = {
+        "east_china_airlines": re.compile(r"东航|ceair", flags=re.IGNORECASE),
+        "flight_domain": re.compile(r"航班|airline", flags=re.IGNORECASE),
+    }
+    violations: list[str] = []
+    for path in _production_python_files(*kernel_roots):
+        relative = path.relative_to(REPO_ROOT)
+        text = path.read_text(encoding="utf-8")
+        for term in judge_terms:
+            if term in text:
+                violations.append(f"{relative}: {term}")
+        for label, pattern in task_patterns.items():
+            if pattern.search(text):
+                violations.append(f"{relative}: {label}")
+
+    assert violations == []
+
+
+def test_session_module_does_not_store_provider_wire_transcript_semantics() -> None:
+    provider_wire_terms = (
+        "previous_response_id",
+        "provider_request_payload",
+        "provider_wire",
+        "chat_completions",
+        "responses.create",
+        "openai",
+        "codex",
+        "anthropic",
+        "gemini",
+    )
+    violations: list[str] = []
+    for path in _production_python_files(
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "session",
+    ):
+        relative = path.relative_to(REPO_ROOT)
+        text = path.read_text(encoding="utf-8").lower()
+        for term in provider_wire_terms:
+            if term in text:
+                violations.append(f"{relative}: {term}")
 
     assert violations == []
 
@@ -317,7 +397,7 @@ def test_tool_runtime_catalog_truth_is_not_materialized_from_settings() -> None:
     assert violations == []
 
 
-def test_orchestration_does_not_own_skill_prompt_resolution() -> None:
+def test_orchestration_does_not_own_skill_runtime_request_resolution() -> None:
     orchestration_root = (
         REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration"
     )
@@ -374,16 +454,92 @@ def test_orchestration_has_no_legacy_full_history_transcript_builder() -> None:
     violations: list[str] = []
     for path in _production_python_files(orchestration_root):
         text = path.read_text(encoding="utf-8")
-        if "build_prompt_transcript" in text:
-            violations.append(f"{path.relative_to(REPO_ROOT)}: build_prompt_transcript")
+        if "build_runtime_transcript" in text:
+            violations.append(f"{path.relative_to(REPO_ROOT)}: build_runtime_transcript")
+
+    assert violations == []
+
+
+def test_orchestration_read_models_do_not_own_ui_or_trace_projection() -> None:
+    read_model_root = (
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "application"
+        / "read_models"
+    )
+    production_files = [
+        path.relative_to(REPO_ROOT)
+        for path in _production_python_files(read_model_root)
+        if path.name != "__init__.py"
+    ]
+
+    assert production_files == []
+
+
+def test_llm_request_path_does_not_consume_context_debug_body() -> None:
+    """Debug render is observation-only and must not become model input."""
+
+    roots = (
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "llm" / "application",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "llm" / "infrastructure",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration" / "application",
+    )
+    allowed = {
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "llm"
+        / "application"
+        / "runtime_request.py",
+    }
+    violations: list[str] = []
+    for path in _production_python_files(*roots):
+        if path in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "debug_body" in text:
+            violations.append(f"{path.relative_to(REPO_ROOT)}: debug_body")
+
+    assert violations == []
+
+
+def test_provider_request_path_does_not_import_context_observation_rendering() -> None:
+    """Provider requests consume ContextSlice data, not debug/observation renders."""
+
+    roots = (
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "llm" / "application",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "llm" / "infrastructure",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration" / "application",
+    )
+    forbidden_modules = (
+        "crxzipple.modules.context_workspace.application.rendering",
+    )
+    violations = _forbidden_import_violations(
+        roots=roots,
+        forbidden_modules=forbidden_modules,
+    )
+    forbidden_symbols = (
+        "ContextObservationRenderResult",
+        "ContextObservationSnapshotService",
+        "RecordContextSnapshotInput",
+    )
+    for path in _production_python_files(*roots):
+        text = path.read_text(encoding="utf-8")
+        for symbol in forbidden_symbols:
+            if symbol in text:
+                violations.append(f"{path.relative_to(REPO_ROOT)}: {symbol}")
 
     assert violations == []
 
 
 def test_frontend_prompt_snapshot_uses_context_workspace_surface_only() -> None:
-    allowed_prompt_body_files = {
-        FRONTEND_ROOT / "pages" / "trace" / "api.ts",
-        FRONTEND_ROOT / "pages" / "trace" / "TracePage.vue",
+    allowed_debug_body_files = {
+        FRONTEND_ROOT / "pages" / "workbench" / "trace" / "api.ts",
+        FRONTEND_ROOT / "pages" / "workbench" / "trace" / "TraceInspectorPage.vue",
         FRONTEND_ROOT / "pages" / "workbench" / "api.ts",
         FRONTEND_ROOT / "pages" / "workbench" / "WorkbenchPage.vue",
     }
@@ -397,8 +553,8 @@ def test_frontend_prompt_snapshot_uses_context_workspace_surface_only() -> None:
 
     for path in _frontend_source_files():
         text = path.read_text(encoding="utf-8")
-        if "prompt_body" in text and path not in allowed_prompt_body_files:
-            violations.append(f"{path.relative_to(REPO_ROOT)}: prompt_body")
+        if "debug_body" in text and path not in allowed_debug_body_files:
+            violations.append(f"{path.relative_to(REPO_ROOT)}: debug_body")
         for line_number, line in enumerate(text.splitlines(), start=1):
             lower_line = line.lower()
             if "prompt" not in lower_line:
@@ -409,6 +565,79 @@ def test_frontend_prompt_snapshot_uses_context_workspace_surface_only() -> None:
                         f"{path.relative_to(REPO_ROOT)}:{line_number}: "
                         f"{line.strip()}",
                     )
+
+    assert violations == []
+
+
+def test_workbench_runtime_selectors_use_workbench_facade_endpoints() -> None:
+    api_text = (
+        FRONTEND_ROOT / "pages" / "workbench" / "api.ts"
+    ).read_text(encoding="utf-8")
+
+    assert '"/ui/workbench/tools?enabled_only=true"' in api_text
+    assert '"/ui/workbench/agents"' in api_text
+    assert '"/ui/workbench/models"' in api_text
+    assert '"/ui/workbench/turns"' in api_text
+    assert "/ui/workbench/turns/" in api_text
+    assert "/ui/workbench/context-tree/by-session/" in api_text
+    assert "/ui/workbench/context-snapshots/runs/" in api_text
+    assert "/ui/workbench/context-snapshots/" in api_text
+    assert "/ui/workbench/runs/" in api_text
+    assert "/ui/workbench/llm-invocations/" in api_text
+    assert '"/tools?enabled_only=true"' not in api_text
+    assert '"/agents"' not in api_text
+    assert '"/llms"' not in api_text
+    assert '"/turns"' not in api_text
+    assert "`/turns/" not in api_text
+    assert "/context-workspaces/by-session/" not in api_text
+    assert "/context-workspaces/runs/" not in api_text
+    assert "/context-workspaces/snapshots/" not in api_text
+    assert "/turns/${encodeURIComponent(runId)}/llm-request-preview" not in api_text
+    assert "/llms/calls/" not in api_text
+
+    trace_api_text = (
+        FRONTEND_ROOT / "pages" / "workbench" / "trace" / "api.ts"
+    ).read_text(encoding="utf-8")
+    assert "/ui/workbench/context-snapshots/runs/" in trace_api_text
+    assert "/ui/workbench/context-snapshots/" in trace_api_text
+    assert "/ui/workbench/runs/" in trace_api_text
+    assert "/ui/workbench/llm-invocations/" in trace_api_text
+    assert "/context-workspaces/runs/" not in trace_api_text
+    assert "/context-workspaces/snapshots/" not in trace_api_text
+    assert "/turns/${encodeURIComponent(runId)}/llm-request-preview" not in trace_api_text
+    assert "/llms/calls/" not in trace_api_text
+
+
+def test_frontend_trace_has_only_workbench_product_route() -> None:
+    router_text = (FRONTEND_ROOT / "app" / "router.ts").read_text(encoding="utf-8")
+    legacy_trace_page = FRONTEND_ROOT / "pages" / "trace"
+
+    assert 'path: "/workbench/traces/:traceId?"' in router_text
+    assert 'path: "/trace/:traceId?"' not in router_text
+    assert "name: \"trace\"" not in router_text
+    assert not legacy_trace_page.exists()
+
+
+def test_llm_adapter_common_module_is_retired() -> None:
+    adapter_root = (
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "llm"
+        / "infrastructure"
+        / "adapters"
+    )
+    common_path = adapter_root / "common.py"
+    violations: list[str] = []
+
+    if common_path.exists():
+        violations.append(f"{common_path.relative_to(REPO_ROOT)}: retired module")
+
+    for path in _production_python_files(adapter_root):
+        text = path.read_text(encoding="utf-8")
+        if "adapters.common" in text or "adapters import common" in text:
+            violations.append(f"{path.relative_to(REPO_ROOT)}: common import")
 
     assert violations == []
 
@@ -459,7 +688,7 @@ def test_orchestration_ingress_targets_share_intake_builder() -> None:
         assert "build_run_intake_coordinator(" in text
         assert "SessionRunPreparationWorkflow(" not in text
         assert "ResolveSessionInput" not in text
-        assert "session_start_prompt_flow_hint" not in text
+        assert "session_start_runtime_request_flow_hint" not in text
 
 
 def test_orchestration_service_graph_does_not_proxy_owner_coordinator_methods() -> None:
@@ -485,7 +714,7 @@ def test_orchestration_service_graph_does_not_proxy_owner_coordinator_methods() 
         "def _complete_assignment(",
         "def _fail_assignment(",
         "def _admit_assignment(",
-        "def _clear_prompt_flow_hint(",
+        "def _clear_runtime_request_flow_hint(",
         "def _request_compaction(",
         "def _request_heartbeat(",
         "def _request_memory_flush(",

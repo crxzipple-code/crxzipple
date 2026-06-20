@@ -7,10 +7,10 @@ from typing import Any
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     ContextNodeUpsertInput,
-    ContextRenderService,
+    ContextObservationSnapshotService,
     ContextTreeService,
-    RenderContextDeltaInput,
-    RenderContextPromptInput,
+    ContextDebugDeltaInput,
+    ContextObservationRenderInput,
 )
 from crxzipple.modules.context_workspace.domain import (
     ContextAction,
@@ -24,6 +24,7 @@ from crxzipple.modules.context_workspace.domain import (
 )
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 
+CAPABILITY_SEARCH_TOOL_ID = "capability.search"
 CONTEXT_TREE_LIST_TOOL_ID = "context_tree.list"
 CONTEXT_TREE_EXPAND_TOOL_ID = "context_tree.expand"
 CONTEXT_TREE_COLLAPSE_TOOL_ID = "context_tree.collapse"
@@ -48,23 +49,105 @@ class ContextTreeToolDeps:
         default=None,
         metadata={"dependency_id": "context_tree_service"},
     )
-    context_render_service: ContextRenderService | None = field(
+    context_observation_snapshot_service: ContextObservationSnapshotService | None = field(
         default=None,
-        metadata={"dependency_id": "context_render_service"},
+        metadata={"dependency_id": "context_observation_snapshot_service"},
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _CapabilityMatch:
+    node: ContextNode
+    score: int
+    matched_fields: tuple[str, ...]
 
 
 def _coerce_deps(value: ContextTreeToolDeps | Any) -> ContextTreeToolDeps | None:
     if isinstance(value, ContextTreeToolDeps):
         return value
     context_tree_service = getattr(value, "context_tree_service", None)
-    context_render_service = getattr(value, "context_render_service", None)
-    if context_tree_service is None or context_render_service is None:
+    context_observation_snapshot_service = getattr(value, "context_observation_snapshot_service", None)
+    if context_tree_service is None or context_observation_snapshot_service is None:
         return None
     return ContextTreeToolDeps(
         context_tree_service=context_tree_service,
-        context_render_service=context_render_service,
+        context_observation_snapshot_service=context_observation_snapshot_service,
     )
+
+
+def capability_search(deps: ContextTreeToolDeps | Any):
+    resolved = _coerce_deps(deps)
+    if resolved is None:
+        return None
+
+    async def handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRunResult:
+        session_key = _resolve_session_key(arguments, execution_context)
+        query = _optional_text(arguments.get("query")) or ""
+        enable = bool(arguments.get("enable"))
+        limit = _bounded_int(arguments.get("limit"), default=12, minimum=1, maximum=50)
+
+        _expand_if_present(
+            resolved.context_tree_service,
+            session_key=session_key,
+            node_id="tools.available",
+            execution_context=execution_context,
+        )
+        tree = resolved.context_tree_service.list_tree(session_key)
+        matches = _capability_matches(tree.nodes, query=query, limit=limit)
+
+        enabled_node_ids: list[str] = []
+        if enable:
+            enabled_node_ids.extend(
+                _enable_capability_matches(
+                    resolved.context_tree_service,
+                    session_key=session_key,
+                    matches=matches,
+                    limit=limit,
+                    execution_context=execution_context,
+                ),
+            )
+            tree = resolved.context_tree_service.list_tree(session_key)
+            matches = _capability_matches(tree.nodes, query=query, limit=limit)
+
+        rendered = resolved.context_observation_snapshot_service.render_observation(
+            ContextObservationRenderInput(session_key=session_key),
+        )
+        mirrored_schema_names = _mirrored_tool_schema_names(
+            rendered.provider_attachments,
+        )
+        result_payload = tuple(_capability_match_payload(match) for match in matches)
+        return ToolRunResult.text(
+            _render_capability_search_text(
+                query=query,
+                matches=result_payload,
+                enabled_node_ids=tuple(enabled_node_ids),
+                mirrored_schema_names=mirrored_schema_names,
+            ),
+            details={
+                "session_key": tree.workspace.session_key,
+                "workspace_id": tree.workspace.id,
+                "revision": tree.workspace.active_revision,
+                "query": query,
+                "enable": enable,
+                "matches": [dict(item) for item in result_payload],
+                "enabled_node_ids": enabled_node_ids,
+                "mirrored_tool_schema_names": list(mirrored_schema_names),
+                "tool_schema_mirror_available": rendered.tool_schema_mirror_available,
+            },
+            metadata={
+                "tool": CAPABILITY_SEARCH_TOOL_ID,
+                "session_key": tree.workspace.session_key,
+                "query": query,
+                "enable": enable,
+                "match_count": len(result_payload),
+                "enabled_count": len(enabled_node_ids),
+            },
+        )
+
+    return handler
 
 
 def context_tree_list(deps: ContextTreeToolDeps | Any):
@@ -108,8 +191,8 @@ def context_tree_estimate(deps: ContextTreeToolDeps | Any):
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
         session_key = _resolve_session_key(arguments, execution_context)
-        rendered = resolved.context_render_service.render_prompt_body(
-            RenderContextPromptInput(session_key=session_key),
+        rendered = resolved.context_observation_snapshot_service.render_observation(
+            ContextObservationRenderInput(session_key=session_key),
         )
         estimate = rendered.estimate.to_payload()
         return ToolRunResult.text(
@@ -145,15 +228,15 @@ def context_tree_render_current(deps: ContextTreeToolDeps | Any):
     ) -> ToolRunResult:
         session_key = _resolve_session_key(arguments, execution_context)
         max_chars = _bounded_int(arguments.get("max_chars"), default=16000)
-        rendered = resolved.context_render_service.render_prompt_body(
-            RenderContextPromptInput(session_key=session_key),
+        rendered = resolved.context_observation_snapshot_service.render_observation(
+            ContextObservationRenderInput(session_key=session_key),
         )
-        prompt_body = _truncate_text(rendered.prompt_body, max_chars)
-        truncated = len(prompt_body) < len(rendered.prompt_body)
-        text = _render_current_prompt_text(
+        debug_body = _truncate_text(rendered.debug_body, max_chars)
+        truncated = len(debug_body) < len(rendered.debug_body)
+        text = _render_current_context_debug_body(
             session_key=rendered.workspace.session_key,
             revision=rendered.workspace.active_revision,
-            prompt_body=prompt_body,
+            debug_body=debug_body,
             truncated=truncated,
         )
         return ToolRunResult.text(
@@ -167,7 +250,7 @@ def context_tree_render_current(deps: ContextTreeToolDeps | Any):
                 "mirrored_node_ids": list(rendered.mirrored_node_ids),
                 "tool_schema_mirror_available": rendered.tool_schema_mirror_available,
                 "provider_attachment_keys": sorted(rendered.provider_attachments),
-                "prompt_body": rendered.prompt_body,
+                "debug_body": rendered.debug_body,
                 "truncated": truncated,
                 "max_chars": max_chars,
             },
@@ -194,20 +277,20 @@ def context_tree_read_snapshot(deps: ContextTreeToolDeps | Any):
     ) -> ToolRunResult:
         snapshot_id = _required_text(arguments.get("snapshot_id"), "snapshot_id")
         max_chars = _bounded_int(arguments.get("max_chars"), default=16000)
-        snapshot = resolved.context_render_service.get_snapshot(snapshot_id)
-        prompt_body = _truncate_text(snapshot.prompt_body, max_chars)
-        truncated = len(prompt_body) < len(snapshot.prompt_body)
+        snapshot = resolved.context_observation_snapshot_service.get_snapshot(snapshot_id)
+        debug_body = _truncate_text(snapshot.debug_body, max_chars)
+        truncated = len(debug_body) < len(snapshot.debug_body)
         return ToolRunResult.text(
-            _render_snapshot_text(
+            _snapshot_text(
                 snapshot_id=snapshot.id,
                 session_key=snapshot.session_key,
                 revision=snapshot.tree_revision,
-                prompt_body=prompt_body,
+                debug_body=debug_body,
                 truncated=truncated,
             ),
             details=_snapshot_payload(
                 snapshot,
-                prompt_body=snapshot.prompt_body,
+                debug_body=snapshot.debug_body,
                 truncated=truncated,
                 max_chars=max_chars,
             ),
@@ -240,23 +323,23 @@ def context_tree_diff_since(deps: ContextTreeToolDeps | Any):
         baseline_snapshot_payload: dict[str, object] | None = None
         delta = None
         if snapshot_id is not None:
-            snapshot = resolved.context_render_service.get_snapshot(snapshot_id)
+            snapshot = resolved.context_observation_snapshot_service.get_snapshot(snapshot_id)
             baseline_snapshot_payload = _snapshot_payload(
                 snapshot,
-                prompt_body="",
+                debug_body="",
                 truncated=False,
                 max_chars=0,
             )
-            delta = resolved.context_render_service.render_delta(
-                RenderContextDeltaInput(
+            delta = resolved.context_observation_snapshot_service.render_delta(
+                ContextDebugDeltaInput(
                     session_key=session_key,
                     baseline_snapshot_id=snapshot_id,
                 ),
             )
             baseline_revision = delta.baseline_revision
         else:
-            current = resolved.context_render_service.render_prompt_body(
-                RenderContextPromptInput(session_key=session_key),
+            current = resolved.context_observation_snapshot_service.render_observation(
+                ContextObservationRenderInput(session_key=session_key),
             )
             current_node_ids = tuple(current.included_node_ids)
             baseline_node_ids: tuple[str, ...] = ()
@@ -313,7 +396,7 @@ def context_tree_diff_since(deps: ContextTreeToolDeps | Any):
                 "removed_tool_schema_names": list(removed_schema_names),
                 "current_tool_schema_names": list(current_schema_names),
                 "baseline_tool_schema_names": list(baseline_schema_names),
-                "delta_prompt_body": delta.prompt_body,
+                "delta_debug_body": delta.debug_body,
             }
         text = _render_diff_text(
             session_key=session_key,
@@ -336,7 +419,7 @@ def context_tree_diff_since(deps: ContextTreeToolDeps | Any):
                 "note": (
                     "Diff compares rendered node membership, tool schema mirror "
                     "membership, and tree revision. "
-                    "Use context_tree.render_current when full current prompt text is needed."
+                    "Use context_tree.render_current when the current tree debug body is needed."
                 ),
             },
             metadata={
@@ -370,7 +453,7 @@ def context_tree_update_plan(deps: ContextTreeToolDeps | Any):
         status = _optional_text(arguments.get("status")) or "in_progress"
         current_step = _optional_text(arguments.get("current_step"))
         completed_steps = _text_list(arguments.get("completed_steps"))
-        verified_facts = _text_list(arguments.get("verified_facts"))
+        observed_facts = _text_list(arguments.get("observed_facts"))
         assumptions = _text_list(arguments.get("assumptions"))
         blockers = _text_list(arguments.get("blockers"))
         next_steps = _text_list(arguments.get("next_steps"))
@@ -380,7 +463,7 @@ def context_tree_update_plan(deps: ContextTreeToolDeps | Any):
             status=status,
             current_step=current_step,
             completed_steps=completed_steps,
-            verified_facts=verified_facts,
+            observed_facts=observed_facts,
             assumptions=assumptions,
             blockers=blockers,
             next_steps=next_steps,
@@ -399,7 +482,7 @@ def context_tree_update_plan(deps: ContextTreeToolDeps | Any):
             status=status,
             current_step=current_step,
             completed_steps=completed_steps,
-            verified_facts=verified_facts,
+            observed_facts=observed_facts,
             assumptions=assumptions,
             blockers=blockers,
             next_steps=next_steps,
@@ -472,7 +555,7 @@ def context_tree_update_plan(deps: ContextTreeToolDeps | Any):
                 (
                     "Working plan unchanged; no tree revision was created. "
                     "Use context_tree.update_plan only for meaningful phase, "
-                    "verification, blocker, or objective changes."
+                    "observed fact, uncertainty, blocker, or objective changes."
                 ),
                 details=_working_plan_result_details(
                     workspace=tree_view.workspace,
@@ -504,8 +587,8 @@ def context_tree_update_plan(deps: ContextTreeToolDeps | Any):
             return ToolRunResult.text(
                 (
                     "Working plan phase unchanged; no tree revision was created. "
-                    "Use update_reason=verified_fact, blocker, recovery, or "
-                    "final_summary when new evidence or state must be recorded "
+                    "Use update_reason=observed_fact, uncertainty, blocker, "
+                    "recovery, or final_summary when new evidence or state must be recorded "
                     "inside the same phase."
                 ),
                 details=_working_plan_result_details(
@@ -568,7 +651,7 @@ def context_tree_update_plan(deps: ContextTreeToolDeps | Any):
                             "status": status,
                             "current_step": current_step,
                             "completed_step_count": len(completed_steps),
-                            "verified_fact_count": len(verified_facts),
+                            "observed_fact_count": len(observed_facts),
                             "assumption_count": len(assumptions),
                             "blocker_count": len(blockers),
                             "next_step_count": len(next_steps),
@@ -702,8 +785,8 @@ def _context_tree_action_tool(
                 payload={"tool": tool_id},
             ),
         )
-        rendered = resolved.context_render_service.render_prompt_body(
-            RenderContextPromptInput(session_key=session_key),
+        rendered = resolved.context_observation_snapshot_service.render_observation(
+            ContextObservationRenderInput(session_key=session_key),
         )
         mirrored_schema_names = _mirrored_tool_schema_names(
             rendered.provider_attachments,
@@ -798,6 +881,316 @@ def _render_action_result_text(
     return "\n".join(lines)
 
 
+def _expand_if_present(
+    tree_service: ContextTreeService,
+    *,
+    session_key: str,
+    node_id: str,
+    execution_context: ToolExecutionContext | None,
+) -> None:
+    tree = tree_service.list_tree(session_key)
+    if _node_by_id(tree.nodes, node_id) is None:
+        return
+    try:
+        tree_service.apply_action(
+            ContextActionInput(
+                session_key=session_key,
+                node_id=node_id,
+                action=ContextAction.EXPAND,
+                actor=_actor_from_context(execution_context),
+                run_id=_context_str(execution_context, _RUN_ID_ATTR),
+                payload={"tool": CAPABILITY_SEARCH_TOOL_ID},
+            ),
+        )
+    except Exception:
+        return
+
+
+def _enable_capability_matches(
+    tree_service: ContextTreeService,
+    *,
+    session_key: str,
+    matches: tuple[_CapabilityMatch, ...],
+    limit: int,
+    execution_context: ToolExecutionContext | None,
+) -> tuple[str, ...]:
+    enabled: list[str] = []
+    seen: set[str] = set()
+    for match in matches:
+        for node_id in _tool_function_node_ids_for_match(
+            tree_service,
+            session_key=session_key,
+            match=match,
+            execution_context=execution_context,
+        ):
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            try:
+                tree_service.apply_action(
+                    ContextActionInput(
+                        session_key=session_key,
+                        node_id=node_id,
+                        action=ContextAction.ENABLE_TOOL_SCHEMA,
+                        actor=_actor_from_context(execution_context),
+                        run_id=_context_str(execution_context, _RUN_ID_ATTR),
+                        payload={"tool": CAPABILITY_SEARCH_TOOL_ID},
+                    ),
+                )
+            except Exception:
+                continue
+            enabled.append(node_id)
+            if len(enabled) >= limit:
+                return tuple(enabled)
+    return tuple(enabled)
+
+
+def _tool_function_node_ids_for_match(
+    tree_service: ContextTreeService,
+    *,
+    session_key: str,
+    match: _CapabilityMatch,
+    execution_context: ToolExecutionContext | None,
+) -> tuple[str, ...]:
+    node = match.node
+    if node.owner == "tool" and node.kind == "tool_function":
+        return (node.id,)
+    if node.owner != "tool" or node.kind not in {"tool_bundle", "tool_bundle_group"}:
+        return ()
+    _expand_if_present(
+        tree_service,
+        session_key=session_key,
+        node_id=node.id,
+        execution_context=execution_context,
+    )
+    tree = tree_service.list_tree(session_key)
+    direct_tool_ids = tuple(
+        child.id
+        for child in _sorted_nodes(tree.nodes)
+        if child.owner == "tool"
+        and child.kind == "tool_function"
+        and child.parent_id == node.id
+    )
+    if direct_tool_ids or node.kind == "tool_bundle_group":
+        return direct_tool_ids
+    group_nodes = tuple(
+        child
+        for child in _sorted_nodes(tree.nodes)
+        if child.owner == "tool"
+        and child.kind == "tool_bundle_group"
+        and child.parent_id == node.id
+    )
+    enabled: list[str] = []
+    for group_node in group_nodes:
+        _expand_if_present(
+            tree_service,
+            session_key=session_key,
+            node_id=group_node.id,
+            execution_context=execution_context,
+        )
+        expanded_tree = tree_service.list_tree(session_key)
+        enabled.extend(
+            child.id
+            for child in _sorted_nodes(expanded_tree.nodes)
+            if child.owner == "tool"
+            and child.kind == "tool_function"
+            and child.parent_id == group_node.id
+        )
+    return tuple(enabled)
+
+
+def _capability_matches(
+    nodes: tuple[ContextNode, ...],
+    *,
+    query: str,
+    limit: int,
+) -> tuple[_CapabilityMatch, ...]:
+    normalized_query = _normalize_search_text(query)
+    terms = tuple(term for term in normalized_query.split() if term)
+    matches: list[_CapabilityMatch] = []
+    for node in nodes:
+        if not _is_capability_node(node):
+            continue
+        score, fields = _capability_match_score(node, terms=terms)
+        if score <= 0:
+            continue
+        matches.append(_CapabilityMatch(node=node, score=score, matched_fields=fields))
+    matches.sort(
+        key=lambda item: (
+            -item.score,
+            _capability_kind_rank(item.node),
+            item.node.display_order,
+            item.node.id,
+        ),
+    )
+    return tuple(matches[:limit])
+
+
+def _is_capability_node(node: ContextNode) -> bool:
+    return node.owner == "tool" and node.kind in {
+        "tool_bundle",
+        "tool_bundle_group",
+        "tool_function",
+        "tool_cli_source",
+    }
+
+
+def _capability_kind_rank(node: ContextNode) -> int:
+    if node.kind == "tool_function":
+        return 0
+    if node.kind == "tool_bundle_group":
+        return 1
+    if node.kind == "tool_bundle":
+        return 2
+    return 3
+
+
+def _capability_match_score(
+    node: ContextNode,
+    *,
+    terms: tuple[str, ...],
+) -> tuple[int, tuple[str, ...]]:
+    searchable = _capability_search_fields(node)
+    if not terms:
+        return _base_capability_score(node), ("default",)
+    score = 0
+    matched_fields: list[str] = []
+    for field, value in searchable.items():
+        normalized = _normalize_search_text(value)
+        if not normalized:
+            continue
+        field_matches = sum(1 for term in terms if term in normalized)
+        if not field_matches:
+            continue
+        matched_fields.append(field)
+        score += field_matches * _capability_field_weight(field)
+    if score <= 0:
+        return 0, ()
+    return score + _base_capability_score(node), tuple(matched_fields)
+
+
+def _capability_search_fields(node: ContextNode) -> dict[str, str]:
+    fields: dict[str, str] = {
+        "id": node.id,
+        "title": node.title,
+        "summary": node.summary,
+        "kind": node.kind,
+    }
+    for key in ("tool_id", "tool_name", "source_id", "group_key", "runtime_key"):
+        value = _optional_text(node.owner_ref.get(key)) or _optional_text(
+            node.metadata.get(key),
+        )
+        if value is not None:
+            fields[key] = value
+    schema = node.metadata.get("provider_schema")
+    if isinstance(schema, dict):
+        for key in ("name", "description"):
+            value = _optional_text(schema.get(key))
+            if value is not None:
+                fields[f"schema_{key}"] = value
+    capability_ids = node.metadata.get("capability_ids")
+    if isinstance(capability_ids, list):
+        fields["capabilities"] = " ".join(
+            item for item in (_optional_text(value) for value in capability_ids) if item
+        )
+    tags = node.metadata.get("tags")
+    if isinstance(tags, list):
+        fields["tags"] = " ".join(
+            item for item in (_optional_text(value) for value in tags) if item
+        )
+    return fields
+
+
+def _capability_field_weight(field: str) -> int:
+    if field in {"tool_id", "schema_name", "runtime_key", "id"}:
+        return 12
+    if field in {"title", "tool_name", "group_key", "source_id"}:
+        return 8
+    if field in {"capabilities", "tags"}:
+        return 5
+    return 3
+
+
+def _base_capability_score(node: ContextNode) -> int:
+    if node.kind == "tool_function":
+        return 6
+    if node.kind == "tool_bundle_group":
+        return 4
+    if node.kind == "tool_bundle":
+        return 2
+    return 1
+
+
+def _normalize_search_text(value: str) -> str:
+    return (
+        value.lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace(".", " ")
+        .replace("/", " ")
+        .strip()
+    )
+
+
+def _capability_match_payload(match: _CapabilityMatch) -> dict[str, object]:
+    node = match.node
+    schema = node.metadata.get("provider_schema")
+    schema_name = schema.get("name") if isinstance(schema, dict) else None
+    tool_id = _optional_text(node.owner_ref.get("tool_id")) or _optional_text(
+        node.metadata.get("tool_id"),
+    )
+    payload: dict[str, object] = {
+        "id": node.id,
+        "kind": node.kind,
+        "title": node.title,
+        "summary": node.summary,
+        "score": match.score,
+        "matched_fields": list(match.matched_fields),
+        "enabled": bool(node.state.schema_enabled),
+    }
+    if tool_id is not None:
+        payload["tool_id"] = tool_id
+    if isinstance(schema_name, str) and schema_name.strip():
+        payload["schema_name"] = schema_name.strip()
+    source_id = _optional_text(node.owner_ref.get("source_id")) or _optional_text(
+        node.metadata.get("source_id"),
+    )
+    if source_id is not None:
+        payload["source_id"] = source_id
+    group_key = _optional_text(node.owner_ref.get("group_key")) or _optional_text(
+        node.metadata.get("group_key"),
+    )
+    if group_key is not None:
+        payload["group_key"] = group_key
+    return payload
+
+
+def _render_capability_search_text(
+    *,
+    query: str,
+    matches: tuple[dict[str, object], ...],
+    enabled_node_ids: tuple[str, ...],
+    mirrored_schema_names: tuple[str, ...],
+) -> str:
+    label = query or "available capabilities"
+    lines = [f"Capability search results for '{label}': {len(matches)} match(es)."]
+    if not matches:
+        lines.append("No matching visible capability was found.")
+    for match in matches[:12]:
+        name = match.get("schema_name") or match.get("tool_id") or match["title"]
+        state = "enabled" if match.get("enabled") else "available"
+        lines.append(f"- {name} ({match['kind']}, {state}): {match['summary']}")
+    if enabled_node_ids:
+        lines.append(f"Enabled {len(enabled_node_ids)} provider tool schema(s).")
+    if mirrored_schema_names:
+        lines.append(
+            "Callable tool schemas now include: "
+            + ", ".join(mirrored_schema_names)
+            + ".",
+        )
+    return "\n".join(lines)
+
+
 def _child_handles_for_node(
     nodes: tuple[ContextNode, ...],
     *,
@@ -857,7 +1250,7 @@ def _working_plan_payload(
     status: str,
     current_step: str | None,
     completed_steps: tuple[str, ...],
-    verified_facts: tuple[str, ...],
+    observed_facts: tuple[str, ...],
     assumptions: tuple[str, ...],
     blockers: tuple[str, ...],
     next_steps: tuple[str, ...],
@@ -868,7 +1261,7 @@ def _working_plan_payload(
         "status": status,
         "current_step": current_step or "",
         "completed_steps": list(completed_steps),
-        "verified_facts": list(verified_facts),
+        "observed_facts": list(observed_facts),
         "assumptions": list(assumptions),
         "blockers": list(blockers),
         "next_steps": list(next_steps),
@@ -922,7 +1315,7 @@ def _render_working_plan_content(
     status: str,
     current_step: str | None,
     completed_steps: tuple[str, ...],
-    verified_facts: tuple[str, ...],
+    observed_facts: tuple[str, ...],
     assumptions: tuple[str, ...],
     blockers: tuple[str, ...],
     next_steps: tuple[str, ...],
@@ -935,7 +1328,7 @@ def _render_working_plan_content(
     if current_step:
         lines.append(f"  current_step: {current_step}")
     _append_plan_list(lines, "completed_steps", completed_steps)
-    _append_plan_list(lines, "verified_facts", verified_facts)
+    _append_plan_list(lines, "observed_facts", observed_facts)
     _append_plan_list(lines, "assumptions", assumptions)
     _append_plan_list(lines, "blockers", blockers)
     _append_plan_list(lines, "next_steps", next_steps)
@@ -1097,7 +1490,7 @@ def _node_payload(node: ContextNode) -> dict[str, object]:
 def _snapshot_payload(
     snapshot: Any,
     *,
-    prompt_body: str,
+    debug_body: str,
     truncated: bool,
     max_chars: int,
 ) -> dict[str, object]:
@@ -1107,7 +1500,7 @@ def _snapshot_payload(
         "session_key": snapshot.session_key,
         "run_id": snapshot.run_id,
         "tree_revision": snapshot.tree_revision,
-        "prompt_body": prompt_body,
+        "debug_body": debug_body,
         "provider_attachment_keys": sorted(snapshot.provider_attachments),
         "estimate": snapshot.estimate.to_payload(),
         "included_node_ids": list(snapshot.included_node_ids),
@@ -1159,7 +1552,7 @@ def _working_plan_node_payload(node: ContextNode) -> dict[str, object]:
             "collapsed": node.state.collapsed,
             "loaded": node.state.loaded,
             "pinned": node.state.pinned,
-            "prompt_visible": node.state.prompt_visible,
+            "snapshot_visible": node.state.snapshot_visible,
         },
         "metadata": {
             "objective": metadata.get("objective"),
@@ -1170,7 +1563,7 @@ def _working_plan_node_payload(node: ContextNode) -> dict[str, object]:
             "update_reason": metadata.get("update_reason"),
             "plan_update_count": metadata.get("plan_update_count"),
             "completed_step_count": metadata.get("completed_step_count"),
-            "verified_fact_count": metadata.get("verified_fact_count"),
+            "observed_fact_count": metadata.get("observed_fact_count"),
             "assumption_count": metadata.get("assumption_count"),
             "blocker_count": metadata.get("blocker_count"),
             "next_step_count": metadata.get("next_step_count"),
@@ -1191,7 +1584,7 @@ def _node_list_payload(node: ContextNode) -> dict[str, object]:
             "collapsed": bool(state.get("collapsed")),
             "loaded": bool(state.get("loaded")),
             "pinned": bool(state.get("pinned")),
-            "prompt_visible": bool(state.get("prompt_visible")),
+            "snapshot_visible": bool(state.get("snapshot_visible")),
             "schema_enabled": bool(state.get("schema_enabled")),
         },
         "actions": [action.value for action in node.actions],
@@ -1231,11 +1624,11 @@ def _render_estimate(estimate: dict[str, object]) -> str:
     )
 
 
-def _render_current_prompt_text(
+def _render_current_context_debug_body(
     *,
     session_key: str,
     revision: int,
-    prompt_body: str,
+    debug_body: str,
     truncated: bool,
 ) -> str:
     header = (
@@ -1243,24 +1636,24 @@ def _render_current_prompt_text(
     )
     if truncated:
         header += " Output was truncated by max_chars."
-    return f"{header}\n\n{prompt_body}"
+    return f"{header}\n\n{debug_body}"
 
 
-def _render_snapshot_text(
+def _snapshot_text(
     *,
     snapshot_id: str,
     session_key: str,
     revision: int,
-    prompt_body: str,
+    debug_body: str,
     truncated: bool,
 ) -> str:
     header = (
-        f"Context render snapshot {snapshot_id} for {session_key} "
+        f"Context snapshot {snapshot_id} for {session_key} "
         f"at tree revision {revision}."
     )
     if truncated:
         header += " Output was truncated by max_chars."
-    return f"{header}\n\n{prompt_body}"
+    return f"{header}\n\n{debug_body}"
 
 
 def _render_diff_text(

@@ -16,7 +16,6 @@ from crxzipple.modules.llm.application.adapters import (
 from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
-    LlmMessage,
     LlmMessagePhase,
     LlmMessageRole,
     LlmResponseItem,
@@ -25,18 +24,26 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmUsage,
     utcnow,
 )
-from crxzipple.modules.llm.infrastructure.adapters.common import (
-    build_openai_tool_name_aliases,
-    build_tool_call_intents,
-    coerce_text_content,
-    default_base_url,
+from crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible_renderer import (
+    OpenAIChatCompatibleRequestRenderer,
+)
+from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     ensure_image_input_supported,
+)
+from crxzipple.modules.llm.infrastructure.adapters.http_helpers import (
     ensure_json_response,
     httpx_response_text,
-    join_url,
-    openai_chat_messages,
-    openai_chat_tool_schema,
     resolve_credential_binding,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_response_projection import (
+    build_tool_call_intents,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_protocol import (
+    ProviderRenderInput,
+    ProviderWireRequest,
+)
+from crxzipple.modules.llm.infrastructure.rendering.input_projection import (
+    messages_from_projected_input_items,
 )
 from crxzipple.shared.infrastructure.http import get_async_http_client
 
@@ -56,107 +63,27 @@ class OpenAIChatCompatibleAdapter:
         re.DOTALL,
     )
 
-    @staticmethod
-    def _merge_payload_fields(
-        payload: dict[str, Any],
-        fields: dict[str, Any] | None,
-    ) -> None:
-        if not fields:
-            return
-        for key, value in fields.items():
-            if key in {"model", "messages", "tools"}:
-                continue
-            if isinstance(payload.get(key), dict) and isinstance(value, dict):
-                merged = dict(payload[key])
-                merged.update(value)
-                payload[key] = merged
-                continue
-            payload[key] = value
-
-    @staticmethod
-    def _normalize_message_order(
-        messages: tuple[LlmMessage, ...],
-    ) -> tuple[LlmMessage, ...]:
-        system_messages = tuple(
-            message for message in messages if message.role == LlmMessageRole.SYSTEM
+    def __init__(self) -> None:
+        self._renderer = OpenAIChatCompatibleRequestRenderer(
+            default_base_url=self.DEFAULT_BASE_URL,
         )
-        if not system_messages:
-            return messages
-        non_system_messages = tuple(
-            message for message in messages if message.role != LlmMessageRole.SYSTEM
-        )
-        combined_system = LlmMessage(
-            role=LlmMessageRole.SYSTEM,
-            content="\n\n".join(
-                coerce_text_content(message.content)
-                for message in system_messages
-            ),
-        )
-        return (combined_system,) + non_system_messages
 
     def invoke(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
-        normalized_messages = self._normalize_message_order(request.messages)
-        ensure_image_input_supported(profile, normalized_messages)
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
-        alias_to_original = {
-            alias: original
-            for original, alias in tool_name_aliases.items()
-        }
-        token = resolve_credential_binding(
-            profile.credential_binding_id,
-            required=profile.provider.value == "openai_compatible",
-            description=f"LLM profile '{profile.id}'",
-            resolved_credential=request.resolved_credential,
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(
+            profile,
+            request,
+            render_input=render_input,
         )
-        headers = {"Content-Type": "application/json"}
-        if token is not None:
-            headers["Authorization"] = f"Bearer {token}"
-
-        payload: dict[str, Any] = {
-            "model": profile.model_name,
-            "messages": openai_chat_messages(
-                normalized_messages,
-                tool_name_aliases=tool_name_aliases,
-            ),
-        }
-        if request.tool_schemas:
-            payload["tools"] = [
-                openai_chat_tool_schema(tool, tool_name_aliases=tool_name_aliases)
-                for tool in request.tool_schemas
-            ]
-        if request.response_format is not None:
-            payload["response_format"] = dict(request.response_format)
-
-        defaults = profile.default_params
-        if defaults.temperature is not None:
-            payload["temperature"] = defaults.temperature
-        if defaults.top_p is not None:
-            payload["top_p"] = defaults.top_p
-        if defaults.max_output_tokens is not None:
-            payload["max_tokens"] = defaults.max_output_tokens
-        self._merge_payload_fields(payload, defaults.extra_body)
-
-        overrides = dict(request.overrides)
-        extra_body_overrides = overrides.pop("extra_body", None)
-        if isinstance(extra_body_overrides, dict):
-            self._merge_payload_fields(payload, extra_body_overrides)
-
-        for key, value in overrides.items():
-            if key not in {"model", "messages", "tools"}:
-                payload[key] = value
-
-        response = requests.post(
-            join_url(
-                default_base_url(profile, self.DEFAULT_BASE_URL),
-                "/chat/completions",
-            ),
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
+        response = self._send_wire_request(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
         data = ensure_json_response(
             response,
@@ -230,7 +157,7 @@ class OpenAIChatCompatibleAdapter:
             ),
             model_name=str(data.get("model")) if data.get("model") is not None else None,
             transport="json",
-            tool_name_aliases=alias_to_original,
+            tool_name_aliases=_alias_to_original_tool_names(wire_request),
         )
         return LlmAdapterResponse(
             result=LlmResult.from_response_items(
@@ -250,6 +177,15 @@ class OpenAIChatCompatibleAdapter:
             ),
             response_items=response_items,
             provider_request_id=str(data.get("id")) if data.get("id") is not None else None,
+        )
+
+    def preview_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> dict[str, Any]:
+        return self._renderer.preview_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
         )
 
     async def invoke_async(
@@ -290,19 +226,22 @@ class OpenAIChatCompatibleAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> Iterator[LlmStreamEvent]:
-        url, headers, payload, alias_to_original = self._stream_request(
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(
             profile,
             request,
+            stream=True,
+            render_input=render_input,
         )
+        alias_to_original = _alias_to_original_tool_names(wire_request)
 
         response: requests.Response | None = None
         try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=profile.timeout_seconds,
-                stream=True,
+            response = self._send_stream_wire_request(
+                profile,
+                request,
+                wire_request,
+                render_input=render_input,
             )
             yield from self._stream_sse_response(
                 profile,
@@ -321,20 +260,28 @@ class OpenAIChatCompatibleAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> AsyncIterator[LlmStreamEvent]:
-        url, headers, payload, alias_to_original = self._stream_request(
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(
             profile,
             request,
+            stream=True,
+            render_input=render_input,
+        )
+        alias_to_original = _alias_to_original_tool_names(wire_request)
+        ensure_image_input_supported(
+            profile,
+            messages_from_projected_input_items(render_input.input_items),
         )
         client = get_async_http_client(
-            url,
+            wire_request.endpoint,
             timeout=profile.timeout_seconds,
             client_factory=httpx.AsyncClient,
         )
         async with client.stream(
             "POST",
-            url,
-            headers=headers,
-            json=payload,
+            wire_request.endpoint,
+            headers=self._request_headers(profile, request, stream=True),
+            json=wire_request.payload,
         ) as response:
             async for event in self._stream_sse_response_async(
                 profile,
@@ -345,18 +292,13 @@ class OpenAIChatCompatibleAdapter:
             ):
                 yield event
 
-    def _stream_request(
+    def _request_headers(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
-    ) -> tuple[str, dict[str, str], dict[str, Any], dict[str, str]]:
-        normalized_messages = self._normalize_message_order(request.messages)
-        ensure_image_input_supported(profile, normalized_messages)
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
-        alias_to_original = {
-            alias: original
-            for original, alias in tool_name_aliases.items()
-        }
+        *,
+        stream: bool = False,
+    ) -> dict[str, str]:
         token = resolve_credential_binding(
             profile.credential_binding_id,
             required=profile.provider.value == "openai_compatible",
@@ -365,53 +307,77 @@ class OpenAIChatCompatibleAdapter:
         )
         headers = {
             "Content-Type": "application/json",
-            "Accept": "text/event-stream",
         }
+        if stream:
+            headers["Accept"] = "text/event-stream"
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
+        return headers
 
-        payload: dict[str, Any] = {
-            "model": profile.model_name,
-            "messages": openai_chat_messages(
-                normalized_messages,
-                tool_name_aliases=tool_name_aliases,
-            ),
-            "stream": True,
-        }
-        if request.tool_schemas:
-            payload["tools"] = [
-                openai_chat_tool_schema(tool, tool_name_aliases=tool_name_aliases)
-                for tool in request.tool_schemas
-            ]
-        if request.response_format is not None:
-            payload["response_format"] = dict(request.response_format)
+    def _send_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> requests.Response:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        ensure_image_input_supported(
+            profile,
+            messages_from_projected_input_items(model_input.input_items),
+        )
+        return requests.post(
+            wire_request.endpoint,
+            headers=self._request_headers(profile, request),
+            json=wire_request.payload,
+            timeout=profile.timeout_seconds,
+        )
 
-        defaults = profile.default_params
-        if defaults.temperature is not None:
-            payload["temperature"] = defaults.temperature
-        if defaults.top_p is not None:
-            payload["top_p"] = defaults.top_p
-        if defaults.max_output_tokens is not None:
-            payload["max_tokens"] = defaults.max_output_tokens
-        self._merge_payload_fields(payload, defaults.extra_body)
+    def _send_stream_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> requests.Response:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        ensure_image_input_supported(
+            profile,
+            messages_from_projected_input_items(model_input.input_items),
+        )
+        return requests.post(
+            wire_request.endpoint,
+            headers=self._request_headers(profile, request, stream=True),
+            json=wire_request.payload,
+            timeout=profile.timeout_seconds,
+            stream=True,
+        )
 
-        overrides = dict(request.overrides)
-        extra_body_overrides = overrides.pop("extra_body", None)
-        if isinstance(extra_body_overrides, dict):
-            self._merge_payload_fields(payload, extra_body_overrides)
-
-        for key, value in overrides.items():
-            if key not in {"model", "messages", "tools", "stream"}:
-                payload[key] = value
-
-        return (
-            join_url(
-                default_base_url(profile, self.DEFAULT_BASE_URL),
-                "/chat/completions",
-            ),
-            headers,
-            payload,
-            alias_to_original,
+    def _wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        stream: bool = False,
+        render_input: ProviderRenderInput | None = None,
+    ) -> ProviderWireRequest:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        rendered = self._renderer.render_input(model_input, stream=stream)
+        return ProviderWireRequest.from_rendered(
+            renderer_id=self._renderer.renderer_id,
+            rendered=rendered,
+            preview=self._renderer.preview_input(model_input, stream=stream),
         )
 
     @classmethod
@@ -990,8 +956,8 @@ def _chat_response_items(
                 },
                 provider_item_id=provider_item_id,
                 provider_item_type="chat.completion.message",
-                model_visible=True,
-                user_visible=True,
+                provider_replay_candidate=True,
+                user_timeline_candidate=True,
                 created_at=now,
                 completed_at=now,
             ),
@@ -1024,10 +990,19 @@ def _chat_response_items(
                 provider_item_type="chat.completion.tool_call",
                 call_id=tool_call.id,
                 tool_name=tool_call.name,
-                model_visible=True,
-                user_visible=False,
+                provider_replay_candidate=True,
+                user_timeline_candidate=False,
                 created_at=now,
                 completed_at=now,
             ),
         )
     return tuple(items)
+
+
+def _alias_to_original_tool_names(
+    wire_request: ProviderWireRequest,
+) -> dict[str, str]:
+    return {
+        alias: original
+        for original, alias in wire_request.tool_name_aliases.items()
+    }

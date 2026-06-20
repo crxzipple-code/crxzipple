@@ -24,6 +24,7 @@ class LlmDefaultsDTO:
     top_p: float | None
     max_output_tokens: int | None
     reasoning_effort: str | None
+    provider_transport: str | None
     extra_body: dict[str, object]
 
     @classmethod
@@ -33,6 +34,7 @@ class LlmDefaultsDTO:
             top_p=defaults.top_p,
             max_output_tokens=defaults.max_output_tokens,
             reasoning_effort=defaults.reasoning_effort,
+            provider_transport=defaults.provider_transport,
             extra_body=dict(defaults.extra_body),
         )
 
@@ -185,11 +187,15 @@ class LlmInvocationDTO:
     id: str
     llm_id: str
     messages: tuple[LlmMessageDTO, ...]
+    input_items: tuple[dict[str, object], ...]
+    provider_context_messages: tuple[LlmMessageDTO, ...]
     tool_schemas: tuple[ToolSchemaDTO, ...]
     response_format: dict[str, object] | None
     request_overrides: dict[str, object]
     request_metadata: dict[str, object]
     provider_request_payload_preview: dict[str, object]
+    provider_render_report: dict[str, object]
+    provider_wire_preview: dict[str, object]
     status: str
     result: LlmResultDTO | None
     response_items: tuple[dict[str, object], ...]
@@ -201,11 +207,19 @@ class LlmInvocationDTO:
 
     @classmethod
     def from_entity(cls, invocation: LlmInvocation) -> "LlmInvocationDTO":
+        provider_request_payload_preview = dict(
+            invocation.provider_request_payload_preview,
+        )
         return cls(
             id=invocation.id,
             llm_id=invocation.llm_id,
             messages=tuple(
                 LlmMessageDTO.from_value(item) for item in invocation.messages
+            ),
+            input_items=tuple(item.to_payload() for item in invocation.input_items),
+            provider_context_messages=tuple(
+                LlmMessageDTO.from_value(item)
+                for item in invocation.provider_context_messages
             ),
             tool_schemas=tuple(
                 ToolSchemaDTO.from_value(item) for item in invocation.tool_schemas
@@ -217,8 +231,12 @@ class LlmInvocationDTO:
             ),
             request_overrides=dict(invocation.request_overrides),
             request_metadata=dict(invocation.request_metadata),
-            provider_request_payload_preview=dict(
-                invocation.provider_request_payload_preview,
+            provider_request_payload_preview=provider_request_payload_preview,
+            provider_render_report=_provider_render_report(
+                provider_request_payload_preview,
+            ),
+            provider_wire_preview=_provider_wire_preview(
+                provider_request_payload_preview,
             ),
             status=invocation.status.value,
             result=(
@@ -239,3 +257,14 @@ class LlmInvocationDTO:
             started_at=format_optional_datetime_utc(invocation.started_at),
             completed_at=format_optional_datetime_utc(invocation.completed_at),
         )
+
+
+def _provider_render_report(preview: dict[str, object]) -> dict[str, object]:
+    render_report = preview.get("render_report")
+    return dict(render_report) if isinstance(render_report, dict) else {}
+
+
+def _provider_wire_preview(preview: dict[str, object]) -> dict[str, object]:
+    wire_preview = dict(preview)
+    wire_preview.pop("render_report", None)
+    return wire_preview

@@ -1,7 +1,7 @@
 kind: openapi
 namespace: brave_search
 description: Brave Search web, news, and autosuggest APIs.
-prompt:
+runtime_request:
   title: Brave Search
   summary: Search the web, news, autosuggest, and location-oriented results through Brave Search.
 capabilities:

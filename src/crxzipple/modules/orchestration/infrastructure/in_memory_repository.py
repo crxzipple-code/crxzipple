@@ -24,10 +24,18 @@ class InMemoryOrchestrationRunRepository:
         self,
         *,
         status: OrchestrationRunStatus | None = None,
+        session_key: str | None = None,
     ) -> list[OrchestrationRun]:
         items = list(self._items.values())
         if status is not None:
             items = [item for item in items if item.status is status]
+        normalized_session_key = (session_key or "").strip()
+        if normalized_session_key:
+            items = [
+                item
+                for item in items
+                if (item.session_key or "").strip() == normalized_session_key
+            ]
         return sorted(items, key=lambda item: (item.created_at, item.id), reverse=True)
 
     def find_next_assigned(

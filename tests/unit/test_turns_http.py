@@ -99,7 +99,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     )
 
                     session_key = get_response.json()["run"]["session_key"]
-                    history = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_chat_visible_items(
+                    history = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_items(
                         ListSessionItemsInput(
                             session_key=session_key,
                         ),
@@ -161,7 +161,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                             "new_session": True,
                             "metadata": {
                                 "runtime_task_policy": {
-                                    "prompt_bootstrap": {
+                                    "runtime_request_bootstrap": {
                                         "default_tool_schema_group_refs": [
                                             {
                                                 "source_id": "bundled.local_package.browser",
@@ -193,7 +193,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     self.assertIsNotNone(scheduled)
                     assert scheduled is not None
                     self.assertEqual(
-                        scheduled.metadata["prompt_flow_hint"][
+                        scheduled.metadata["runtime_request_flow_hint"][
                             "default_tool_schema_group_refs"
                         ],
                         [
@@ -204,10 +204,10 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                         ],
                     )
                     self.assertEqual(
-                        scheduled.metadata["prompt_flow_hint"][
+                        scheduled.metadata["runtime_request_flow_hint"][
                             "default_tool_schema_source"
                         ],
-                        "prompt_bootstrap_policy",
+                        "runtime_request_bootstrap_policy",
                     )
                     processed = self._process_turn_execution()
                     self.assertIsNotNone(processed)
@@ -232,79 +232,80 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                         "workspace_context_files",
                         get_payload["run"]["metadata"],
                     )
-                    self.assertEqual(get_payload["run"]["metadata"]["prompt_mode"], "session_start")
+                    self.assertEqual(get_payload["run"]["metadata"]["runtime_request_mode"], "session_start")
                     self.assertEqual(
-                        get_payload["run"]["metadata"]["prompt_report"]["context_budget"]["source"],
+                        get_payload["run"]["metadata"]["runtime_request_report"]["context_budget"]["source"],
                         "fixed",
                     )
                     self.assertEqual(
-                        get_payload["run"]["metadata"]["prompt_report"]["context_budget"]["max_estimated_tokens"],
+                        get_payload["run"]["metadata"]["runtime_request_report"]["context_budget"]["max_estimated_tokens"],
                         30000,
                     )
-                    self.assertEqual(
-                        [block["kind"] for block in get_payload["run"]["metadata"]["prompt_report"]["context_blocks"]],
-                        [
-                            "agent_instruction",
-                            "runtime_context",
-                        ],
+                    self.assertNotIn(
+                        "context_blocks",
+                        get_payload["run"]["metadata"]["runtime_request_report"],
                     )
                     preview_response = self.client.get(
-                        f"/turns/{payload['run']['id']}/prompt-preview",
+                        f"/turns/{payload['run']['id']}/llm-request-preview",
                     )
                     self.assertEqual(preview_response.status_code, 200)
                     preview_payload = preview_response.json()
                     self.assertEqual(preview_payload["run_id"], payload["run"]["id"])
                     self.assertEqual(preview_payload["llm_id"], "local-chat")
                     self.assertEqual(preview_payload["mode"], "normal_turn")
-                    self.assertIsNotNone(preview_payload["prompt_report"])
+                    self.assertIsNotNone(preview_payload["runtime_request_report"])
                     self.assertTrue(
                         str(
                             get_payload["run"]["metadata"][
-                                "context_render_snapshot_id"
+                                "request_render_snapshot_id"
                             ],
                         ).startswith("ctxsnap_"),
                     )
                     self.assertEqual(
-                        preview_payload["context_render_snapshot_id"],
-                        get_payload["run"]["metadata"]["context_render_snapshot_id"],
+                        preview_payload["request_render_snapshot_id"],
+                        get_payload["run"]["metadata"]["request_render_snapshot_id"],
                     )
-                    self.assertIsNotNone(preview_payload["context_render"])
+                    self.assertNotIn("context_snapshot_id", preview_payload)
+                    self.assertIsNotNone(preview_payload["request_render_snapshot"])
                     self.assertEqual(
-                        preview_payload["context_render"]["snapshot_id"],
-                        preview_payload["context_render_snapshot_id"],
+                        preview_payload["request_render_snapshot"]["snapshot_id"],
+                        preview_payload["request_render_snapshot_id"],
                     )
-                    self.assertTrue(
-                        preview_payload["context_render_metadata"][
-                            "runtime_contract_hash"
+                    self.assertEqual(
+                        preview_payload["request_render_snapshot_metadata"]["snapshot_kind"],
+                        "request_render",
+                    )
+                    self.assertNotIn("provider_attachments", preview_payload)
+                    self.assertEqual(
+                        preview_payload["provider_request_options"][
+                            "request_metadata"
+                        ]["runtime_request_surface"],
+                        "interactive",
+                    )
+                    self.assertNotIn(
+                        "context_slice_summary",
+                        preview_payload["provider_request_options"][
+                            "request_metadata"
                         ],
                     )
+                    self.assertNotIn("context_slice_summary", preview_payload)
                     self.assertEqual(
-                        preview_payload["context_render_metadata"][
-                            "tree_schema_version"
-                        ],
-                        CONTEXT_TREE_SCHEMA_VERSION,
+                        preview_payload["request_render_snapshot"]["snapshot_id"],
+                        preview_payload["request_render_snapshot_id"],
                     )
-                    self.assertIn(
-                        "prompt_input",
-                        preview_payload["provider_attachments"],
-                    )
-                    self.assertEqual(
-                        preview_payload["context_surface"]["snapshot_id"],
-                        preview_payload["context_render_snapshot_id"],
-                    )
-                    self.assertIn(
-                        "rendered_context",
-                        preview_payload["context_surface"],
+                    self.assertNotIn(
+                        "raw_tree_body",
+                        preview_payload["request_render_snapshot"],
                     )
                     self.assertEqual(
                         preview_payload["tool_surface"]["metadata"][
-                            "context_render_snapshot_id"
+                            "request_render_snapshot_id"
                         ],
-                        preview_payload["context_render_snapshot_id"],
+                        preview_payload["request_render_snapshot_id"],
                     )
                     self.assertEqual(
                         preview_payload["tool_surface"]["id"],
-                        f"tool_surface:{preview_payload['context_render_snapshot_id']}",
+                        f"tool_surface:{preview_payload['request_render_snapshot_id']}",
                     )
                     self.assertEqual(
                         preview_payload["provider_request_options"]["response_format"],
@@ -320,9 +321,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     )
                     self.assertEqual(
                         preview_payload["provider_request_options"]["request_metadata"][
-                            "context_render_snapshot_id"
+                            "request_render_snapshot_id"
                         ],
-                        preview_payload["context_render_snapshot_id"],
+                        preview_payload["request_render_snapshot_id"],
                     )
                     self.assertEqual(
                         preview_payload["provider_request_options"]["request_metadata"][
@@ -330,23 +331,40 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                         ],
                         preview_payload["tool_surface"]["id"],
                     )
-                    self.assertEqual(
-                        preview_payload["provider_request_options"]["request_metadata"][
-                            "tool_surface_mirrored_schema_names"
-                        ],
-                        preview_payload["tool_surface"]["mirrored_schema_names"],
-                    )
+                    if "mirrored_schema_names" in preview_payload["tool_surface"]:
+                        self.assertIsInstance(
+                            preview_payload["tool_surface"]["mirrored_schema_names"],
+                            list,
+                        )
                     self.assertEqual(
                         preview_payload["provider_request_options"]["request_metadata"][
                             "tool_surface_mirrored_schema_count"
                         ],
-                        len(preview_payload["tool_surface"]["mirrored_schema_names"]),
+                        len(
+                            preview_payload["tool_surface"].get(
+                                "mirrored_schema_names",
+                                [],
+                            ),
+                        ),
                     )
                     self.assertEqual(
                         preview_payload["provider_request_options"]["request_metadata"][
                             "tree_schema_version"
                         ],
-                        CONTEXT_TREE_SCHEMA_VERSION,
+                        "request-render-snapshot",
+                    )
+                    self.assertIn("input_items", preview_payload)
+                    self.assertTrue(preview_payload["input_items"])
+                    self.assertEqual(
+                        preview_payload["input_items"][0]["kind"],
+                        "message",
+                    )
+                    self.assertIn("runtime_context", preview_payload)
+                    self.assertEqual(
+                        preview_payload["runtime_context"][
+                            "request_render_snapshot_id"
+                        ],
+                        preview_payload["request_render_snapshot_id"],
                     )
                     self.assertTrue(
                         any(
@@ -491,7 +509,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             assert processed is not None
             self.assertEqual(processed.result_payload["llm_id"], "vision-special")
 
-            preview_response = self.client.get(f"/turns/{run_id}/prompt-preview")
+            preview_response = self.client.get(f"/turns/{run_id}/llm-request-preview")
             self.assertEqual(preview_response.status_code, 200)
 
             get_response = self.client.get(f"/turns/{run_id}")
@@ -557,7 +575,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             compact_payload = compact_response.json()
             self.assertEqual(compact_payload["run"]["status"], "queued")
             self.assertEqual(
-                compact_payload["run"]["metadata"]["prompt_flow_hint"]["mode"],
+                compact_payload["run"]["metadata"]["runtime_request_flow_hint"]["mode"],
                 "compaction",
             )
             self.assertEqual(
@@ -568,7 +586,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             compact_run = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
             self.assertIsNotNone(compact_run)
             assert compact_run is not None
-            self.assertEqual(compact_run.metadata["prompt_mode"], "compaction")
+            self.assertEqual(compact_run.metadata["runtime_request_mode"], "compaction")
 
             conversations_response = self.client.get("/conversations")
             self.assertEqual(conversations_response.status_code, 200)
@@ -586,7 +604,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(live_history_response.status_code, 200)
             live_history_payload = live_history_response.json()
             self.assertTrue(
-                all(item["visibility"] != "archived" for item in live_history_payload),
+                all(item["lifecycle_state"] != "archived" for item in live_history_payload),
             )
 
             full_history_response = self.client.get(
@@ -597,7 +615,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertGreater(len(full_history_payload), len(live_history_payload))
             self.assertTrue(
                 any(
-                    item["visibility_state"] == "archived"
+                    item["lifecycle_state"] == "archived"
                     for item in full_history_payload
                 ),
             )
@@ -606,7 +624,6 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             session_items = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_items(
                 ListSessionItemsInput(
                     session_key=session_key,
-                    chat_visible=True,
                 ),
             )
             archived_items = [
@@ -670,7 +687,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             heartbeat_payload = heartbeat_response.json()
             self.assertEqual(heartbeat_payload["run"]["status"], "queued")
             self.assertEqual(
-                heartbeat_payload["run"]["metadata"]["prompt_flow_hint"]["mode"],
+                heartbeat_payload["run"]["metadata"]["runtime_request_flow_hint"]["mode"],
                 "heartbeat",
             )
             self.assertEqual(
@@ -681,7 +698,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             heartbeat_run = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
             self.assertIsNotNone(heartbeat_run)
             assert heartbeat_run is not None
-            self.assertEqual(heartbeat_run.metadata["prompt_mode"], "heartbeat")
+            self.assertEqual(heartbeat_run.metadata["runtime_request_mode"], "heartbeat")
 
     def test_turn_memory_flush_endpoint_creates_memory_flush_run(self) -> None:
             adapter = _SequentialResultAdapter(
@@ -756,7 +773,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 flush_payload = flush_response.json()
                 self.assertEqual(flush_payload["run"]["status"], "queued")
                 self.assertEqual(
-                    flush_payload["run"]["metadata"]["prompt_flow_hint"]["mode"],
+                    flush_payload["run"]["metadata"]["runtime_request_flow_hint"]["mode"],
                     "memory_flush",
                 )
                 self.assertEqual(
@@ -767,7 +784,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 flush_run = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
                 self.assertIsNotNone(flush_run)
                 assert flush_run is not None
-                self.assertEqual(flush_run.metadata["prompt_mode"], "memory_flush")
+                self.assertEqual(flush_run.metadata["runtime_request_mode"], "memory_flush")
                 self.assertNotIn("memory_flush_result", flush_run.metadata)
                 self.assertEqual(
                     len(

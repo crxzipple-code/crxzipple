@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from crxzipple.app import AppKey, AssemblyTarget, build_app_container
 from crxzipple.app.container import AppContainer
-from crxzipple.app.assembly.runtime import runtime_plan
+from crxzipple.app.plan import AssemblyPlan
 from crxzipple.core.config import Settings
+
+RuntimePlanKind = Literal["runtime", "request_preview"]
 
 
 MEMORY_WATCHER_TARGETS: frozenset[AssemblyTarget] = frozenset(
@@ -32,6 +34,8 @@ def build_runtime_container(
     *,
     target: AssemblyTarget | str,
     enable_memory_watchers: bool | None = None,
+    run_activation_tasks: bool = True,
+    plan_kind: RuntimePlanKind = "runtime",
 ) -> AppContainer:
     resolved_target = AssemblyTarget.parse(target)
     resolved_enable_memory_watchers = (
@@ -40,9 +44,13 @@ def build_runtime_container(
         else enable_memory_watchers
     )
     return build_app_container(
-        runtime_plan(enable_memory_watchers=resolved_enable_memory_watchers),
+        _runtime_plan_for(
+            plan_kind,
+            enable_memory_watchers=resolved_enable_memory_watchers,
+        ),
         target=resolved_target,
         overrides={AppKey.CORE_SETTINGS: settings},
+        run_activation_tasks=run_activation_tasks,
     )
 
 
@@ -52,6 +60,8 @@ def runtime_container(
     *,
     target: AssemblyTarget | str,
     enable_memory_watchers: bool | None = None,
+    run_activation_tasks: bool = True,
+    plan_kind: RuntimePlanKind = "runtime",
 ) -> Iterator[AppContainer]:
     """Build a runtime container for one process scope and always close it."""
 
@@ -59,6 +69,8 @@ def runtime_container(
         settings,
         target=target,
         enable_memory_watchers=enable_memory_watchers,
+        run_activation_tasks=run_activation_tasks,
+        plan_kind=plan_kind,
     )
     try:
         yield container
@@ -73,6 +85,8 @@ def ensure_typer_runtime_container(
     key: str,
     settings: Settings | None = None,
     enable_memory_watchers: bool | None = None,
+    run_activation_tasks: bool = True,
+    plan_kind: RuntimePlanKind = "runtime",
 ) -> AppContainer:
     """Return a root Typer context container, creating and closing it once."""
 
@@ -93,6 +107,8 @@ def ensure_typer_runtime_container(
             settings or load_settings(),
             target=target,
             enable_memory_watchers=enable_memory_watchers,
+            run_activation_tasks=run_activation_tasks,
+            plan_kind=plan_kind,
         )
         payload[key] = container
         root.call_on_close(container.close)
@@ -100,11 +116,29 @@ def ensure_typer_runtime_container(
     return cast(AppContainer, container)
 
 
+def _runtime_plan_for(
+    plan_kind: RuntimePlanKind,
+    *,
+    enable_memory_watchers: bool,
+) -> AssemblyPlan:
+    if plan_kind == "request_preview":
+        from crxzipple.app.assembly.request_preview_runtime import (
+            request_preview_runtime_plan,
+        )
+
+        return request_preview_runtime_plan()
+
+    from crxzipple.app.assembly.runtime import runtime_plan
+
+    return runtime_plan(enable_memory_watchers=enable_memory_watchers)
+
+
 __all__ = [
     "AppContainer",
     "AppKey",
     "AssemblyTarget",
     "MEMORY_WATCHER_TARGETS",
+    "RuntimePlanKind",
     "build_runtime_container",
     "ensure_typer_runtime_container",
     "memory_watchers_enabled_for_target",

@@ -42,7 +42,8 @@ from crxzipple.modules.operations.application.read_models.ports import (
     OperationsChannelInteractionPort,
     OperationsChannelProfilePort,
     OperationsChannelRuntimePort,
-    OperationsContextRenderPort,
+    OperationsContextSliceBuilderPort,
+    OperationsContextObservationSnapshotPort,
     OperationsContextTreePort,
     OperationsContextWorkspacePort,
     OperationsDaemonManagerPort,
@@ -102,7 +103,8 @@ class OperationsSourceReadModelContext:
     memory_watch_registry: OperationsMemoryWatchRegistryPort | None
     context_workspace_service: OperationsContextWorkspacePort
     context_tree_service: OperationsContextTreePort
-    context_render_service: OperationsContextRenderPort
+    context_observation_snapshot_service: OperationsContextObservationSnapshotPort
+    context_slice_builder: OperationsContextSliceBuilderPort
     skill_manager: OperationsSkillCatalogPort
     browser_profile_service: OperationsBrowserProfilePort
     channel_profile_service: OperationsChannelProfilePort
@@ -187,7 +189,8 @@ def build_operations_source_read_model_provider(
         context_workspace=ContextWorkspaceOperationsReadModelProvider(
             workspace_service=context.context_workspace_service,
             tree_service=context.context_tree_service,
-            render_service=context.context_render_service,
+            observation_snapshot_service=context.context_observation_snapshot_service,
+            slice_builder=context.context_slice_builder,
         ),
         skills=SkillsOperationsReadModelProvider(
             skill_manager=context.skill_manager,

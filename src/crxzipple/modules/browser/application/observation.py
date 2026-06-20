@@ -3,11 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .evidence_paths import (
-    browser_evidence_path_alternatives,
-    browser_evidence_path_ladder_payload,
-    browser_evidence_path_payload,
-)
 from .tool_application import (
     BrowserToolApplicationError,
     BrowserToolApplicationService,
@@ -1060,7 +1055,7 @@ def _observation_guidance(
     form: Mapping[str, Any],
     overlay: Mapping[str, Any],
 ) -> dict[str, Any]:
-    primary = _primary_observation_guidance(
+    return _primary_observation_guidance(
         refs=refs,
         errors=errors,
         runtime=runtime,
@@ -1069,14 +1064,6 @@ def _observation_guidance(
         form=form,
         overlay=overlay,
     )
-    primary_key = _payload_text(primary.get("evidence_path_key"))
-    primary_path = browser_evidence_path_payload(primary_key)
-    guidance = dict(primary)
-    guidance["primary"] = dict(primary)
-    guidance["primary_evidence_path"] = primary_path
-    guidance["alternative_evidence_paths"] = browser_evidence_path_alternatives(primary_key)
-    guidance["evidence_paths"] = browser_evidence_path_ladder_payload()
-    return guidance
 
 
 def _primary_observation_guidance(
@@ -1094,14 +1081,12 @@ def _primary_observation_guidance(
             "next_action": "inspect-observation-errors",
             "reason": "One or more observation sections failed.",
             "suggested_tools": ["browser.diagnostics.collect", "browser.runtime.inspect"],
-            "evidence_path_key": "diagnose_blockers",
         }
     if (_safe_int(overlay.get("candidate_count")) or 0) > 0:
         return {
             "next_action": "select-overlay-candidate",
             "reason": "A visible overlay contains selectable candidates.",
             "suggested_tools": ["browser.action.trace", "browser.overlay.observe"],
-            "evidence_path_key": "stateful_interaction",
         }
     capture = network.get("capture") if isinstance(network, Mapping) else None
     if isinstance(capture, Mapping):
@@ -1115,10 +1100,7 @@ def _primary_observation_guidance(
                     "browser.network.get_response_body",
                     "browser.script.find_request",
                     "browser.script.extract_request",
-                    "browser.runtime.probe_client",
-                    "browser.runtime.call_client",
                 ],
-                "evidence_path_key": "network_truth",
             }
     request_matches = code.get("request_matches") if isinstance(code, Mapping) else None
     if isinstance(request_matches, Mapping) and (_safe_int(request_matches.get("match_count")) or 0) > 0:
@@ -1127,12 +1109,9 @@ def _primary_observation_guidance(
             "reason": "Script request candidates are available.",
             "suggested_tools": [
                 "browser.script.extract_request",
-                "browser.runtime.probe_client",
-                "browser.runtime.call_client",
                 "browser.script.inspect",
                 "browser.network.replay_request",
             ],
-            "evidence_path_key": "runtime_and_code",
         }
     search = code.get("search") if isinstance(code, Mapping) else None
     if isinstance(search, Mapping) and (_safe_int(search.get("match_count")) or 0) > 0:
@@ -1141,12 +1120,9 @@ def _primary_observation_guidance(
             "reason": "Code search matched page scripts.",
             "suggested_tools": [
                 "browser.script.extract_request",
-                "browser.runtime.probe_client",
-                "browser.runtime.call_client",
                 "browser.script.inspect",
                 "browser.code.search",
             ],
-            "evidence_path_key": "runtime_and_code",
         }
     if _has_runtime_or_script_signal(runtime=runtime, code=code):
         return {
@@ -1160,31 +1136,25 @@ def _primary_observation_guidance(
                 "browser.script.find_request",
                 "browser.code.search",
                 "browser.script.extract_request",
-                "browser.runtime.probe_client",
-                "browser.runtime.call_client",
                 "browser.network.inspect",
             ],
-            "evidence_path_key": "runtime_and_code",
         }
     if (_safe_int(form.get("field_count")) or 0) > 0:
         return {
             "next_action": "trace-form-field-action",
             "reason": "Visible form fields are available.",
             "suggested_tools": ["browser.action.trace", "browser.form.inspect"],
-            "evidence_path_key": "stateful_interaction",
         }
     if refs:
         return {
             "next_action": "trace-meaningful-action",
             "reason": "Interactive refs are available; use action trace to verify page effect.",
             "suggested_tools": ["browser.action.trace", "browser.dom.inspect"],
-            "evidence_path_key": "stateful_interaction",
         }
     return {
         "next_action": "capture-current-state",
         "reason": "No strong interactive, network, runtime, or script signal was found.",
         "suggested_tools": ["browser.snapshot", "browser.screenshot"],
-        "evidence_path_key": "orient",
     }
 
 

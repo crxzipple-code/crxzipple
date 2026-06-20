@@ -99,6 +99,9 @@ class ToolRunRepository(Protocol):
     def list_for_tool(self, tool_id: str) -> list[ToolRun]:
         ...
 
+    def list_for_orchestration_runs(self, run_ids: tuple[str, ...]) -> list[ToolRun]:
+        ...
+
 
 class ToolRunAssignmentRepository(Protocol):
     def add(self, assignment: ToolRunAssignment) -> None:

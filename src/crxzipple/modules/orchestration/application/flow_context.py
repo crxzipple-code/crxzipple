@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from crxzipple.modules.orchestration.application.prompting.modes import PromptMode
+from crxzipple.modules.orchestration.application.runtime_request_mode import RuntimeRequestMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,23 +23,23 @@ class FlowContextPayload:
 
 def build_flow_context_payload(
     *,
-    mode: PromptMode,
+    mode: RuntimeRequestMode,
     hint_payload: dict[str, object] | None,
 ) -> FlowContextPayload:
     metadata = _flow_metadata(mode, hint_payload)
-    if mode is PromptMode.SESSION_START:
+    if mode is RuntimeRequestMode.SESSION_START:
         return _payload(mode, "Flow: Session Start", _build_session_start_summary(hint_payload), metadata)
-    if mode is PromptMode.APPROVAL_RESUME:
+    if mode is RuntimeRequestMode.APPROVAL_RESUME:
         return _payload(mode, "Flow: Approval Resume", _build_approval_resume_summary(hint_payload), metadata)
-    if mode is PromptMode.APPROVAL_DENIED:
+    if mode is RuntimeRequestMode.APPROVAL_DENIED:
         return _payload(mode, "Flow: Approval Denied", _build_approval_denied_summary(hint_payload), metadata)
-    if mode is PromptMode.RECOVERY_RESUME:
+    if mode is RuntimeRequestMode.RECOVERY_RESUME:
         return _payload(mode, "Flow: Recovery Resume", _build_recovery_resume_summary(hint_payload), metadata)
-    if mode is PromptMode.HEARTBEAT:
+    if mode is RuntimeRequestMode.HEARTBEAT:
         return _payload(mode, "Flow: Heartbeat", _build_heartbeat_summary(hint_payload), metadata)
-    if mode is PromptMode.MEMORY_FLUSH:
+    if mode is RuntimeRequestMode.MEMORY_FLUSH:
         return _payload(mode, "Flow: Memory Flush", _build_memory_flush_summary(hint_payload), metadata)
-    if mode is PromptMode.COMPACTION:
+    if mode is RuntimeRequestMode.COMPACTION:
         return _payload(mode, "Flow: Compaction", _build_compaction_summary(hint_payload), metadata)
     return _payload(
         mode,
@@ -50,7 +50,7 @@ def build_flow_context_payload(
 
 
 def _payload(
-    mode: PromptMode,
+    mode: RuntimeRequestMode,
     title: str,
     summary: str,
     metadata: dict[str, object],
@@ -221,7 +221,7 @@ def _build_memory_flush_summary(hint_payload: dict[str, object] | None) -> str:
 
 
 def _flow_metadata(
-    mode: PromptMode,
+    mode: RuntimeRequestMode,
     hint_payload: dict[str, object] | None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {"mode": mode.value}

@@ -9,9 +9,9 @@ from crxzipple.modules.context_workspace.application import (
     SESSION_CURRENT_NODE_ID,
 )
 from crxzipple.modules.llm.domain import ToolSchema
-from crxzipple.modules.orchestration.application.prompt_input import RunPromptInput
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft import RuntimeLlmRequestDraft
 from crxzipple.modules.orchestration.domain import OrchestrationRun
-from crxzipple.shared.context_render_budget import context_render_budget_metadata
+from crxzipple.shared.request_render_budget import request_render_budget_metadata
 
 from ._metadata import (
     estimate_text_tokens,
@@ -26,47 +26,16 @@ from .artifact_mirror import artifact_content_budget
 def build_snapshot_provider_attachments(
     rendered_attachments: dict[str, object],
     *,
-    prompt: RunPromptInput,
+    draft: RuntimeLlmRequestDraft,
 ) -> dict[str, object]:
-    payload = dict(rendered_attachments)
-    session_item_refs = _direct_session_item_refs(prompt)
-    transcript_budget = _prompt_transcript_budget(prompt)
-    protocol_required_refs = _merged_protocol_required_refs(
-        session_item_refs,
-        transcript_budget,
-    )
-    payload["prompt_input"] = {
-        "llm_id": prompt.llm_id,
-        "llm_capabilities": [
-            capability.value for capability in prompt.llm_capabilities
-        ],
-        "message_count": len(prompt.messages),
-        "tool_schema_count": len(prompt.tool_schemas),
-        "context_block_count": len(prompt.context_blocks),
-        "session_item_count": len(session_item_refs),
-        "protocol_required_ref_count": len(protocol_required_refs),
-        "transcript_budget_source": transcript_budget.get("source"),
-        "transcript_budget_truncated": transcript_budget.get("truncated"),
-        "transcript_frontier": transcript_budget.get("frontier"),
-    }
-    if session_item_refs:
-        payload["session_item_refs"] = session_item_refs
-    execution_refs = _metadata_dict_list(
-        transcript_budget.get("execution_chain_protocol_required_refs"),
-    )
-    if execution_refs:
-        payload["execution_chain_protocol_required_refs"] = execution_refs
-    collapsed_refs = _metadata_dict_list(transcript_budget.get("collapsed_refs"))
-    if collapsed_refs:
-        payload["collapsed_session_item_refs"] = collapsed_refs
-    return payload
+    return dict(rendered_attachments)
 
 
 def build_context_snapshot_metadata(
     *,
     run: OrchestrationRun,
-    prompt: RunPromptInput,
-    rendered_prompt_body: str,
+    draft: RuntimeLlmRequestDraft,
+    debug_body: str,
     provider_attachments: dict[str, object],
     provider_attachment_report: dict[str, object],
     included_node_ids: tuple[str, ...],
@@ -81,29 +50,28 @@ def build_context_snapshot_metadata(
 ) -> dict[str, object]:
     session_budget = metadata_dict(estimate_breakdown.get("session"))
     plan_budget = metadata_dict(estimate_breakdown.get("plan"))
-    evidence_budget = metadata_dict(estimate_breakdown.get("evidence"))
     top_rendered_nodes = _top_rendered_nodes(estimate_breakdown)
-    rendered_prompt_estimate = metadata_dict(
-        estimate_breakdown.get("rendered_prompt"),
+    debug_body_estimate = metadata_dict(
+        estimate_breakdown.get("debug_body"),
     ) or {
-        "text_chars": len(rendered_prompt_body or ""),
-        "text_tokens": estimate_text_tokens(rendered_prompt_body or ""),
+        "text_chars": len(debug_body or ""),
+        "text_tokens": estimate_text_tokens(debug_body or ""),
     }
     node_estimate = metadata_dict(estimate_breakdown.get("node_visible"))
     contract_version = metadata_text(runtime_contract.get("contract_version"))
     contract_hash = metadata_text(runtime_contract.get("content_hash"))
-    rendered_prompt_chars = len(rendered_prompt_body or "")
-    rendered_prompt_tokens = estimate_text_tokens(rendered_prompt_body or "")
-    direct_transcript_chars = _direct_transcript_chars(prompt)
-    direct_transcript_tokens = estimate_text_tokens_from_chars(direct_transcript_chars)
-    direct_session_item_refs = _direct_session_item_refs(prompt)
-    direct_transcript_budget = _prompt_transcript_budget(prompt)
+    debug_body_chars = len(debug_body or "")
+    debug_body_tokens = estimate_text_tokens(debug_body or "")
+    draft_input_chars = _draft_input_chars(draft)
+    draft_input_tokens = estimate_text_tokens_from_chars(draft_input_chars)
+    draft_input_session_item_refs = _draft_input_session_item_refs(draft)
+    draft_input_budget = _draft_transcript_budget(draft)
     protocol_required_refs = _merged_protocol_required_refs(
-        direct_session_item_refs,
-        direct_transcript_budget,
+        draft_input_session_item_refs,
+        draft_input_budget,
     )
     execution_chain_protocol_required_refs = _metadata_dict_list(
-        direct_transcript_budget.get("execution_chain_protocol_required_refs"),
+        draft_input_budget.get("execution_chain_protocol_required_refs"),
     )
     tree_tool_interaction_count = sum(
         1
@@ -124,16 +92,13 @@ def build_context_snapshot_metadata(
         provider_attachments=provider_attachments,
         artifact_content_blocks=artifact_content_blocks,
     )
-    browser_affordance = browser_investigation_affordance_metadata(
-        provider_attachments,
-    )
     artifact_content_tokens = metadata_int(
         content_budget,
         "estimated_tokens",
     )
     duplicate_delivery_risk = (
         tree_tool_interaction_count > 0
-        and any(message.role.value == "tool" for message in prompt.messages)
+        and any(message.role.value == "tool" for message in draft.messages)
     )
     payload: dict[str, object] = {
         "parallel_recording": True,
@@ -239,31 +204,36 @@ def build_context_snapshot_metadata(
             tool_schema_budget,
             "max_estimated_tokens",
         ),
-        **browser_affordance,
         "mirrored_node_count": len(mirrored_node_ids),
-        "rendered_prompt_estimate": dict(rendered_prompt_estimate),
+        "debug_body_estimate": dict(debug_body_estimate),
         "node_visible_estimate": dict(node_estimate),
         "node_estimate_breakdown": dict(estimate_breakdown),
         "top_rendered_nodes": top_rendered_nodes,
-        "active_session_id": prompt.active_session_id,
-        "mode": prompt.mode.value,
+        "active_session_id": draft.active_session_id,
+        "mode": draft.mode.value,
+        "llm_id": draft.llm_id,
+        "llm_capabilities": [
+            capability.value for capability in draft.llm_capabilities
+        ],
+        "runtime_context_fact_count": len(draft.runtime_context),
+        "has_agent_instruction": bool(draft.agent_instruction),
         "flow_context": flow_context,
-        "workspace_dir": prompt.workspace_dir,
-        "prompt_report": (
-            prompt.report.to_payload()
-            if prompt.report is not None
+        "workspace_dir": draft.workspace_dir,
+        "runtime_request_report": (
+            draft.report.to_payload()
+            if draft.report is not None
             else None
         ),
-        "direct_transcript_message_count": len(prompt.messages),
-        "direct_transcript_roles": [message.role.value for message in prompt.messages],
-        "direct_transcript_chars": direct_transcript_chars,
-        "direct_transcript_estimated_tokens": direct_transcript_tokens,
-        "direct_session_item_refs": direct_session_item_refs,
-        "direct_session_item_count": len(direct_session_item_refs),
-        "direct_session_item_frontier": _session_item_frontier(
-            direct_session_item_refs,
+        "draft_input_message_count": len(draft.messages),
+        "draft_input_roles": [message.role.value for message in draft.messages],
+        "draft_input_chars": draft_input_chars,
+        "draft_input_estimated_tokens": draft_input_tokens,
+        "draft_input_session_item_refs": draft_input_session_item_refs,
+        "draft_input_session_item_count": len(draft_input_session_item_refs),
+        "draft_input_session_item_frontier": _session_item_frontier(
+            draft_input_session_item_refs,
         ),
-        "direct_transcript_budget": direct_transcript_budget,
+        "draft_input_budget": draft_input_budget,
         "protocol_required_refs": protocol_required_refs,
         "protocol_required_ref_count": len(protocol_required_refs),
         "execution_chain_protocol_required_refs": (
@@ -272,11 +242,11 @@ def build_context_snapshot_metadata(
         "execution_chain_protocol_required_ref_count": len(
             execution_chain_protocol_required_refs,
         ),
-        "rendered_prompt_chars": rendered_prompt_chars,
-        "rendered_prompt_estimated_tokens": rendered_prompt_tokens,
-        "estimated_provider_prompt_tokens": (
-            rendered_prompt_tokens
-            + direct_transcript_tokens
+        "debug_body_chars": debug_body_chars,
+        "debug_body_estimated_tokens": debug_body_tokens,
+        "estimated_provider_input_tokens": (
+            debug_body_tokens
+            + draft_input_tokens
             + mirrored_schema_tokens
             + artifact_content_tokens
         ),
@@ -309,7 +279,7 @@ def build_context_snapshot_metadata(
         "session_item_node_refs": _session_item_node_refs(included_node_ids),
         "current_inbound_node_id": _current_inbound_node_id(
             run=run,
-            prompt=prompt,
+            draft=draft,
             included_node_ids=included_node_ids,
         ),
         "tree_tool_interaction_count": tree_tool_interaction_count,
@@ -350,43 +320,6 @@ def build_context_snapshot_metadata(
         "work_plan_update_reason": metadata_text(plan_budget.get("update_reason")),
         "work_plan_phase_changed": bool(plan_budget.get("phase_changed")),
         "work_plan_update_count": metadata_int(plan_budget, "plan_update_count"),
-        "final_response_requires_evidence_path": bool(
-            evidence_budget.get("final_response_requires_evidence_path"),
-        ),
-        "verified_evidence_path_count": metadata_int(
-            evidence_budget,
-            "verified_evidence_path_count",
-        ),
-        "verified_evidence_paths": _metadata_text_list(
-            evidence_budget.get("verified_evidence_paths"),
-        ),
-        "browser_verified_evidence_path_count": metadata_int(
-            evidence_budget,
-            "browser_verified_evidence_path_count",
-        ),
-        "browser_verified_evidence_paths": _metadata_text_list(
-            evidence_budget.get("browser_verified_evidence_paths"),
-        ),
-        "unverified_evidence_paths": _metadata_text_list(
-            evidence_budget.get("unverified_evidence_paths"),
-        ),
-        "browser_tool_interaction_count": metadata_int(
-            evidence_budget,
-            "browser_tool_interaction_count",
-        ),
-        "browser_evidence_path_no_terminal_fact": bool(
-            evidence_budget.get("browser_evidence_path_no_terminal_fact"),
-        ),
-        "browser_investigation_warning_count": metadata_int(
-            evidence_budget,
-            "browser_investigation_warning_count",
-        ),
-        "browser_investigation_warnings": _metadata_dict_list(
-            evidence_budget.get("browser_investigation_warnings"),
-        ),
-        "browser_investigation_warning_types": _metadata_text_list(
-            evidence_budget.get("browser_investigation_warning_types"),
-        ),
         "folded_history_node_count": sum(
             1
             for node_id in included_node_ids
@@ -397,10 +330,10 @@ def build_context_snapshot_metadata(
         "artifact_content_block_count": len(artifact_content_blocks),
         "current_inbound_session_item_id": _current_inbound_session_item_id(
             run=run,
-            prompt=prompt,
+            draft=draft,
         ),
     }
-    payload.update(context_render_budget_metadata(payload))
+    payload.update(request_render_budget_metadata(payload))
     return payload
 
 
@@ -416,124 +349,6 @@ def mirrored_schema_estimated_tokens(provider_attachments: dict[str, object]) ->
         total_chars += len(str(schema.get("description") or ""))
         total_chars += len(str(schema.get("input_schema") or ""))
     return estimate_text_tokens_from_chars(total_chars)
-
-
-def browser_investigation_affordance_metadata(
-    provider_attachments: dict[str, object],
-) -> dict[str, object]:
-    schema_names = _provider_tool_schema_names(provider_attachments)
-    browser_names = tuple(name for name in schema_names if name.startswith("browser."))
-    runtime_code = tuple(
-        name
-        for name in browser_names
-        if name
-        in {
-            "browser.runtime.inspect",
-            "browser.script.find_request",
-            "browser.code.search",
-            "browser.script.extract_request",
-            "browser.runtime.probe_client",
-            "browser.runtime.call_client",
-            "browser.script.inspect",
-            "browser.script.list",
-        }
-    )
-    network = tuple(
-        name
-        for name in browser_names
-        if name.startswith("browser.network.")
-    )
-    stateful = tuple(
-        name
-        for name in browser_names
-        if name
-        in {
-            "browser.action",
-            "browser.action.trace",
-            "browser.form.inspect",
-            "browser.form.fill",
-            "browser.overlay.observe",
-            "browser.overlay.select",
-            "browser.dom.inspect",
-            "browser.dom.clickability",
-            "browser.click",
-            "browser.type",
-        }
-    )
-    present_paths: list[str] = []
-    missing_paths: list[str] = []
-    if runtime_code:
-        present_paths.append("runtime_and_code")
-    else:
-        missing_paths.append("runtime_and_code")
-    if network:
-        present_paths.append("network_truth")
-    else:
-        missing_paths.append("network_truth")
-    if stateful:
-        present_paths.append("stateful_interaction")
-    else:
-        missing_paths.append("stateful_interaction")
-    status = "ok"
-    route_bias = "balanced"
-    if not browser_names:
-        status = "missing_browser_tools"
-        route_bias = "no_browser_affordance"
-    elif runtime_code and network:
-        status = "ok"
-        route_bias = "runtime_network_visible"
-    elif stateful and not runtime_code and not network:
-        status = "dom_form_only"
-        route_bias = "dom_form_click_bias"
-    else:
-        status = "partial"
-        route_bias = "missing_evidence_path"
-    return {
-        "browser_investigation_affordance_status": status,
-        "browser_investigation_route_bias": route_bias,
-        "browser_investigation_present_paths": present_paths,
-        "browser_investigation_missing_paths": missing_paths,
-        "browser_evidence_path_ladder": _browser_evidence_path_ladder(
-            present_paths=tuple(present_paths),
-            runtime_code=runtime_code,
-            network=network,
-            stateful=stateful,
-        ),
-        "browser_investigation_schema_names": list(browser_names),
-        "browser_investigation_runtime_code_schema_names": list(runtime_code),
-        "browser_investigation_network_schema_names": list(network),
-        "browser_investigation_stateful_schema_names": list(stateful),
-    }
-
-
-def _browser_evidence_path_ladder(
-    *,
-    present_paths: tuple[str, ...],
-    runtime_code: tuple[str, ...],
-    network: tuple[str, ...],
-    stateful: tuple[str, ...],
-) -> list[dict[str, object]]:
-    present = set(present_paths)
-    return [
-        {
-            "path": "runtime_and_code",
-            "status": "present" if "runtime_and_code" in present else "missing",
-            "schema_count": len(runtime_code),
-            "schemas": list(runtime_code),
-        },
-        {
-            "path": "network_truth",
-            "status": "present" if "network_truth" in present else "missing",
-            "schema_count": len(network),
-            "schemas": list(network),
-        },
-        {
-            "path": "stateful_interaction",
-            "status": "present" if "stateful_interaction" in present else "missing",
-            "schema_count": len(stateful),
-            "schemas": list(stateful),
-        },
-    ]
 
 
 def _provider_tool_schema_names(
@@ -643,11 +458,11 @@ def _evidence_node_refs(
 def _current_inbound_node_id(
     *,
     run: OrchestrationRun,
-    prompt: RunPromptInput,
+    draft: RuntimeLlmRequestDraft,
     included_node_ids: tuple[str, ...],
 ) -> str | None:
     included = set(included_node_ids)
-    for message in prompt.messages:
+    for message in draft.messages:
         metadata = message.metadata
         if metadata.get("source_kind") != "orchestration_run":
             continue
@@ -672,9 +487,9 @@ def _current_inbound_node_id(
 def _current_inbound_session_item_id(
     *,
     run: OrchestrationRun,
-    prompt: RunPromptInput,
+    draft: RuntimeLlmRequestDraft,
 ) -> str | None:
-    for message in prompt.messages:
+    for message in draft.messages:
         metadata = message.metadata
         if metadata.get("source_kind") != "orchestration_run":
             continue
@@ -686,13 +501,13 @@ def _current_inbound_session_item_id(
     return None
 
 
-def _direct_transcript_chars(prompt: RunPromptInput) -> int:
-    return sum(_llm_message_content_chars(message.content) for message in prompt.messages)
+def _draft_input_chars(draft: RuntimeLlmRequestDraft) -> int:
+    return sum(_llm_message_content_chars(message.content) for message in draft.messages)
 
 
-def _direct_session_item_refs(prompt: RunPromptInput) -> list[dict[str, object]]:
+def _draft_input_session_item_refs(draft: RuntimeLlmRequestDraft) -> list[dict[str, object]]:
     refs: list[dict[str, object]] = []
-    for message in prompt.messages:
+    for message in draft.messages:
         metadata = message.metadata
         item_id = metadata_text(metadata.get("session_item_id"))
         session_id = metadata_text(metadata.get("session_id"))
@@ -708,7 +523,7 @@ def _direct_session_item_refs(prompt: RunPromptInput) -> list[dict[str, object]]
             "sequence_no": sequence_no,
             "role": message.role.value,
             "render_mode": "full",
-            "visibility": "model_visible",
+            "render_scope": "provider_replay",
         }
         for key in (
             "kind",
@@ -745,11 +560,11 @@ def _protocol_required_refs(
 
 
 def _merged_protocol_required_refs(
-    direct_refs: list[dict[str, object]],
+    draft_refs: list[dict[str, object]],
     transcript_budget: dict[str, object],
 ) -> list[dict[str, object]]:
     refs = [
-        *_protocol_required_refs(direct_refs),
+        *_protocol_required_refs(draft_refs),
         *_metadata_dict_list(transcript_budget.get("protocol_required_refs")),
     ]
     deduped: list[dict[str, object]] = []
@@ -772,36 +587,36 @@ def _merged_protocol_required_refs(
     return deduped
 
 
-def _prompt_transcript_budget(prompt: RunPromptInput) -> dict[str, object]:
-    if prompt.report is None:
-        return _direct_session_item_budget(prompt)
-    report_payload = prompt.report.to_payload()
+def _draft_transcript_budget(draft: RuntimeLlmRequestDraft) -> dict[str, object]:
+    if draft.report is None:
+        return _draft_input_session_item_budget(draft)
+    report_payload = draft.report.to_payload()
     transcript = report_payload.get("transcript")
     if not isinstance(transcript, dict):
-        return _direct_session_item_budget(prompt)
+        return _draft_input_session_item_budget(draft)
     budget = transcript.get("budget")
     if not isinstance(budget, dict):
-        return _direct_session_item_budget(prompt)
+        return _draft_input_session_item_budget(draft)
     normalized = dict(budget)
     if normalized:
         return normalized
-    return _direct_session_item_budget(prompt)
+    return _draft_input_session_item_budget(draft)
 
 
-def _direct_session_item_budget(prompt: RunPromptInput) -> dict[str, object]:
-    direct_refs = _direct_session_item_refs(prompt)
-    if not direct_refs:
+def _draft_input_session_item_budget(draft: RuntimeLlmRequestDraft) -> dict[str, object]:
+    draft_refs = _draft_input_session_item_refs(draft)
+    if not draft_refs:
         return {}
     return {
         "source": "session_items",
         "budget_unit": "chars",
-        "input_item_count": len(direct_refs),
-        "included_item_count": len(direct_refs),
+        "input_item_count": len(draft_refs),
+        "included_item_count": len(draft_refs),
         "collapsed_item_count": 0,
         "truncated": False,
-        "frontier": _session_item_frontier(direct_refs),
-        "included_refs": direct_refs,
-        "protocol_required_refs": _protocol_required_refs(direct_refs),
+        "frontier": _session_item_frontier(draft_refs),
+        "included_refs": draft_refs,
+        "protocol_required_refs": _protocol_required_refs(draft_refs),
         "protocol_required_preserved": True,
     }
 

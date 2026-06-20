@@ -1436,7 +1436,7 @@ def _cli_process_result_envelope(
         output_payload=dict(details),
         key_facts=key_facts,
         read_handles=(read_handle,),
-        model_visible_payload={
+        provider_replay_payload={
             "summary": _cli_process_result_summary(
                 provider_name=provider_name,
                 action=action,
@@ -1453,7 +1453,7 @@ def _cli_process_result_envelope(
             "runtime_facts": details.get("runtime_facts"),
             "read_handles": [read_handle],
         },
-        user_visible_payload={
+        user_summary_payload={
             "summary": _cli_process_result_summary(
                 provider_name=provider_name,
                 action=action,
@@ -1505,14 +1505,14 @@ def _cli_help_result_envelope(
             "stderr_chars": len(stderr),
             "working_directory": details.get("working_directory"),
         },
-        model_visible_payload={
+        provider_replay_payload={
             "summary": summary,
             "exit_code": exit_code,
             "stdout": stdout,
             "stderr": stderr,
             "runtime_facts": details.get("runtime_facts"),
         },
-        user_visible_payload={
+        user_summary_payload={
             "summary": summary,
             "exit_code": exit_code,
         },

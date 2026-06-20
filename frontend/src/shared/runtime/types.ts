@@ -38,7 +38,7 @@ export interface TraceContext {
   tool_call_id?: string;
   llm_invocation_id?: string;
   llm_response_item_id?: string;
-  context_render_snapshot_id?: string;
+  request_render_snapshot_id?: string;
   session_item_id?: string;
   continuation_decision_id?: string;
   artifact_id?: string;

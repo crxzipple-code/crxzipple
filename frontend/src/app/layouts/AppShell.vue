@@ -20,7 +20,6 @@ const themeStorageKey = "crxzipple.theme";
 const navItems = [
   { label: "nav.workbench", to: "/workbench", key: "workbench", count: 0 },
   { label: "nav.operations", to: "/operations/orchestration", key: "operations", count: 2, tone: "danger" },
-  { label: "nav.trace", to: "/trace/trc_01H8XK3Q7Y4P8Z2J8S6M1D9F6E", key: "trace", count: 3, tone: "warning" },
   { label: "nav.settings", to: "/settings", key: "settings", count: 0 },
 ];
 

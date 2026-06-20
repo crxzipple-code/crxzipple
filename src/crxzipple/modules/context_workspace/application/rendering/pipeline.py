@@ -1,40 +1,38 @@
 from __future__ import annotations
 
-import json
-
 from crxzipple.modules.context_workspace.application import root_nodes
 from crxzipple.modules.context_workspace.application.models import (
-    RenderContextDeltaResult,
-    RenderContextPromptResult,
+    ContextDebugDeltaResult,
+    ContextObservationRenderResult,
 )
 from crxzipple.modules.context_workspace.domain import (
     ContextNode,
-    ContextRenderSnapshot,
+    ContextSnapshot,
     ContextWorkspace,
 )
 
 from .estimates import aggregate_estimate, estimate_breakdown, text_estimate
 from .provider_mirror import render_provider_attachments
 from .snapshot_metadata import root_node_ids, runtime_contract_metadata
-from .xml_renderer import render_context_tree, tree_prompt_visible_nodes
+from .xml_renderer import render_context_tree, tree_snapshot_visible_nodes
 
 
-class ContextRenderPipeline:
-    def render_prompt_body(
+class ContextTreeRenderPipeline:
+    def render_observation(
         self,
         *,
         workspace: ContextWorkspace,
         nodes: tuple[ContextNode, ...],
         provider_attachments: dict[str, object],
         metadata: dict[str, object],
-    ) -> RenderContextPromptResult:
-        visible_nodes = tree_prompt_visible_nodes(nodes)
+    ) -> ContextObservationRenderResult:
+        visible_nodes = tree_snapshot_visible_nodes(nodes)
         node_estimate = aggregate_estimate(visible_nodes)
         breakdown = estimate_breakdown(visible_nodes)
-        prompt_body = render_context_tree(workspace, visible_nodes)
-        estimate = text_estimate(prompt_body)
+        debug_body = render_context_tree(workspace, visible_nodes)
+        estimate = text_estimate(debug_body)
         breakdown["node_visible"] = node_estimate.to_payload()
-        breakdown["rendered_prompt"] = estimate.to_payload()
+        breakdown["debug_body"] = estimate.to_payload()
         (
             mirrored_attachments,
             mirrored_node_ids,
@@ -45,9 +43,9 @@ class ContextRenderPipeline:
             base=provider_attachments,
             render_metadata=metadata,
         )
-        return RenderContextPromptResult(
+        return ContextObservationRenderResult(
             workspace=workspace,
-            prompt_body=prompt_body,
+            debug_body=debug_body,
             estimate=estimate,
             included_node_ids=tuple(node.id for node in visible_nodes),
             estimate_breakdown=breakdown,
@@ -64,10 +62,10 @@ class ContextRenderPipeline:
         self,
         *,
         workspace: ContextWorkspace,
-        baseline: ContextRenderSnapshot,
-        current: RenderContextPromptResult,
+        baseline: ContextSnapshot,
+        current: ContextObservationRenderResult,
         metadata: dict[str, object],
-    ) -> RenderContextDeltaResult:
+    ) -> ContextDebugDeltaResult:
         current_node_ids = tuple(current.included_node_ids)
         baseline_node_ids = tuple(baseline.included_node_ids)
         added_node_ids = tuple(
@@ -100,7 +98,7 @@ class ContextRenderPipeline:
                 "removed_tool_schema_count": len(removed_tool_schema_names),
             },
         )
-        return RenderContextDeltaResult(
+        return ContextDebugDeltaResult(
             workspace=workspace,
             baseline_snapshot_id=baseline.id,
             baseline_revision=baseline.tree_revision,
@@ -114,7 +112,7 @@ class ContextRenderPipeline:
             removed_tool_schema_names=removed_tool_schema_names,
             current_tool_schema_names=current_tool_schema_names,
             baseline_tool_schema_names=baseline_tool_schema_names,
-            prompt_body=render_context_delta_body(
+            debug_body=render_context_debug_delta_body(
                 workspace=workspace,
                 baseline=baseline,
                 added_node_ids=added_node_ids,
@@ -143,15 +141,14 @@ def tool_schema_names(provider_attachments: dict[str, object]) -> tuple[str, ...
     return tuple(sorted(names))
 
 
-def render_context_delta_body(
+def render_context_debug_delta_body(
     *,
     workspace: ContextWorkspace,
-    baseline: ContextRenderSnapshot,
+    baseline: ContextSnapshot,
     added_node_ids: tuple[str, ...],
     removed_node_ids: tuple[str, ...],
     added_tool_schema_names: tuple[str, ...],
     removed_tool_schema_names: tuple[str, ...],
-    evidence_delta: dict[str, object] | None = None,
 ) -> str:
     lines = [
         (
@@ -164,7 +161,6 @@ def render_context_delta_body(
         _xml_list("removed_rendered_nodes", removed_node_ids),
         _xml_list("added_tool_schemas", added_tool_schema_names),
         _xml_list("removed_tool_schemas", removed_tool_schema_names),
-        _xml_payload("evidence_delta", evidence_delta),
         "</context_tree_delta>",
     ]
     return "\n".join(lines)
@@ -179,16 +175,6 @@ def _xml_list(tag: str, values: tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
-def _xml_payload(tag: str, payload: dict[str, object] | None) -> str:
-    if not payload:
-        return f"  <{tag} />"
-    try:
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    except TypeError:
-        encoded = str(payload)
-    return f"  <{tag}>{_escape_xml(encoded)}</{tag}>"
-
-
 def _escape_xml(value: str) -> str:
     return (
         value.replace("&", "&amp;")
@@ -199,7 +185,7 @@ def _escape_xml(value: str) -> str:
 
 
 __all__ = [
-    "ContextRenderPipeline",
-    "render_context_delta_body",
+    "ContextTreeRenderPipeline",
+    "render_context_debug_delta_body",
     "tool_schema_names",
 ]

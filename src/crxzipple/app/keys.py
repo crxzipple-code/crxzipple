@@ -48,7 +48,12 @@ class AppKey(StrEnum):
     CONTEXT_OWNER_REGISTRY = "context_workspace.owner_registry"
     CONTEXT_WORKSPACE_SERVICE = "context_workspace.workspace_service"
     CONTEXT_TREE_SERVICE = "context_workspace.tree_service"
-    CONTEXT_RENDER_SERVICE = "context_workspace.render_service"
+    CONTEXT_OBSERVATION_SNAPSHOT_SERVICE = "context_workspace.observation_snapshot_service"
+    CONTEXT_REQUEST_RENDER_SNAPSHOT_SERVICE = (
+        "context_workspace.request_render_snapshot_service"
+    )
+    CONTEXT_CONTROL_SLICE_BUILDER = "context_workspace.control_slice_builder"
+    CONTEXT_SLICE_BUILDER = "context_workspace.slice_builder"
     CONTEXT_SESSION_NODE_PROVIDER = "context_workspace.session_node_provider"
     CONTEXT_AGENT_HOME_NODE_PROVIDER = "context_workspace.agent_home_node_provider"
     CONTEXT_SKILL_NODE_PROVIDER = "context_workspace.skill_node_provider"

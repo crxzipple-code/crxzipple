@@ -21,7 +21,10 @@ from crxzipple.modules.access.infrastructure import (
 )
 
 
-def access_factories() -> tuple[ApplicationFactory, ...]:
+def access_factories(
+    *,
+    ensure_default_oauth_provider: bool = True,
+) -> tuple[ApplicationFactory, ...]:
     """Build Access module-local services and repositories."""
 
     return (
@@ -42,12 +45,19 @@ def access_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.SETTINGS_ACTION_SERVICE,
                 AppKey.SETTINGS_QUERY_SERVICE,
             ),
-            build=_build_access_services,
+            build=lambda ctx: _build_access_services(
+                ctx,
+                ensure_default_oauth_provider=ensure_default_oauth_provider,
+            ),
         ),
     )
 
 
-def _build_access_services(ctx) -> dict[str, Any]:
+def _build_access_services(
+    ctx,
+    *,
+    ensure_default_oauth_provider: bool,
+) -> dict[str, Any]:
     settings = ctx.require(AppKey.CORE_SETTINGS)
     engine = ctx.require(AppKey.DATABASE_ENGINE)
     session_factory = ctx.require(AppKey.DATABASE_SESSION_FACTORY)
@@ -76,7 +86,9 @@ def _build_access_services(ctx) -> dict[str, Any]:
             environment=settings.environment,
         ),
     )
-    if inspect(engine).has_table("access_oauth_providers"):
+    if ensure_default_oauth_provider and inspect(engine).has_table(
+        "access_oauth_providers",
+    ):
         oauth_service.ensure_default_codex_provider()
 
     return {

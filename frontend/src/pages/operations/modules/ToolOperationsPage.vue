@@ -909,7 +909,9 @@ function contextValue(detail: OperationsToolRunDetail, label: string): string {
 
 function detailTraceRoute(detail: OperationsToolRunDetail): string | null {
   const trace = detailValue(detail, "Trace");
-  return trace && trace !== "-" ? `/trace/${encodeURIComponent(trace)}` : null;
+  return trace && trace !== "-"
+    ? `/workbench/traces/${encodeURIComponent(trace)}`
+    : null;
 }
 
 function detailRunRoute(detail: OperationsToolRunDetail): string | null {

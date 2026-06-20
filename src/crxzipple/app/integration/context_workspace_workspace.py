@@ -106,7 +106,10 @@ def _workspace_file_node_seed(
     display_order: int,
 ) -> ContextNodeSeed:
     content = file.content.strip()
-    summary = _truncate(content, 1600)
+    summary = (
+        f"Workspace file '{file.path}' is available through workspace file "
+        "tools. Read it explicitly when the task needs the file body."
+    )
     return ContextNodeSeed(
         node_id=f"workspace.file.{_node_token(file.path)}",
         parent_id=parent_id,
@@ -117,13 +120,14 @@ def _workspace_file_node_seed(
         state=ContextNodeState(collapsed=False, loaded=True),
         actions=_FILE_ACTIONS,
         owner_ref={"path": file.path},
-        estimate=_text_estimate(content),
+        estimate=_text_estimate(summary),
         display_order=display_order,
         metadata={
             "path": file.path,
             "content_chars": len(content),
             "truncated": file.truncated,
             "source": "workspace.resources",
+            "content_available_via": "workspace_read",
         },
     )
 

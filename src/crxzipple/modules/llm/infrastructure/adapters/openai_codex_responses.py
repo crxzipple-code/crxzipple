@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
+import errno
 import json
+import threading
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import requests
+import websocket
 
 from crxzipple.modules.llm.application.adapters import (
     LlmAdapterRequest,
@@ -15,31 +21,44 @@ from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmContinuationSignal,
-    LlmMessageRole,
     LlmResponseItem,
     LlmResult,
     LlmUsage,
 )
-from crxzipple.modules.llm.infrastructure.adapters.common import (
-    async_sleep_before_openai_stream_retry,
-    build_openai_continuation_signal,
-    build_openai_response_items,
-    build_openai_tool_name_aliases,
-    coerce_text_content,
+from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     default_base_url,
     ensure_image_input_supported,
+)
+from crxzipple.modules.llm.infrastructure.adapters.http_helpers import (
+    OPENAI_TRANSIENT_HTTP_STATUS_CODES,
+    OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS,
+    RetryableOpenAIStreamError,
+    async_sleep_before_openai_stream_retry,
     httpx_response_text,
     is_retryable_openai_stream_exception,
     join_url,
-    openai_provider_request_preview,
-    openai_response_stream_event,
-    openai_response_input_items,
-    OPENAI_TRANSIENT_HTTP_STATUS_CODES,
-    OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS,
-    openai_tool_schema,
-    RetryableOpenAIStreamError,
     resolve_credential_binding,
     sleep_before_openai_stream_retry,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses_renderer import (
+    OpenAICodexResponsesRenderer,
+    requested_provider_transport_input,
+    uses_provider_native_continuation_input,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_response_projection import (
+    build_openai_continuation_signal,
+    build_openai_response_items,
+    openai_response_stream_event,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_protocol import (
+    ProviderRenderInput,
+    ProviderWireRequest,
+)
+from crxzipple.modules.llm.infrastructure.adapters.tool_schemas import (
+    build_openai_tool_name_aliases,
+)
+from crxzipple.modules.llm.infrastructure.rendering.input_projection import (
+    messages_from_projected_input_items,
 )
 from crxzipple.shared.infrastructure.http import get_async_http_client
 
@@ -48,22 +67,60 @@ class OpenAICodexResponsesAdapter:
     DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
     DEFAULT_INSTRUCTIONS = "You are a helpful coding assistant."
 
+    def __init__(self) -> None:
+        self._websocket_pool: dict[tuple[str, tuple[str, ...], int], list[Any]] = {}
+        self._websocket_pool_lock = threading.Lock()
+        self._renderer = OpenAICodexResponsesRenderer(
+            default_base_url=self.DEFAULT_BASE_URL,
+            default_instructions=self.DEFAULT_INSTRUCTIONS,
+        )
+
+    def close_websocket_pool(self) -> None:
+        with self._websocket_pool_lock:
+            sockets = [
+                ws
+                for bucket in self._websocket_pool.values()
+                for ws in bucket
+            ]
+            self._websocket_pool.clear()
+        for ws in sockets:
+            _close_websocket(ws)
+
+    def warmup_websocket(
+        self,
+        profile: LlmProfile,
+        *,
+        resolved_credential: str | None = None,
+    ) -> dict[str, Any]:
+        token = resolve_credential_binding(
+            profile.credential_binding_id,
+            required=True,
+            description=f"LLM profile '{profile.id}'",
+            resolved_credential=resolved_credential,
+        )
+        endpoint = _websocket_endpoint(
+            join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses"),
+        )
+        headers = _websocket_headers(token)
+        ws, key, reused = self._acquire_websocket(
+            endpoint,
+            headers=headers,
+            timeout_seconds=profile.timeout_seconds,
+        )
+        self._release_websocket(key, ws)
+        return {
+            "transport": "websocket",
+            "endpoint": endpoint,
+            "reused_connection": reused,
+        }
+
     def preview_request(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> dict[str, Any]:
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
-        endpoint = join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses")
-        payload = self._build_payload(
-            profile,
-            request,
-            tool_name_aliases=tool_name_aliases,
-        )
-        return openai_provider_request_preview(
-            profile=profile,
-            endpoint=endpoint,
-            payload=payload,
+        return self._renderer.preview_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
         )
 
     def invoke(
@@ -139,7 +196,16 @@ class OpenAICodexResponsesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> Iterator[LlmStreamEvent]:
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        if requested_provider_transport_input(render_input) == "websocket":
+            yield from self._stream_websocket_invoke(
+                profile,
+                request,
+                render_input=render_input,
+            )
+            return
+        _ensure_supported_transport_input(render_input)
+        tool_name_aliases = build_openai_tool_name_aliases(render_input.tool_schemas)
         alias_to_original = {
             alias: original
             for original, alias in tool_name_aliases.items()
@@ -153,6 +219,7 @@ class OpenAICodexResponsesAdapter:
                 response = self._open_stream(
                     profile,
                     request,
+                    render_input=render_input,
                     tool_name_aliases=tool_name_aliases,
                 )
                 for event in self._stream_sse_response(
@@ -184,7 +251,16 @@ class OpenAICodexResponsesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> AsyncIterator[LlmStreamEvent]:
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        if requested_provider_transport_input(render_input) == "websocket":
+            async for event in self._stream_websocket_invoke_async_bridge(
+                profile,
+                request,
+            ):
+                yield event
+            return
+        _ensure_supported_transport_input(render_input)
+        tool_name_aliases = build_openai_tool_name_aliases(render_input.tool_schemas)
         alias_to_original = {
             alias: original
             for original, alias in tool_name_aliases.items()
@@ -194,21 +270,26 @@ class OpenAICodexResponsesAdapter:
         while True:
             emitted_output = False
             try:
-                url, headers, payload = self._stream_request(
+                wire_request = self._wire_request(
                     profile,
                     request,
+                    render_input=render_input,
                     tool_name_aliases=tool_name_aliases,
                 )
                 client = get_async_http_client(
-                    url,
+                    wire_request.endpoint,
                     timeout=profile.timeout_seconds,
                     client_factory=httpx.AsyncClient,
                 )
                 async with client.stream(
                     "POST",
-                    url,
-                    headers=headers,
-                    json=payload,
+                    wire_request.endpoint,
+                    headers=self._request_headers(
+                        profile,
+                        request,
+                        render_input=render_input,
+                    ),
+                    json=wire_request.payload,
                 ) as response:
                     async for event in self._stream_sse_response_async(
                         profile,
@@ -235,48 +316,274 @@ class OpenAICodexResponsesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
         *,
+        render_input: ProviderRenderInput | None = None,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> requests.Response:
-        url, headers, payload = self._stream_request(
+        wire_request = self._wire_request(
             profile,
             request,
+            render_input=render_input,
             tool_name_aliases=tool_name_aliases,
         )
-        return requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
-            stream=True,
+        return self._send_stream_wire_request(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
 
-    def _stream_request(
+    def _stream_websocket_invoke(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
         *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> tuple[str, dict[str, str], dict[str, Any]]:
-        ensure_image_input_supported(profile, request.messages)
+        render_input: ProviderRenderInput | None = None,
+    ) -> Iterator[LlmStreamEvent]:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        tool_name_aliases = build_openai_tool_name_aliases(model_input.tool_schemas)
+        alias_to_original = {
+            alias: original
+            for original, alias in tool_name_aliases.items()
+        }
+        ensure_image_input_supported(
+            profile,
+            messages_from_projected_input_items(model_input.input_items),
+        )
         token = resolve_credential_binding(
             profile.credential_binding_id,
             required=True,
             description=f"LLM profile '{profile.id}'",
             resolved_credential=request.resolved_credential,
         )
-        payload = self._build_payload(
-            profile,
-            request,
-            tool_name_aliases=tool_name_aliases,
-        )
-        return (
+        endpoint = _websocket_endpoint(
             join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses"),
-            {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-            payload,
+        )
+        description = f"OpenAI Codex Responses profile '{profile.id}'"
+        headers = _websocket_headers(token)
+
+        request_attempts = [request]
+        if uses_provider_native_continuation_input(model_input):
+            request_attempts.append(replace(request, continuation=None))
+
+        for attempt_index, attempt_request in enumerate(request_attempts):
+            transient_attempt = 1
+            while True:
+                ws: Any | None = None
+                pool_key: tuple[str, tuple[str, ...], int] | None = None
+                keep_websocket = False
+                emitted_output = False
+                try:
+                    wire_request = self._websocket_wire_request(
+                        profile,
+                        attempt_request,
+                        endpoint=endpoint,
+                        render_input=(
+                            model_input
+                            if attempt_request is request
+                            else ProviderRenderInput.from_request(
+                                profile=profile,
+                                request=attempt_request,
+                            )
+                        ),
+                    )
+                    ws, pool_key, _ = self._acquire_websocket(
+                        endpoint,
+                        headers=headers,
+                        timeout_seconds=profile.timeout_seconds,
+                    )
+                    ws.send(json.dumps(wire_request.payload))
+                    for event in self._stream_websocket_response(
+                        profile,
+                        ws,
+                        invocation_id=attempt_request.invocation_id,
+                        description=description,
+                        tool_name_aliases=alias_to_original,
+                    ):
+                        emitted_output = True
+                        if attempt_index > 0:
+                            event = _with_websocket_fallback_metadata(event)
+                        yield event
+                    keep_websocket = True
+                    return
+                except Exception as exc:
+                    keep_websocket = False
+                    retryable = _is_retryable_websocket_exception(exc)
+                    if (
+                        not emitted_output
+                        and retryable
+                        and transient_attempt < OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS
+                    ):
+                        sleep_before_openai_stream_retry(transient_attempt)
+                        transient_attempt += 1
+                        continue
+                    has_fallback = attempt_index + 1 < len(request_attempts)
+                    if has_fallback and not emitted_output and not retryable:
+                        break
+                    raise
+                finally:
+                    if ws is not None:
+                        if keep_websocket and pool_key is not None:
+                            self._release_websocket(pool_key, ws)
+                        else:
+                            _close_websocket(ws)
+
+    def _acquire_websocket(
+        self,
+        endpoint: str,
+        *,
+        headers: list[str],
+        timeout_seconds: int,
+    ) -> tuple[Any, tuple[str, tuple[str, ...], int], bool]:
+        key = (endpoint, tuple(headers), timeout_seconds)
+        with self._websocket_pool_lock:
+            bucket = self._websocket_pool.get(key)
+            while bucket:
+                ws = bucket.pop()
+                if not _websocket_is_closed(ws):
+                    return ws, key, True
+        return (
+            websocket.create_connection(
+                endpoint,
+                header=headers,
+                timeout=timeout_seconds,
+            ),
+            key,
+            False,
+        )
+
+    def _release_websocket(
+        self,
+        key: tuple[str, tuple[str, ...], int],
+        ws: Any,
+    ) -> None:
+        if _websocket_is_closed(ws):
+            return
+        with self._websocket_pool_lock:
+            self._websocket_pool.setdefault(key, []).append(ws)
+
+    async def _stream_websocket_invoke_async_bridge(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> AsyncIterator[LlmStreamEvent]:
+        queue: asyncio.Queue[object] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        done = object()
+
+        def _worker() -> None:
+            try:
+                for event in self._stream_websocket_invoke(profile, request):
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        thread = threading.Thread(
+            target=_worker,
+            name=f"llm-codex-ws-{profile.id}",
+            daemon=True,
+        )
+        thread.start()
+        while True:
+            item = await queue.get()
+            if item is done:
+                return
+            if isinstance(item, Exception):
+                raise item
+            if isinstance(item, LlmStreamEvent):
+                yield item
+
+    def _request_headers(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> dict[str, str]:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        ensure_image_input_supported(
+            profile,
+            messages_from_projected_input_items(model_input.input_items),
+        )
+        token = resolve_credential_binding(
+            profile.credential_binding_id,
+            required=True,
+            description=f"LLM profile '{profile.id}'",
+            resolved_credential=request.resolved_credential,
+        )
+        return {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+
+    def _send_stream_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> requests.Response:
+        return requests.post(
+            wire_request.endpoint,
+            headers=self._request_headers(
+                profile,
+                request,
+                render_input=render_input,
+            ),
+            json=wire_request.payload,
+            timeout=profile.timeout_seconds,
+            stream=True,
+        )
+
+    def _wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> ProviderWireRequest:
+        del tool_name_aliases
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        rendered = self._renderer.render_http_input(model_input)
+        return ProviderWireRequest.from_rendered(
+            renderer_id=self._renderer.renderer_id,
+            rendered=rendered,
+            preview=self._renderer.preview_input(model_input),
+        )
+
+    def _websocket_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        endpoint: str,
+        render_input: ProviderRenderInput | None = None,
+    ) -> ProviderWireRequest:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        rendered = self._renderer.render_websocket_create_input(
+            model_input,
+            endpoint=endpoint,
+        )
+        return ProviderWireRequest.from_rendered(
+            renderer_id=self._renderer.renderer_id,
+            rendered=rendered,
+            preview=self._renderer.preview_input(model_input),
         )
 
     def _build_payload(
@@ -286,75 +593,10 @@ class OpenAICodexResponsesAdapter:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": profile.model_name,
-            "instructions": self._resolve_instructions(request),
-            "input": self._build_input_items(
-                request,
-                tool_name_aliases=tool_name_aliases,
-            ),
-            "store": False,
-            "stream": True,
-        }
-        _apply_provider_continuation(payload, request)
-        if request.tool_schemas:
-            payload["tools"] = [
-                openai_tool_schema(tool, tool_name_aliases=tool_name_aliases)
-                for tool in request.tool_schemas
-            ]
-            payload["tool_choice"] = "auto"
-        if request.response_format is not None:
-            payload["text"] = {"format": dict(request.response_format)}
-
-        defaults = profile.default_params
-        if defaults.temperature is not None:
-            payload["temperature"] = defaults.temperature
-        if defaults.top_p is not None:
-            payload["top_p"] = defaults.top_p
-        if defaults.max_output_tokens is not None:
-            payload["max_output_tokens"] = defaults.max_output_tokens
-        reasoning = _merged_reasoning_payload(
-            defaults_reasoning_effort=defaults.reasoning_effort,
-            override_reasoning=request.overrides.get("reasoning"),
-        )
-        if reasoning:
-            payload["reasoning"] = reasoning
-
-        for key, value in request.overrides.items():
-            if key not in {"model", "input", "stream", "reasoning"}:
-                payload[key] = value
-        return payload
-
-    def _resolve_instructions(self, request: LlmAdapterRequest) -> str:
-        system_messages = [
-            coerce_text_content(message.content)
-            for message in request.messages
-            if message.role == LlmMessageRole.SYSTEM
-        ]
-        if system_messages:
-            return "\n\n".join(system_messages)
-        return self.DEFAULT_INSTRUCTIONS
-
-    def _build_input_items(
-        self,
-        request: LlmAdapterRequest,
-        *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> list[dict[str, Any]]:
-        items = openai_response_input_items(
-            tuple(
-                message
-                for message in request.messages
-                if message.role != LlmMessageRole.SYSTEM
-            ),
+        return self._renderer.build_payload_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
             tool_name_aliases=tool_name_aliases,
-            continuation_delta_only=_uses_provider_native_continuation(request),
         )
-        if not items:
-            raise RuntimeError(
-                "OpenAI Codex invocations require at least one non-system message.",
-            )
-        return items
 
     @classmethod
     def _stream_sse_response(
@@ -430,6 +672,46 @@ class OpenAICodexResponsesAdapter:
                 return
 
         raise RuntimeError(f"{description} returned an incomplete SSE response.")
+
+    @classmethod
+    def _stream_websocket_response(
+        cls,
+        profile: LlmProfile,
+        ws: Any,
+        *,
+        invocation_id: str,
+        description: str,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> Iterator[LlmStreamEvent]:
+        completed_output_items: dict[int, dict[str, Any]] = {}
+        sequence = 1
+        while True:
+            raw_message = ws.recv()
+            if raw_message is None:
+                break
+            if isinstance(raw_message, bytes):
+                message = raw_message.decode("utf-8", errors="replace")
+            else:
+                message = str(raw_message)
+            if not message.strip():
+                continue
+            event, event_completed = cls._consume_sse_event(
+                profile,
+                None,
+                [message],
+                sequence=sequence,
+                description=description,
+                invocation_id=invocation_id,
+                tool_name_aliases=tool_name_aliases,
+                completed_output_items=completed_output_items,
+                transport="websocket",
+            )
+            if event is not None:
+                yield event
+                sequence += 1
+            if event_completed:
+                return
+        raise RuntimeError(f"{description} returned an incomplete WebSocket response.")
 
     @classmethod
     async def _stream_sse_response_async(
@@ -513,6 +795,7 @@ class OpenAICodexResponsesAdapter:
         invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
         completed_output_items: dict[int, dict[str, Any]] | None = None,
+        transport: str = "sse",
     ) -> tuple[LlmStreamEvent | None, bool]:
         if not data_lines:
             return None, False
@@ -551,6 +834,7 @@ class OpenAICodexResponsesAdapter:
                     normalized_response_payload,
                     invocation_id=invocation_id,
                     tool_name_aliases=tool_name_aliases,
+                    transport=transport,
                 )
                 return (
                     LlmStreamEvent(
@@ -640,6 +924,7 @@ class OpenAICodexResponsesAdapter:
         *,
         invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
+        transport: str = "sse",
     ) -> LlmAdapterResponse:
         output = data.get("output") if isinstance(data.get("output"), list) else []
         text_fragments: list[str] = []
@@ -688,7 +973,7 @@ class OpenAICodexResponsesAdapter:
                     "provider": profile.provider.value,
                     "response_id": response_id,
                     "model": data.get("model"),
-                    "transport": "sse",
+                    "transport": transport,
                 },
                 text_fallback="".join(text_fragments) or None,
             ),
@@ -720,38 +1005,98 @@ def _continuation_from_completed_event(
     return LlmContinuationSignal.from_payload(payload)
 
 
-def _merged_reasoning_payload(
-    *,
-    defaults_reasoning_effort: str | None,
-    override_reasoning: object,
-) -> dict[str, Any]:
-    reasoning: dict[str, Any] = {}
-    if defaults_reasoning_effort is not None:
-        reasoning["effort"] = defaults_reasoning_effort
-    if isinstance(override_reasoning, dict):
-        reasoning.update(override_reasoning)
-    return reasoning
-
-
-def _apply_provider_continuation(
-    payload: dict[str, Any],
-    request: LlmAdapterRequest,
-) -> None:
-    continuation = request.continuation
-    if continuation is None:
-        return
-    if continuation.mode != "provider_native":
-        return
-    if continuation.previous_response_id is None:
-        return
-    payload["type"] = "response.create"
-    payload["previous_response_id"] = continuation.previous_response_id
-
-
-def _uses_provider_native_continuation(request: LlmAdapterRequest) -> bool:
-    continuation = request.continuation
-    return (
-        continuation is not None
-        and continuation.mode == "provider_native"
-        and continuation.previous_response_id is not None
+def _with_websocket_fallback_metadata(event: LlmStreamEvent) -> LlmStreamEvent:
+    if event.type != "completed":
+        return event
+    result = event.data.get("result")
+    if not isinstance(result, dict):
+        return event
+    next_result = dict(result)
+    metadata = dict(next_result.get("metadata") or {})
+    metadata["provider_continuation_fallback"] = True
+    metadata["provider_continuation_fallback_reason"] = (
+        "websocket_continuation_failed_before_output"
     )
+    next_result["metadata"] = metadata
+    next_data = dict(event.data)
+    next_data["result"] = next_result
+    return LlmStreamEvent(
+        type=event.type,
+        sequence=event.sequence,
+        invocation_id=event.invocation_id,
+        data=next_data,
+    )
+
+
+def _ensure_supported_transport_input(render_input: ProviderRenderInput) -> None:
+    _ensure_supported_transport_value(requested_provider_transport_input(render_input))
+
+
+def _ensure_supported_transport_value(transport: str) -> None:
+    if transport == "websocket":
+        return
+    if transport not in {"auto", "http"}:
+        raise ValueError(
+            f"Unsupported OpenAI Codex Responses provider_transport: {transport}",
+        )
+
+
+def _is_retryable_websocket_exception(exc: BaseException) -> bool:
+    if is_retryable_openai_stream_exception(exc):
+        return True
+    if isinstance(
+        exc,
+        (
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+            TimeoutError,
+        ),
+    ):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in {
+            errno.EPIPE,
+            errno.ECONNABORTED,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+        }
+    websocket_exception = getattr(websocket, "WebSocketException", None)
+    return isinstance(websocket_exception, type) and isinstance(exc, websocket_exception)
+
+
+def _websocket_is_closed(ws: Any) -> bool:
+    closed = getattr(ws, "closed", None)
+    if isinstance(closed, bool):
+        return closed
+    connected = getattr(ws, "connected", None)
+    if isinstance(connected, bool):
+        return not connected
+    sock = getattr(ws, "sock", None)
+    if sock is not None:
+        sock_connected = getattr(sock, "connected", None)
+        if isinstance(sock_connected, bool):
+            return not sock_connected
+    return False
+
+
+def _close_websocket(ws: Any) -> None:
+    close = getattr(ws, "close", None)
+    if callable(close):
+        close()
+
+
+def _websocket_endpoint(http_endpoint: str) -> str:
+    parsed = urlsplit(http_endpoint)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return urlunsplit((scheme, parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _websocket_headers(token: str | None) -> list[str]:
+    headers = [
+        "OpenAI-Beta: responses_websockets=2026-02-06",
+        "Content-Type: application/json",
+    ]
+    if token is not None:
+        headers.append(f"Authorization: Bearer {token}")
+    return headers

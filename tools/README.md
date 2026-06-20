@@ -107,7 +107,7 @@ introduced to the agent. Do not use source-kind labels such as "OpenAPI",
 "MCP", or "local package" as the bundle title.
 
 ```yaml
-prompt:
+runtime_request:
   title: Workspace Files
   summary: Inspect, search, read, and edit files inside the session-bound workspace.
 ```
@@ -119,7 +119,7 @@ Use `order` when prompt display order matters; source config is otherwise
 normalized for stable hashing.
 
 ```yaml
-prompt:
+runtime_request:
   title: Browser Automation
   summary: Operate browser profiles, tabs, pages, DOM snapshots, network traces, and diagnostics.
   groups:

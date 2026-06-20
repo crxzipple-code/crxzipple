@@ -122,7 +122,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             self.assertEqual(function.handler_ref["ref"], "demo_echo")
             self.assertEqual(function.capability_ids, ("bounded_network.http",))
 
-    def test_query_service_lists_prompt_bundles_by_source(self) -> None:
+    def test_query_service_lists_runtime_request_bundles_by_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _write_demo_tool_package(root)
@@ -140,7 +140,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             )
             self.command_service.sync_sources(sources, discovery_service=discovery)
 
-        bundles = self.query_service.list_prompt_bundles(
+        bundles = self.query_service.list_runtime_request_bundles(
             ("missing", "demo_echo", "demo_echo"),
         )
 
@@ -164,9 +164,9 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         ).set_function_enabled("demo_echo", enabled=False)
         self.assertTrue(disabled.changed)
 
-        self.assertEqual(self.query_service.list_prompt_bundles(("demo_echo",)), ())
+        self.assertEqual(self.query_service.list_runtime_request_bundles(("demo_echo",)), ())
 
-    def test_query_service_uses_openapi_source_prompt_metadata(self) -> None:
+    def test_query_service_uses_openapi_source_runtime_request_metadata(self) -> None:
         source = ToolSourceCatalogRecord(
             source_id="configured.openapi.flight_search",
             kind=ToolSourceCatalogKind.OPENAPI,
@@ -174,7 +174,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             config={
                 "source": "configured_tool_provider",
                 "package_kind": "openapi",
-                "prompt": {
+                "runtime_request": {
                     "title": "Flight Search",
                     "summary": "Search routes, prices, and availability.",
                     "groups": {
@@ -185,7 +185,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
                             "default_tool_schema_ids": ["flight_search.query"],
                             "default_tool_schema_max_count": 1,
                             "default_tool_schema_source": (
-                                "configured.openapi.flight_search.prompt_group.search"
+                                "configured.openapi.flight_search.runtime_request_group.search"
                             ),
                         },
                     },
@@ -194,14 +194,14 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         )
         discovery = ToolDiscoveryService(
             ToolDiscoveryAdapterRegistry(
-                {ToolSourceCatalogKind.OPENAPI: _PromptBundleDiscoveryAdapter()},
+                {ToolSourceCatalogKind.OPENAPI: _RuntimeRequestBundleDiscoveryAdapter()},
             ),
         )
 
         result = self.command_service.sync_source(source, discovery_service=discovery)
 
         self.assertIsNone(result.error_message)
-        bundles = self.query_service.list_prompt_bundles(("flight_search.query",))
+        bundles = self.query_service.list_runtime_request_bundles(("flight_search.query",))
         self.assertEqual(len(bundles), 1)
         self.assertEqual(bundles[0].source_id, source.source_id)
         self.assertEqual(bundles[0].source_kind, "openapi")
@@ -219,7 +219,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         self.assertEqual(bundles[0].groups[0].metadata["default_tool_schema_max_count"], 1)
         self.assertEqual(
             bundles[0].groups[0].metadata["default_tool_schema_source"],
-            "configured.openapi.flight_search.prompt_group.search",
+            "configured.openapi.flight_search.runtime_request_group.search",
         )
         self.assertIn("Query flight inventory", bundles[0].groups[0].summary)
 
@@ -414,7 +414,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             )
             self.assertEqual(
                 Path(
-                    execute_run.result_envelope_payload["model_visible_payload"][
+                    execute_run.result_envelope_payload["provider_replay_payload"][
                         "runtime_facts"
                     ]["working_directory"],
                 ).resolve(),
@@ -528,7 +528,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         )
         self.assertIn(
             "bad path",
-            read_run.result_envelope_payload["model_visible_payload"]["stderr"],
+            read_run.result_envelope_payload["provider_replay_payload"]["stderr"],
         )
 
     def test_cli_source_guided_execute_injects_access_credentials(self) -> None:
@@ -1072,7 +1072,7 @@ class _CredentialRequirementDiscoveryAdapter(ToolDiscoveryAdapter):
         )
 
 
-class _PromptBundleDiscoveryAdapter(ToolDiscoveryAdapter):
+class _RuntimeRequestBundleDiscoveryAdapter(ToolDiscoveryAdapter):
     def discover(self, source):  # noqa: ANN001, ANN201
         return ToolSourceDiscoveryResult.completed(
             source_id=source.source_id,
@@ -1099,7 +1099,7 @@ def _write_demo_tool_package(root: Path) -> None:
         """
 kind: local_package
 namespace: demo
-prompt:
+runtime_request:
   title: Demo Tools
   summary: Echo and inspect demo tool behavior.
   groups:
@@ -1174,7 +1174,7 @@ local_tools:
     entrypoint: tools.image_demo.local:generate
     tool_kind: function
     parameters:
-      - name: prompt
+      - name: runtime_request
         data_type: string
         description: Prompt.
         required: true

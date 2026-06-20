@@ -112,8 +112,8 @@ class ContextOperationModel(Base):
     )
 
 
-class ContextRenderSnapshotModel(Base):
-    __tablename__ = "context_render_snapshots"
+class ContextSnapshotModel(Base):
+    __tablename__ = "context_snapshots"
 
     snapshot_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     workspace_id: Mapped[str] = mapped_column(
@@ -124,7 +124,7 @@ class ContextRenderSnapshotModel(Base):
     session_key: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
     run_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     tree_revision: Mapped[int] = mapped_column(Integer(), nullable=False)
-    prompt_body: Mapped[str] = mapped_column(Text(), nullable=False)
+    debug_body: Mapped[str] = mapped_column(Text(), nullable=False)
     provider_attachments: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,
@@ -169,9 +169,83 @@ class ContextRenderSnapshotModel(Base):
     )
 
 
+class ContextRequestRenderSnapshotModel(Base):
+    __tablename__ = "context_request_render_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        index=True,
+    )
+    session_key: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    tree_revision: Mapped[int] = mapped_column(Integer(), nullable=False)
+    turn_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    step_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    llm_invocation_id: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+        index=True,
+    )
+    provider: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    transport: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    model: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    renderer_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    renderer_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    session_frontier_revision: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+    )
+    input_item_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    projected_input_items: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    tool_schema_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    resource_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    request_hash: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    estimated_tokens: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    render_report: Mapped[dict[str, object]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=dict,
+    )
+    timings: Mapped[dict[str, object]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=dict,
+    )
+    metadata_: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON(),
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
 __all__ = [
     "ContextNodeStateModel",
     "ContextOperationModel",
-    "ContextRenderSnapshotModel",
+    "ContextRequestRenderSnapshotModel",
+    "ContextSnapshotModel",
     "ContextWorkspaceModel",
 ]

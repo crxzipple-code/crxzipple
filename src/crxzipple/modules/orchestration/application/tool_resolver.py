@@ -19,10 +19,8 @@ from crxzipple.modules.orchestration.application.ports import (
     AuthorizationPort,
     ToolCatalogPort,
 )
-from crxzipple.modules.orchestration.application.prompting import (
-    PromptMode,
-    resolve_run_surface_policy,
-)
+from crxzipple.modules.orchestration.application.runtime_request_mode import RuntimeRequestMode
+from crxzipple.modules.orchestration.application.runtime_request_report import resolve_run_surface_policy
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 from crxzipple.modules.tool.application.authorization_context import (
     tool_invocation_authorization_context_attrs,
@@ -133,6 +131,47 @@ class ToolResolver:
     )
 
     def resolve(self, run: OrchestrationRun) -> ResolvedToolSet:
+        return self._resolve(run)
+
+    def resolve_schema_candidates(self, run: OrchestrationRun) -> ResolvedToolSet:
+        """Resolve schema candidates without execution-time access gates.
+
+        This is for request preview and context rendering surfaces that need to
+        show which schemas may be provider-visible. It intentionally does not
+        evaluate access readiness, approval, or run/effect authorization. Those
+        checks belong to the execution gate immediately before a tool call runs.
+        """
+        context_attrs = self._context_attrs(run)
+        runtime_context = self._runtime_pool_context(run, context_attrs=context_attrs)
+        return ResolvedToolSet(
+            tools=tuple(
+                ResolvedTool(
+                    tool=tool,
+                    schema=self._build_schema(tool),
+                    target=self._preferred_target(tool),
+                )
+                for tool in self.tool_catalog.list_enabled_tools(
+                    runtime_context=runtime_context,
+                )
+            ),
+        )
+
+    def resolve_for_schema_names(
+        self,
+        run: OrchestrationRun,
+        schema_names: tuple[str, ...],
+    ) -> ResolvedToolSet:
+        visible_names = frozenset(name.strip() for name in schema_names if name.strip())
+        if not visible_names:
+            return ResolvedToolSet(tools=())
+        return self._resolve(run, visible_names=visible_names)
+
+    def _resolve(
+        self,
+        run: OrchestrationRun,
+        *,
+        visible_names: frozenset[str] | None = None,
+    ) -> ResolvedToolSet:
         context_attrs = self._context_attrs(run)
         runtime_context = self._runtime_pool_context(run, context_attrs=context_attrs)
         resolved: list[ResolvedTool] = []
@@ -140,6 +179,8 @@ class ToolResolver:
         for tool in self.tool_catalog.list_enabled_tools(
             runtime_context=runtime_context,
         ):
+            if visible_names is not None and tool.id not in visible_names:
+                continue
             target = self._preferred_target(tool)
             resource_attrs = self._resource_attrs(tool, target=target)
             if self._surface_is_blocked(
@@ -489,14 +530,14 @@ class ToolResolver:
         *,
         session_key: str | None = None,
     ) -> dict[str, Any]:
-        prompt_mode = self._prompt_mode(run)
-        surface_policy = resolve_run_surface_policy(prompt_mode)
+        runtime_request_mode = self._runtime_request_mode(run)
+        surface_policy = resolve_run_surface_policy(runtime_request_mode)
         attrs: dict[str, Any] = {
             "interface": run.inbound_instruction.source,
             "run_id": run.id,
             "agent_id": run.agent_id,
-            "prompt_mode": prompt_mode.value,
-            "run_mode": prompt_mode.value,
+            "runtime_request_mode": runtime_request_mode.value,
+            "run_mode": runtime_request_mode.value,
             "surface": surface_policy.surface,
             "surface_contract": surface_policy.surface_contract,
         }
@@ -521,6 +562,9 @@ class ToolResolver:
         session_key = str(run.metadata.get("session_key", "")).strip()
         if session_key:
             runtime_context["session_key"] = session_key
+        active_session_id = str(run.active_session_id or "").strip()
+        if active_session_id:
+            runtime_context["active_session_id"] = active_session_id
         workspace_dir = context_attrs.get("workspace_dir")
         if isinstance(workspace_dir, str) and workspace_dir.strip():
             runtime_context["workspace_dir"] = workspace_dir.strip()
@@ -569,24 +613,24 @@ class ToolResolver:
         return attrs
 
     @staticmethod
-    def _prompt_mode(run: OrchestrationRun) -> PromptMode:
-        prompt_flow_hint = run.metadata.get("prompt_flow_hint")
-        if isinstance(prompt_flow_hint, dict):
-            mode = prompt_flow_hint.get("mode")
+    def _runtime_request_mode(run: OrchestrationRun) -> RuntimeRequestMode:
+        runtime_request_flow_hint = run.metadata.get("runtime_request_flow_hint")
+        if isinstance(runtime_request_flow_hint, dict):
+            mode = runtime_request_flow_hint.get("mode")
             if isinstance(mode, str) and mode.strip():
-                return ToolResolver._coerce_prompt_mode(mode)
-        raw_mode = run.metadata.get("prompt_mode")
+                return ToolResolver._coerce_runtime_request_mode(mode)
+        raw_mode = run.metadata.get("runtime_request_mode")
         if isinstance(raw_mode, str) and raw_mode.strip():
-            return ToolResolver._coerce_prompt_mode(raw_mode)
-        return PromptMode.NORMAL_TURN
+            return ToolResolver._coerce_runtime_request_mode(raw_mode)
+        return RuntimeRequestMode.NORMAL_TURN
 
     @staticmethod
-    def _coerce_prompt_mode(raw_mode: str) -> PromptMode:
+    def _coerce_runtime_request_mode(raw_mode: str) -> RuntimeRequestMode:
         normalized = raw_mode.strip().lower()
         try:
-            return PromptMode(normalized)
+            return RuntimeRequestMode(normalized)
         except ValueError:
-            return PromptMode.NORMAL_TURN
+            return RuntimeRequestMode.NORMAL_TURN
 
     def _check_authorization(
         self,

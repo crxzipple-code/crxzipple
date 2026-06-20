@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from crxzipple.modules.llm.application import filter_provider_options_for_api_family
 from crxzipple.modules.llm.domain import LlmCapability
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 
@@ -114,11 +115,21 @@ def resolve_effective_llm_request_policy(
         provider_options=provider_options,
         trace=trace,
     )
-    _filter_provider_options_for_api_family(
-        provider_options=provider_options,
-        trace=trace,
+    provider_option_filter = filter_provider_options_for_api_family(
+        provider_options,
         llm_api_family=llm_api_family,
     )
+    provider_options = provider_option_filter.provider_options
+    for key in provider_option_filter.removed_options:
+        trace.append(
+            _trace(
+                field=f"provider_options.{key}",
+                source="provider_capability_filter",
+                value="removed",
+                status="downgraded",
+                reason=f"unsupported_api_family:{llm_api_family}",
+            ),
+        )
 
     return EffectiveLlmRequestPolicy(
         reasoning_config=reasoning_config,
@@ -177,6 +188,16 @@ def _apply_default_request_params(
                 field="provider_options.service_tier",
                 source=source_name,
                 value=service_tier,
+            ),
+        )
+    provider_transport = _optional_text(defaults.get("provider_transport"))
+    if provider_transport is not None:
+        provider_options["provider_transport"] = provider_transport
+        trace.append(
+            _trace(
+                field="provider_options.provider_transport",
+                source=source_name,
+                value=provider_transport,
             ),
         )
     prompt_cache_enabled = defaults.get("prompt_cache_enabled")
@@ -412,48 +433,6 @@ def _prompt_cache_key_for_run(run: OrchestrationRun) -> str | None:
         return None
     agent_id = _optional_text(run.agent_id) or "agent"
     return f"crxzipple:{agent_id}:{stable}"
-
-
-_RESPONSES_API_FAMILIES = frozenset(
-    {
-        "openai_responses",
-        "openai_codex_responses",
-    },
-)
-
-_RESPONSES_ONLY_PROVIDER_OPTIONS = frozenset(
-    {
-        "include",
-        "parallel_tool_calls",
-        "prompt_cache_enabled",
-        "prompt_cache_key",
-        "text",
-    },
-)
-
-
-def _filter_provider_options_for_api_family(
-    *,
-    provider_options: dict[str, object],
-    trace: list[dict[str, object]],
-    llm_api_family: str | None,
-) -> None:
-    api_family = _optional_text(llm_api_family)
-    if api_family is None or api_family in _RESPONSES_API_FAMILIES:
-        return
-    for key in tuple(provider_options):
-        if key not in _RESPONSES_ONLY_PROVIDER_OPTIONS:
-            continue
-        provider_options.pop(key, None)
-        trace.append(
-            _trace(
-                field=f"provider_options.{key}",
-                source="provider_capability_filter",
-                value="removed",
-                status="downgraded",
-                reason=f"unsupported_api_family:{api_family}",
-            ),
-        )
 
 
 def _merge_reasoning_config(

@@ -36,8 +36,8 @@ def upgrade() -> None:
         sa.Column("provider_item_type", sa.String(length=255), nullable=True),
         sa.Column("call_id", sa.String(length=255), nullable=True),
         sa.Column("tool_name", sa.String(length=255), nullable=True),
-        sa.Column("model_visible", sa.Boolean(), nullable=False),
-        sa.Column("user_visible", sa.Boolean(), nullable=False),
+        sa.Column("provider_replay_candidate", sa.Boolean(), nullable=False),
+        sa.Column("user_timeline_candidate", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(

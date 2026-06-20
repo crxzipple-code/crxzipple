@@ -257,7 +257,7 @@ class OrchestrationOperationsReadModelProvider:
                     owner="events",
                     kind="navigation",
                     method="GET",
-                    endpoint="/ui/trace/{trace_id}",
+                    endpoint="/workbench/traces/{trace_id}",
                 ),
                 RuntimeActionModel(
                     id="cancel_run",
@@ -366,7 +366,7 @@ class OrchestrationOperationsReadModelProvider:
                 owner="events",
                 kind="navigation",
                 method="GET",
-                endpoint="/ui/trace/{trace_id}",
+                endpoint="/workbench/traces/{trace_id}",
             ),
             RuntimeActionModel(
                 id="cancel_run",
@@ -1727,13 +1727,19 @@ def _continuation_decision_label(item: ExecutionStepItem | None) -> str:
     provider_state = summary.get("provider_continuation_state")
     provider_state = dict(provider_state) if isinstance(provider_state, dict) else {}
     provider_mode = _optional_metadata_text(provider_state.get("mode"))
+    provider_transport = _optional_metadata_text(provider_state.get("transport"))
     previous_response_id = _optional_metadata_text(
         provider_state.get("previous_response_id"),
     )
+    fallback_reason = _optional_metadata_text(provider_state.get("fallback_reason"))
     if provider_mode is not None:
         parts.append(f"provider={provider_mode}")
+    if provider_transport is not None:
+        parts.append(f"transport={provider_transport}")
     if previous_response_id is not None:
         parts.append(f"previous_response_id={previous_response_id}")
+    if fallback_reason is not None:
+        parts.append(f"fallback={fallback_reason}")
     return "; ".join(parts)
 
 
@@ -2848,7 +2854,7 @@ def _title_from_event_name(event_name: str) -> str:
 
 
 def _trace_route_from_id(trace_id: str | None) -> str:
-    return f"/ui/trace/{trace_id}" if trace_id else "-"
+    return f"/workbench/traces/{trace_id}" if trace_id else "-"
 
 
 def _optional_str(value: object | None) -> str | None:
@@ -2951,7 +2957,7 @@ def _trace_id(run: OrchestrationRun) -> str:
 
 
 def _trace_route(run: OrchestrationRun) -> str:
-    return f"/ui/trace/{_trace_id(run)}"
+    return f"/workbench/traces/{_trace_id(run)}"
 
 
 def _workbench_route(run: OrchestrationRun) -> str:

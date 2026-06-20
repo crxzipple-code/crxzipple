@@ -140,7 +140,7 @@ _LLM_STEP_COMPLETED_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("stage", "Current orchestration stage before reduction.", "string", True),
     EventDefinitionField("current_step", "Current step counter for the run.", "integer", True),
     EventDefinitionField("llm_invocation_id", "LLM invocation completed for this execution step.", "string", True),
-    EventDefinitionField("context_render_snapshot_id", "Context render snapshot used for this LLM invocation.", "string"),
+    EventDefinitionField("request_render_snapshot_id", "Request render snapshot used for this LLM invocation.", "string"),
     EventDefinitionField("llm_response_item_ids", "LLM response item ids emitted by this invocation.", "array"),
     EventDefinitionField("session_item_ids", "Session item ids persisted for this invocation.", "array"),
     EventDefinitionField("assistant_progress_item_ids", "Assistant progress session item ids.", "array"),
@@ -246,11 +246,11 @@ def orchestration_event_topic_contracts() -> tuple[EventTopicContract, ...]:
             topic_pattern=named_event_topic("orchestration.llm_resolved"),
             owner="orchestration",
             description=(
-                "Prompt assembly LLM routing decisions observed for operations "
+                "Runtime request LLM routing decisions observed for operations "
                 "and diagnostics."
             ),
             kinds=("observe",),
-            producers=("RunPromptInputCollector._publish_llm_resolution_event",),
+            producers=("RuntimeLlmRequestDraftCollector._publish_llm_resolution_event",),
             consumers=("operations observer", "diagnostics"),
             ordering="run_id",
             notes=(
@@ -382,9 +382,9 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
             definition_id="orchestration.llm_resolved",
             owner="orchestration",
             event_name="orchestration.llm_resolved",
-            description="Prompt assembly LLM routing decision observed for operations.",
+            description="Runtime request LLM routing decision observed for operations.",
             topics=(named_event_topic("orchestration.llm_resolved"),),
-            producers=("RunPromptInputCollector._publish_llm_resolution_event",),
+            producers=("RuntimeLlmRequestDraftCollector._publish_llm_resolution_event",),
             consumers=("operations observer", "diagnostics"),
             fields=(
                 EventDefinitionField("event_name", "Stable event name.", "string", True),
@@ -396,6 +396,8 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
                 EventDefinitionField("requested_llm_id", "Requested LLM profile id or auto route.", "string", True),
                 EventDefinitionField("resolved_llm_id", "Selected LLM profile id when resolved.", "string"),
                 EventDefinitionField("strategy", "Routing strategy.", "string", True),
+                EventDefinitionField("routing_input_block_count", "Number of content blocks provided to auto LLM routing.", "integer"),
+                EventDefinitionField("session_replay_window", "Replay window metadata used to build routing input.", "object"),
                 EventDefinitionField("input_has_image", "Whether routing saw image input.", "boolean", True),
                 EventDefinitionField("input_has_file", "Whether routing saw file input.", "boolean", True),
                 EventDefinitionField("provider", "Selected provider when resolved.", "string"),

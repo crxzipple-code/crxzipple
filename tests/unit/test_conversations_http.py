@@ -130,8 +130,8 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
             [item["source_module"] for item in history_payload],
             ["orchestration", "llm"],
         )
-        self.assertTrue(history_payload[0]["visibility"]["chat_visible"])
-        self.assertTrue(history_payload[1]["visibility"]["chat_visible"])
+        self.assertEqual(history_payload[0]["lifecycle_state"], "active")
+        self.assertEqual(history_payload[1]["lifecycle_state"], "active")
         self.assertNotIn("content", history_payload[0])
         self.assertTrue(history_payload[0]["created_at"].endswith("+00:00"))
         self.assertTrue(history_payload[1]["created_at"].endswith("+00:00"))

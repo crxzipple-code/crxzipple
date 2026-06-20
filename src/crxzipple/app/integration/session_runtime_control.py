@@ -219,7 +219,7 @@ def _spawn_turn_input(
 def _runtime_run_record_from_orchestration_run(
     run: OrchestrationRun,
 ) -> SessionRuntimeRunRecord:
-    prompt_mode = run.metadata.get("prompt_mode")
+    runtime_request_mode = run.metadata.get("runtime_request_mode")
     return SessionRuntimeRunRecord(
         id=run.id,
         status=run.status.value,
@@ -227,7 +227,7 @@ def _runtime_run_record_from_orchestration_run(
         current_step=run.current_step,
         max_steps=run.max_steps,
         waiting_reason=run.waiting_reason,
-        prompt_mode=str(prompt_mode) if prompt_mode is not None else None,
+        runtime_request_mode=str(runtime_request_mode) if runtime_request_mode is not None else None,
         worker_id=run.worker_id,
         session_key=run.session_key,
         metadata=dict(run.metadata),

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    RunPromptInputPreview,
+    RuntimeLlmRequestPreview,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedToolSet,
@@ -22,16 +22,16 @@ from crxzipple.modules.tool.domain import Tool, ToolExecutionTarget
 
 @dataclass(slots=True)
 class OrchestrationInspectionService:
-    """Prompt and tool inspection surface outside the run execution path."""
+    """Runtime request and tool inspection surface outside the run execution path."""
 
     engine: OrchestrationEngine | None
     get_run: Callable[[str], OrchestrationRun]
 
-    def preview_prompt(self, run_id: str) -> RunPromptInputPreview:
+    def preview_runtime_llm_request(self, run_id: str) -> RuntimeLlmRequestPreview:
         engine = self._require_engine(
-            "Prompt surface preview requires an orchestration engine.",
+            "Runtime request preview requires an orchestration engine.",
         )
-        return engine.preview_prompt(self.get_run(run_id))
+        return engine.preview_runtime_llm_request(self.get_run(run_id))
 
     def resolve_tools(self, run: OrchestrationRun) -> ResolvedToolSet:
         engine = self._require_engine(
@@ -54,12 +54,6 @@ class OrchestrationInspectionService:
             tool=tool,
             target=target,
         )
-
-    def set_memory_flush_transcript_max_chars(self, max_chars: int) -> None:
-        engine = self._require_engine(
-            "Memory flush transcript configuration requires an orchestration engine.",
-        )
-        engine.prompt_inputs.memory_flush_transcript_max_chars = max_chars
 
     def _require_engine(self, message: str) -> OrchestrationEngine:
         if self.engine is None:

@@ -88,6 +88,8 @@ def _agent_home_files(snapshot) -> tuple[_AgentHomeFile, ...]:
         if item is None or not bool(getattr(item, "exists", False)):
             continue
         content = str(getattr(item, "content", "") or "")
+        if not content.strip():
+            continue
         truncated = len(content) > _MAX_FILE_CHARS
         files.append(
             _AgentHomeFile(
@@ -132,11 +134,10 @@ def _agent_home_file_node_seed(
         kind="agent_home_file",
         title=file.name,
         summary=summary,
-        content=content,
         state=ContextNodeState(collapsed=collapsed, loaded=True),
         actions=_AGENT_HOME_FILE_ACTIONS,
         owner_ref=owner_ref,
-        estimate=_text_estimate(content),
+        estimate=_text_estimate(summary),
         display_order=display_order,
         metadata=metadata,
     )

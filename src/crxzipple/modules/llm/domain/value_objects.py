@@ -45,6 +45,8 @@ class LlmCapability(StrEnum):
     STREAMING = "streaming"
     REASONING = "reasoning"
     PROVIDER_NATIVE_CONTINUATION = "provider_native_continuation"
+    PROVIDER_WEBSOCKET_TRANSPORT = "provider_websocket_transport"
+    PROVIDER_INCREMENTAL_INPUT = "provider_incremental_input"
 
 
 class LlmSourceKind(StrEnum):
@@ -76,6 +78,14 @@ class LlmResponseItemKind(StrEnum):
     PROVIDER_EXTERNAL_ITEM = "provider_external_item"
     COMPACTION = "compaction"
     UNKNOWN = "unknown"
+
+
+class LlmInputItemKind(StrEnum):
+    MESSAGE = "message"
+    FUNCTION_CALL = "function_call"
+    FUNCTION_CALL_OUTPUT = "function_call_output"
+    REASONING = "reasoning"
+    PROVIDER_EXTERNAL_ITEM = "provider_external_item"
 
 
 class LlmMessagePhase(StrEnum):
@@ -110,6 +120,7 @@ class LlmDefaults(ValueObject):
     top_p: float | None = None
     max_output_tokens: int | None = None
     reasoning_effort: str | None = None
+    provider_transport: str | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -117,6 +128,13 @@ class LlmDefaults(ValueObject):
             raise LlmValidationError(
                 "LLM max_output_tokens must be greater than zero.",
             )
+        if self.provider_transport is not None:
+            normalized_transport = self.provider_transport.strip().lower()
+            if normalized_transport not in {"auto", "http", "websocket"}:
+                raise LlmValidationError(
+                    "LLM provider_transport must be auto, http, or websocket.",
+                )
+            object.__setattr__(self, "provider_transport", normalized_transport)
         object.__setattr__(self, "extra_body", dict(self.extra_body))
 
     def to_payload(self) -> dict[str, Any]:
@@ -129,6 +147,8 @@ class LlmDefaults(ValueObject):
             payload["max_output_tokens"] = self.max_output_tokens
         if self.reasoning_effort is not None:
             payload["reasoning_effort"] = self.reasoning_effort
+        if self.provider_transport is not None:
+            payload["provider_transport"] = self.provider_transport
         if self.extra_body:
             payload["extra_body"] = dict(self.extra_body)
         return payload
@@ -158,6 +178,11 @@ class LlmDefaults(ValueObject):
             reasoning_effort=(
                 str(payload["reasoning_effort"])
                 if payload.get("reasoning_effort") is not None
+                else None
+            ),
+            provider_transport=(
+                str(payload["provider_transport"])
+                if payload.get("provider_transport") is not None
                 else None
             ),
             extra_body=extra_body,
@@ -195,6 +220,45 @@ class LlmMessage(ValueObject):
             content=payload.get("content"),
             name=payload.get("name"),
             tool_call_id=payload.get("tool_call_id"),
+            metadata=(
+                dict(payload.get("metadata"))
+                if isinstance(payload.get("metadata"), dict)
+                else {}
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LlmInputItem(ValueObject):
+    kind: LlmInputItemKind
+    payload: dict[str, Any]
+    source: str = "projection"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "payload", dict(self.payload))
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.kind.value,
+            "payload": dict(self.payload),
+            "source": self.source,
+        }
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "LlmInputItem":
+        return cls(
+            kind=LlmInputItemKind(str(payload.get("kind", "message"))),
+            payload=(
+                dict(payload.get("payload"))
+                if isinstance(payload.get("payload"), dict)
+                else {}
+            ),
+            source=str(payload.get("source") or "projection"),
             metadata=(
                 dict(payload.get("metadata"))
                 if isinstance(payload.get("metadata"), dict)
@@ -419,8 +483,8 @@ class LlmResponseItem(ValueObject):
     provider_item_type: str | None = None
     call_id: str | None = None
     tool_name: str | None = None
-    model_visible: bool = True
-    user_visible: bool = False
+    provider_replay_candidate: bool = True
+    user_timeline_candidate: bool = False
     created_at: datetime = field(default_factory=utcnow)
     completed_at: datetime | None = None
 
@@ -443,8 +507,8 @@ class LlmResponseItem(ValueObject):
             "phase": self.phase.value,
             "content_payload": dict(self.content_payload),
             "provider_payload": dict(self.provider_payload),
-            "model_visible": self.model_visible,
-            "user_visible": self.user_visible,
+            "provider_replay_candidate": self.provider_replay_candidate,
+            "user_timeline_candidate": self.user_timeline_candidate,
             "created_at": self.created_at.isoformat(),
         }
         if self.role is not None:
@@ -498,8 +562,8 @@ class LlmResponseItem(ValueObject):
             tool_name=(
                 str(payload["tool_name"]) if payload.get("tool_name") is not None else None
             ),
-            model_visible=bool(payload.get("model_visible", True)),
-            user_visible=bool(payload.get("user_visible", False)),
+            provider_replay_candidate=bool(payload.get("provider_replay_candidate", True)),
+            user_timeline_candidate=bool(payload.get("user_timeline_candidate", False)),
             created_at=_datetime_from_payload(payload.get("created_at")) or utcnow(),
             completed_at=_datetime_from_payload(payload.get("completed_at")),
         )
@@ -581,6 +645,50 @@ class LlmResponseEvent(ValueObject):
 
 
 @dataclass(frozen=True, slots=True)
+class LlmResponseEventRetentionPolicy(ValueObject):
+    full_event_window_seconds: int
+    detail_event_limit: int
+    durable_fact: str
+    overflow_action: str
+
+    def __post_init__(self) -> None:
+        if self.full_event_window_seconds <= 0:
+            raise LlmValidationError(
+                "LLM response event retention window must be greater than zero.",
+            )
+        if self.detail_event_limit <= 0:
+            raise LlmValidationError(
+                "LLM response event detail limit must be greater than zero.",
+            )
+        object.__setattr__(self, "durable_fact", str(self.durable_fact).strip())
+        object.__setattr__(self, "overflow_action", str(self.overflow_action).strip())
+        if not self.durable_fact:
+            raise LlmValidationError("LLM response event durable fact cannot be empty.")
+        if not self.overflow_action:
+            raise LlmValidationError("LLM response event overflow action cannot be empty.")
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "full_event_window_seconds": self.full_event_window_seconds,
+            "detail_event_limit": self.detail_event_limit,
+            "durable_fact": self.durable_fact,
+            "overflow_action": self.overflow_action,
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+    ) -> "LlmResponseEventRetentionPolicy":
+        return cls(
+            full_event_window_seconds=int(payload.get("full_event_window_seconds", 0)),
+            detail_event_limit=int(payload.get("detail_event_limit", 0)),
+            durable_fact=str(payload.get("durable_fact", "")),
+            overflow_action=str(payload.get("overflow_action", "")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LlmContinuationSignal(ValueObject):
     end_turn: bool | None = None
     needs_follow_up: bool = False
@@ -629,6 +737,11 @@ class LlmProviderContinuation(ValueObject):
     previous_response_id: str | None = None
     previous_invocation_id: str | None = None
     provider_family: str | None = None
+    transport: str | None = None
+    input_item_fingerprints: tuple[str, ...] = field(default_factory=tuple)
+    input_item_count: int | None = None
+    instructions_fingerprint: str | None = None
+    tool_fingerprints: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         mode = self.mode.strip()
@@ -650,6 +763,38 @@ class LlmProviderContinuation(ValueObject):
             "provider_family",
             _optional_stripped_text(self.provider_family),
         )
+        object.__setattr__(
+            self,
+            "transport",
+            _optional_stripped_text(self.transport),
+        )
+        object.__setattr__(
+            self,
+            "input_item_fingerprints",
+            tuple(
+                fingerprint.strip()
+                for fingerprint in self.input_item_fingerprints
+                if isinstance(fingerprint, str) and fingerprint.strip()
+            ),
+        )
+        object.__setattr__(
+            self,
+            "instructions_fingerprint",
+            _optional_stripped_text(self.instructions_fingerprint),
+        )
+        object.__setattr__(
+            self,
+            "tool_fingerprints",
+            tuple(
+                fingerprint.strip()
+                for fingerprint in self.tool_fingerprints
+                if isinstance(fingerprint, str) and fingerprint.strip()
+            ),
+        )
+        if self.input_item_count is not None and self.input_item_count < 0:
+            raise LlmValidationError(
+                "LLM provider continuation input_item_count cannot be negative.",
+            )
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"mode": self.mode}
@@ -659,6 +804,16 @@ class LlmProviderContinuation(ValueObject):
             payload["previous_invocation_id"] = self.previous_invocation_id
         if self.provider_family is not None:
             payload["provider_family"] = self.provider_family
+        if self.transport is not None:
+            payload["transport"] = self.transport
+        if self.input_item_fingerprints:
+            payload["input_item_fingerprints"] = list(self.input_item_fingerprints)
+        if self.input_item_count is not None:
+            payload["input_item_count"] = self.input_item_count
+        if self.instructions_fingerprint is not None:
+            payload["instructions_fingerprint"] = self.instructions_fingerprint
+        if self.tool_fingerprints:
+            payload["tool_fingerprints"] = list(self.tool_fingerprints)
         return payload
 
     @classmethod
@@ -685,6 +840,35 @@ class LlmProviderContinuation(ValueObject):
                 if payload.get("provider_family") is not None
                 else None
             ),
+            transport=(
+                str(payload["transport"])
+                if payload.get("transport") is not None
+                else None
+            ),
+            input_item_fingerprints=tuple(
+                str(item)
+                for item in payload.get("input_item_fingerprints", ())
+                if isinstance(item, str) and item.strip()
+            )
+            if isinstance(payload.get("input_item_fingerprints"), list | tuple)
+            else (),
+            input_item_count=(
+                int(payload["input_item_count"])
+                if payload.get("input_item_count") is not None
+                else None
+            ),
+            instructions_fingerprint=(
+                str(payload["instructions_fingerprint"])
+                if payload.get("instructions_fingerprint") is not None
+                else None
+            ),
+            tool_fingerprints=tuple(
+                str(item)
+                for item in payload.get("tool_fingerprints", ())
+                if isinstance(item, str) and item.strip()
+            )
+            if isinstance(payload.get("tool_fingerprints"), list | tuple)
+            else (),
         )
 
 

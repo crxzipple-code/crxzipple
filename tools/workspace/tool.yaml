@@ -1,6 +1,6 @@
 kind: local_package
 namespace: workspace
-prompt:
+runtime_request:
   title: Workspace Files
   summary: Inspect, search, read, and edit files inside the session-bound workspace. For engineering tasks, use these tools to ground claims in the local implementation before designing or changing code.
   groups:

@@ -32,6 +32,12 @@ class ToolQueryPort(Protocol):
     def list_tool_runs(self, *, tool_id: str | None = None) -> list["ToolRun"]:
         ...
 
+    def list_tool_runs_for_orchestration_runs(
+        self,
+        run_ids: tuple[str, ...],
+    ) -> list["ToolRun"]:
+        ...
+
     def get_tool_run(self, run_id: str) -> "ToolRun":
         ...
 

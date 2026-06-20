@@ -47,6 +47,12 @@ export interface LlmInvocationApiPayload {
   completed_at?: string | null;
 }
 
+export interface LlmWarmupApiPayload {
+  llm_id: string;
+  status: string;
+  details: Record<string, unknown>;
+}
+
 export interface LlmInvokeRequestPayload {
   messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -111,6 +117,12 @@ export function invokeLlmProfile(
   return requestJson<LlmInvocationApiPayload>(`/llms/${encodeURIComponent(profileId)}/invoke`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function warmupLlmProfile(profileId: string): Promise<LlmWarmupApiPayload> {
+  return requestJson<LlmWarmupApiPayload>(`/llms/${encodeURIComponent(profileId)}/warmup`, {
+    method: "POST",
   });
 }
 

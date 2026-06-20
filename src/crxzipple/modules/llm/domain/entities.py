@@ -7,11 +7,12 @@ from crxzipple.modules.llm.domain.exceptions import LlmValidationError
 from crxzipple.modules.llm.domain.value_objects import (
     LlmApiFamily,
     LlmCapability,
+    LlmContinuationSignal,
     LlmDefaults,
     LlmErrorPayload,
+    LlmInputItem,
     LlmInvocationStatus,
     LlmMessage,
-    LlmContinuationSignal,
     LlmModelFamily,
     LlmProviderKind,
     LlmResponseItem,
@@ -85,8 +86,11 @@ def _looks_like_credential_source(value: str) -> bool:
 class LlmInvocation(AggregateRoot[str]):
     llm_id: str
     messages: tuple[LlmMessage, ...]
+    input_items: tuple[LlmInputItem, ...] = field(default_factory=tuple)
+    provider_context_messages: tuple[LlmMessage, ...] = field(default_factory=tuple)
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, object] | None = None
+    request_policy: dict[str, object] = field(default_factory=dict)
     request_overrides: dict[str, object] = field(default_factory=dict)
     request_metadata: dict[str, object] = field(default_factory=dict)
     status: LlmInvocationStatus = LlmInvocationStatus.CREATED
@@ -106,8 +110,15 @@ class LlmInvocation(AggregateRoot[str]):
         if not self.messages:
             raise LlmValidationError("LLM invocation requires at least one message.")
         self.messages = tuple(self.messages)
+        self.input_items = tuple(self.input_items)
+        if not self.input_items:
+            raise LlmValidationError(
+                "LLM invocation requires at least one canonical input item.",
+            )
+        self.provider_context_messages = tuple(self.provider_context_messages)
         self.tool_schemas = tuple(self.tool_schemas)
         self.response_items = tuple(self.response_items)
+        self.request_policy = dict(self.request_policy)
         self.request_overrides = dict(self.request_overrides)
         self.request_metadata = dict(self.request_metadata)
         self.provider_request_payload_preview = dict(

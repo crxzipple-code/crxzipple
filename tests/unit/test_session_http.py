@@ -18,7 +18,6 @@ from crxzipple.modules.session.application import (
 from crxzipple.modules.session.domain import (
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
 )
 from crxzipple.modules.session.interfaces.http_models import (
     SessionRequest,
@@ -132,12 +131,6 @@ class SessionHttpTestCase(unittest.TestCase):
                         "url": "https://example.invalid",
                     },
                 },
-                visibility=SessionItemVisibility(
-                    model_visible=True,
-                    user_visible=False,
-                    chat_visible=False,
-                    trace_visible=True,
-                ),
                 source_module="llm",
                 source_kind="llm_response_item",
                 source_id="llm-invocation-1:item-1",
@@ -145,33 +138,33 @@ class SessionHttpTestCase(unittest.TestCase):
                 provider_item_type="function_call",
                 call_id="call-browser-snapshot",
                 tool_name="browser.snapshot",
+                model_visible=False,
+                user_visible=True,
+                chat_visible=False,
+                trace_visible=True,
                 metadata={"roundtrip": True},
             ),
         )
 
-        model_visible_items = service.list_model_visible_items(
-            ListSessionItemsInput(session_key=session.id),
-        )
-        chat_visible_items = service.list_chat_visible_items(
-            ListSessionItemsInput(session_key=session.id),
-        )
-        trace_visible_items = service.list_trace_visible_items(
+        items = service.list_items(
             ListSessionItemsInput(session_key=session.id),
         )
 
         self.assertEqual(item.sequence_no, 1)
-        self.assertEqual(len(model_visible_items), 1)
-        self.assertEqual(len(chat_visible_items), 0)
-        self.assertEqual(len(trace_visible_items), 1)
-        self.assertEqual(model_visible_items[0].id, item.id)
-        self.assertEqual(model_visible_items[0].source_module, "llm")
-        self.assertEqual(model_visible_items[0].source_kind, "llm_response_item")
-        self.assertEqual(model_visible_items[0].source_id, "llm-invocation-1:item-1")
-        self.assertEqual(model_visible_items[0].provider_item_id, "provider-call-1")
-        self.assertEqual(model_visible_items[0].provider_item_type, "function_call")
-        self.assertEqual(model_visible_items[0].call_id, "call-browser-snapshot")
-        self.assertEqual(model_visible_items[0].tool_name, "browser.snapshot")
-        self.assertEqual(model_visible_items[0].metadata, {"roundtrip": True})
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].id, item.id)
+        self.assertEqual(items[0].source_module, "llm")
+        self.assertEqual(items[0].source_kind, "llm_response_item")
+        self.assertEqual(items[0].source_id, "llm-invocation-1:item-1")
+        self.assertEqual(items[0].provider_item_id, "provider-call-1")
+        self.assertFalse(items[0].model_visible)
+        self.assertTrue(items[0].user_visible)
+        self.assertFalse(items[0].chat_visible)
+        self.assertTrue(items[0].trace_visible)
+        self.assertEqual(items[0].provider_item_type, "function_call")
+        self.assertEqual(items[0].call_id, "call-browser-snapshot")
+        self.assertEqual(items[0].tool_name, "browser.snapshot")
+        self.assertEqual(items[0].metadata, {"roundtrip": True})
 
     def test_session_item_endpoints_append_and_filter_items(self) -> None:
         create_response = self.client.post(
@@ -194,12 +187,6 @@ class SessionHttpTestCase(unittest.TestCase):
                 "content_payload": {
                     "blocks": [{"type": "text", "text": "hello"}],
                 },
-                "visibility": {
-                    "model_visible": True,
-                    "user_visible": True,
-                    "chat_visible": True,
-                    "trace_visible": True,
-                },
                 "source_module": "orchestration",
                 "source_kind": "orchestration_run",
                 "source_id": "run-http-item",
@@ -217,12 +204,6 @@ class SessionHttpTestCase(unittest.TestCase):
                     "name": "browser.snapshot",
                     "arguments": {},
                 },
-                "visibility": {
-                    "model_visible": True,
-                    "user_visible": False,
-                    "chat_visible": False,
-                    "trace_visible": True,
-                },
                 "source_module": "llm",
                 "source_kind": "llm_response_item",
                 "source_id": "llm-http:item-1",
@@ -238,28 +219,14 @@ class SessionHttpTestCase(unittest.TestCase):
         self.assertEqual(first_item.json()["session_id"], active_session_id)
         self.assertEqual(first_item.json()["sequence_no"], 1)
         self.assertEqual(second_item.json()["sequence_no"], 2)
-        self.assertEqual(first_item.json()["visibility"]["chat_visible"], True)
         self.assertEqual(second_item.json()["tool_name"], "browser.snapshot")
 
         all_items = self.client.get(
             "/sessions/agent:assistant:main/items",
             params={"active_session_only": True},
         )
-        chat_items = self.client.get(
-            "/sessions/agent:assistant:main/items",
-            params={"active_session_only": True, "chat_visible": True},
-        )
-        trace_items = self.client.get(
-            "/sessions/agent:assistant:main/items",
-            params={"active_session_only": True, "trace_visible": True},
-        )
-
         self.assertEqual(all_items.status_code, 200)
-        self.assertEqual(chat_items.status_code, 200)
-        self.assertEqual(trace_items.status_code, 200)
         self.assertEqual([item["kind"] for item in all_items.json()], ["user_message", "tool_call"])
-        self.assertEqual([item["id"] for item in chat_items.json()], [first_item.json()["id"]])
-        self.assertEqual(len(trace_items.json()), 2)
 
     def test_session_endpoints_manage_items_and_reset_instances(self) -> None:
         agent_home = self._register_llm_and_agent()
@@ -437,7 +404,6 @@ class SessionHttpTestCase(unittest.TestCase):
                 "source_module": "tool",
                 "source_kind": "tool_run",
                 "source_id": "run-1",
-                "visibility": {"model_visible": True, "trace_visible": True},
             },
         )
 
@@ -449,7 +415,6 @@ class SessionHttpTestCase(unittest.TestCase):
         self.assertEqual(item_payload["source_module"], "tool")
         self.assertEqual(item_payload["source_kind"], "tool_run")
         self.assertEqual(item_payload["source_id"], "run-1")
-        self.assertTrue(item_payload["visibility"]["model_visible"])
 
     def test_session_create_endpoint_accepts_runtime_binding_payload(self) -> None:
         self._register_llm_and_agent()

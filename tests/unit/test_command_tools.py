@@ -11,6 +11,7 @@ from crxzipple.app import AssemblyTarget
 from crxzipple.app.keys import AppKey
 from crxzipple.modules.tool.application.result_envelope import (
     TOOL_RESULT_ENVELOPE_METADATA_KEY,
+    TOOL_RESULT_ENVELOPE_SCHEMA_VERSION,
     TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY,
 )
 from crxzipple.modules.tool.domain import ToolExecutionContext
@@ -48,12 +49,45 @@ class CommandToolsTestCase(unittest.TestCase):
         envelope = result.metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY]
         self.assertEqual(result.metadata["exit_code"], 7)
         self.assertIn("bad path", result.metadata["stderr"])
+        self.assertEqual(envelope["schema_version"], TOOL_RESULT_ENVELOPE_SCHEMA_VERSION)
         self.assertEqual(envelope["status"], "error")
         self.assertEqual(envelope["key_facts"]["exit_code"], 7)
-        self.assertEqual(envelope["model_visible_payload"]["exit_code"], 7)
-        self.assertIn("bad path", envelope["model_visible_payload"]["stderr"])
-        self.assertIn("absolute_cwd", envelope["model_visible_payload"])
-        self.assertIn("shell", envelope["model_visible_payload"])
+        self.assertEqual(envelope["provider_replay_payload"]["exit_code"], 7)
+        self.assertIn("bad path", envelope["provider_replay_payload"]["stderr"])
+        self.assertIn("absolute_cwd", envelope["provider_replay_payload"])
+        self.assertIn("shell", envelope["provider_replay_payload"])
+
+    def test_exec_runtime_probe_result_includes_summary_and_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            handler = command_exec(self._deps(temp_dir))
+            assert handler is not None
+
+            result = asyncio.run(
+                handler(
+                    {
+                        "command": (
+                            f"{sys.executable} -c "
+                            "\"import os, sys; "
+                            "print('runtime-probe'); "
+                            "print(sys.executable); "
+                            "print(os.getcwd())\""
+                        ),
+                    },
+                    execution_context=self._context(temp_dir),
+                ),
+            )
+
+        envelope = result.metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY]
+        self.assertEqual(result.metadata["exit_code"], 0)
+        self.assertIn("runtime-probe", result.metadata["stdout"])
+        self.assertEqual(envelope["schema_version"], TOOL_RESULT_ENVELOPE_SCHEMA_VERSION)
+        self.assertEqual(envelope["status"], "ok")
+        self.assertIn("runtime-probe", envelope["summary"])
+        self.assertEqual(envelope["key_facts"]["exit_code"], 0)
+        self.assertEqual(envelope["provider_replay_payload"]["exit_code"], 0)
+        self.assertIn("runtime-probe", envelope["provider_replay_payload"]["stdout"])
+        self.assertEqual(envelope["provider_replay_payload"]["stderr"], "")
+        self.assertFalse(envelope["truncated"])
 
     def test_exec_truncated_output_exposes_raw_output_read_handles(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,6 +105,7 @@ class CommandToolsTestCase(unittest.TestCase):
             )
 
         envelope = result.metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY]
+        self.assertEqual(envelope["schema_version"], TOOL_RESULT_ENVELOPE_SCHEMA_VERSION)
         self.assertTrue(result.metadata["stdout_truncated"])
         self.assertIn(TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY, result.metadata)
         self.assertTrue(envelope["truncated"])
@@ -119,7 +154,7 @@ class CommandToolsTestCase(unittest.TestCase):
             poll_envelope["read_handles"][0]["arguments"]["process_id"],
             process_id,
         )
-        self.assertIn("ready", poll_envelope["model_visible_payload"]["stdout"])
+        self.assertIn("ready", poll_envelope["provider_replay_payload"]["stdout"])
 
     def _deps(self, workspace_dir: str) -> CommandToolDeps:
         return CommandToolDeps(
@@ -134,4 +169,3 @@ class CommandToolsTestCase(unittest.TestCase):
                 "workspace_dir": workspace_dir,
             },
         )
-

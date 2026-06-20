@@ -19,17 +19,24 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmUsage,
     utcnow,
 )
-from crxzipple.modules.llm.infrastructure.adapters.common import (
-    anthropic_messages,
-    anthropic_tool_schema,
-    coerce_text_content,
-    default_base_url,
-    ensure_async_json_response,
+from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     ensure_image_input_supported,
-    ensure_json_response,
-    join_url,
     parse_json_arguments,
+)
+from crxzipple.modules.llm.infrastructure.adapters.http_helpers import (
+    ensure_async_json_response,
+    ensure_json_response,
     resolve_credential_binding,
+)
+from crxzipple.modules.llm.infrastructure.adapters.anthropic_messages_renderer import (
+    AnthropicMessagesRenderer,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_protocol import (
+    ProviderRenderInput,
+    ProviderWireRequest,
+)
+from crxzipple.modules.llm.infrastructure.rendering.input_projection import (
+    messages_from_projected_input_items,
 )
 from crxzipple.shared.infrastructure.http import get_async_http_client
 
@@ -38,17 +45,23 @@ class AnthropicMessagesAdapter:
     DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
     DEFAULT_VERSION = "2023-06-01"
 
+    def __init__(self) -> None:
+        self._renderer = AnthropicMessagesRenderer(
+            default_base_url=self.DEFAULT_BASE_URL,
+        )
+
     def invoke(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
-        url, headers, payload = self._invoke_request(profile, request)
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(profile, request, render_input=render_input)
+        response = self._send_wire_request(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
         data = ensure_json_response(
             response,
@@ -60,21 +73,27 @@ class AnthropicMessagesAdapter:
             invocation_id=request.invocation_id,
         )
 
+    def preview_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> dict[str, Any]:
+        return self._renderer.preview_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
+        )
+
     async def invoke_async(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
-        url, headers, payload = self._invoke_request(profile, request)
-        client = get_async_http_client(
-            url,
-            timeout=profile.timeout_seconds,
-            client_factory=httpx.AsyncClient,
-        )
-        response = await client.post(
-            url,
-            headers=headers,
-            json=payload,
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        wire_request = self._wire_request(profile, request, render_input=render_input)
+        response = await self._send_wire_request_async(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
         data = await ensure_async_json_response(
             response,
@@ -86,61 +105,91 @@ class AnthropicMessagesAdapter:
             invocation_id=request.invocation_id,
         )
 
-    def _invoke_request(
+    def _request_headers(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
-    ) -> tuple[str, dict[str, str], dict[str, Any]]:
-        ensure_image_input_supported(profile, request.messages)
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> dict[str, str]:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        request_messages = messages_from_projected_input_items(
+            model_input.input_items,
+        )
+        ensure_image_input_supported(profile, request_messages)
         token = resolve_credential_binding(
             profile.credential_binding_id,
             required=True,
             description=f"LLM profile '{profile.id}'",
             resolved_credential=request.resolved_credential,
         )
-        headers = {
+        return {
             "Content-Type": "application/json",
             "x-api-key": token,
             "anthropic-version": self.DEFAULT_VERSION,
         }
 
-        system_messages = [
-            coerce_text_content(message.content)
-            for message in request.messages
-            if message.role.value == "system"
-        ]
-        payload: dict[str, Any] = {
-            "model": profile.model_name,
-            "messages": anthropic_messages(
-                tuple(
-                    message
-                    for message in request.messages
-                    if message.role.value != "system"
-                ),
+    def _send_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> requests.Response:
+        return requests.post(
+            wire_request.endpoint,
+            headers=self._request_headers(
+                profile,
+                request,
+                render_input=render_input,
             ),
-            "max_tokens": request.overrides.get("max_tokens")
-            or profile.default_params.max_output_tokens
-            or 1024,
-        }
-        if system_messages:
-            payload["system"] = "\n\n".join(system_messages)
-        if request.tool_schemas:
-            payload["tools"] = [
-                anthropic_tool_schema(tool) for tool in request.tool_schemas
-            ]
-        if profile.default_params.temperature is not None:
-            payload["temperature"] = profile.default_params.temperature
-        if profile.default_params.top_p is not None:
-            payload["top_p"] = profile.default_params.top_p
+            json=wire_request.payload,
+            timeout=profile.timeout_seconds,
+        )
 
-        for key, value in request.overrides.items():
-            if key not in {"model", "messages", "system", "tools"}:
-                payload[key] = value
+    async def _send_wire_request_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> httpx.Response:
+        client = get_async_http_client(
+            wire_request.endpoint,
+            timeout=profile.timeout_seconds,
+            client_factory=httpx.AsyncClient,
+        )
+        return await client.post(
+            wire_request.endpoint,
+            headers=self._request_headers(
+                profile,
+                request,
+                render_input=render_input,
+            ),
+            json=wire_request.payload,
+        )
 
-        return (
-            join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/messages"),
-            headers,
-            payload,
+    def _wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> ProviderWireRequest:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        rendered = self._renderer.render_input(model_input)
+        return ProviderWireRequest.from_rendered(
+            renderer_id=self._renderer.renderer_id,
+            rendered=rendered,
+            preview=self._renderer.preview_input(model_input),
         )
 
     @staticmethod
@@ -238,8 +287,8 @@ def _anthropic_response_items(
                     else f"{invocation_id}:text"
                 ),
                 provider_item_type="message.text",
-                model_visible=True,
-                user_visible=True,
+                provider_replay_candidate=True,
+                user_timeline_candidate=True,
                 created_at=now,
                 completed_at=now,
             ),
@@ -272,8 +321,8 @@ def _anthropic_response_items(
                 provider_item_type="tool_use",
                 call_id=call_id,
                 tool_name=str(tool_name),
-                model_visible=True,
-                user_visible=False,
+                provider_replay_candidate=True,
+                user_timeline_candidate=False,
                 created_at=now,
                 completed_at=now,
             ),

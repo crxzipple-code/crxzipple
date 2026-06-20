@@ -7,11 +7,12 @@ from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmApiFamily,
     LlmCapability,
+    LlmContinuationSignal,
     LlmDefaults,
     LlmErrorPayload,
+    LlmInputItem,
     LlmInvocationStatus,
     LlmMessage,
-    LlmContinuationSignal,
     LlmModelFamily,
     LlmProviderKind,
     LlmResponseEvent,
@@ -111,6 +112,11 @@ class SqlAlchemyLlmInvocationRepository:
                 id=invocation.id,
                 llm_id=invocation.llm_id,
                 messages=[message.to_payload() for message in invocation.messages],
+                input_items=[item.to_payload() for item in invocation.input_items],
+                provider_context_messages=[
+                    message.to_payload()
+                    for message in invocation.provider_context_messages
+                ],
                 tool_schemas=[
                     tool_schema.to_payload() for tool_schema in invocation.tool_schemas
                 ],
@@ -119,6 +125,7 @@ class SqlAlchemyLlmInvocationRepository:
                     if invocation.response_format is not None
                     else None
                 ),
+                request_policy=dict(invocation.request_policy),
                 request_overrides=dict(invocation.request_overrides),
                 request_metadata=dict(invocation.request_metadata),
                 provider_request_payload_preview=dict(
@@ -185,6 +192,13 @@ class SqlAlchemyLlmInvocationRepository:
             id=model.id,
             llm_id=model.llm_id,
             messages=tuple(LlmMessage.from_payload(item) for item in model.messages or []),
+            input_items=tuple(
+                LlmInputItem.from_payload(item) for item in model.input_items or []
+            ),
+            provider_context_messages=tuple(
+                LlmMessage.from_payload(item)
+                for item in model.provider_context_messages or []
+            ),
             tool_schemas=tuple(
                 ToolSchema.from_payload(item) for item in model.tool_schemas or []
             ),
@@ -196,6 +210,11 @@ class SqlAlchemyLlmInvocationRepository:
             request_overrides=(
                 dict(model.request_overrides)
                 if isinstance(model.request_overrides, dict)
+                else {}
+            ),
+            request_policy=(
+                dict(model.request_policy)
+                if isinstance(model.request_policy, dict)
                 else {}
             ),
             request_metadata=(
@@ -272,8 +291,8 @@ def _response_item_to_model(item: LlmResponseItem) -> LlmInvocationResponseItemM
         provider_item_type=item.provider_item_type,
         call_id=item.call_id,
         tool_name=item.tool_name,
-        model_visible=item.model_visible,
-        user_visible=item.user_visible,
+        provider_replay_candidate=item.provider_replay_candidate,
+        user_timeline_candidate=item.user_timeline_candidate,
         created_at=item.created_at,
         completed_at=item.completed_at,
     )
@@ -297,8 +316,8 @@ def _response_item_from_model(model: LlmInvocationResponseItemModel) -> LlmRespo
         provider_item_type=model.provider_item_type,
         call_id=model.call_id,
         tool_name=model.tool_name,
-        model_visible=model.model_visible,
-        user_visible=model.user_visible,
+        provider_replay_candidate=model.provider_replay_candidate,
+        user_timeline_candidate=model.user_timeline_candidate,
         created_at=coerce_utc_datetime(model.created_at),
         completed_at=coerce_optional_utc_datetime(model.completed_at),
     )

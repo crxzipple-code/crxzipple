@@ -1,13 +1,21 @@
-"""Default tool schema metadata bootstrap for prompt snapshots."""
+"""Default tool schema metadata bootstrap for context snapshots."""
 
 from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Protocol
+from urllib.parse import quote
 
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     ContextTreeService,
 )
 from crxzipple.modules.context_workspace.domain import ContextAction
-from crxzipple.modules.orchestration.application.prompt_input import RunPromptInput
+from crxzipple.modules.tool.application import (
+    ToolRuntimeRequestBundle,
+    ToolRuntimeRequestBundleGroup,
+)
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft import RuntimeLlmRequestDraft
 
 from ._metadata import (
     metadata_positive_int,
@@ -15,13 +23,29 @@ from ._metadata import (
     metadata_text,
 )
 
+_CORE_DEFAULT_TOOL_GROUPS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("bundled.local_package.command", "run_and_verify"),
+        ("bundled.local_package.command", "background_processes"),
+        ("bundled.local_package.context_tree", "capability_discovery"),
+    },
+)
 
-def resolve_prompt_tool_schema_metadata(prompt: RunPromptInput) -> dict[str, object]:
+
+class ToolRuntimeRequestCatalog(Protocol):
+    def list_runtime_request_bundles(
+        self,
+        function_ids: Iterable[str],
+    ) -> tuple[ToolRuntimeRequestBundle, ...]:
+        ...
+
+
+def resolve_draft_tool_schema_metadata(draft: RuntimeLlmRequestDraft) -> dict[str, object]:
     default_tool_schema_ids = metadata_string_list(
-        prompt.flow_hint.get("default_tool_schema_ids"),
+        draft.flow_hint.get("default_tool_schema_ids"),
     )
     default_tool_schema_group_refs = metadata_tool_schema_group_refs(
-        prompt.flow_hint.get("default_tool_schema_group_refs"),
+        draft.flow_hint.get("default_tool_schema_group_refs"),
     )
     if not default_tool_schema_ids and not default_tool_schema_group_refs:
         return {}
@@ -32,9 +56,9 @@ def resolve_prompt_tool_schema_metadata(prompt: RunPromptInput) -> dict[str, obj
         ]
     if not default_tool_schema_ids:
         return metadata
-    source = metadata_text(prompt.flow_hint.get("default_tool_schema_source"))
+    source = metadata_text(draft.flow_hint.get("default_tool_schema_source"))
     metadata["default_tool_schema_ids"] = default_tool_schema_ids
-    metadata["default_tool_schema_source"] = source or "prompt_flow_hint"
+    metadata["default_tool_schema_source"] = source or "runtime_request_flow_hint"
     return metadata
 
 
@@ -75,14 +99,24 @@ def merge_default_tool_schema_metadata(
 def resolve_default_tool_schema_metadata(
     *,
     tree_service: ContextTreeService | None,
+    runtime_request_catalog: ToolRuntimeRequestCatalog | None = None,
     session_key: str,
     run_id: str,
-    prompt: RunPromptInput,
+    draft: RuntimeLlmRequestDraft,
+    allow_tree_fallback: bool = True,
 ) -> dict[str, object]:
+    catalog_metadata = _resolve_default_tool_schema_metadata_from_catalog(
+        runtime_request_catalog=runtime_request_catalog,
+        draft=draft,
+    )
+    if catalog_metadata:
+        return catalog_metadata
+    if not allow_tree_fallback:
+        return {}
     if tree_service is None:
         return {}
     direct_schema_ids = metadata_string_list(
-        prompt.flow_hint.get("default_tool_schema_ids"),
+        draft.flow_hint.get("default_tool_schema_ids"),
     )
     if direct_schema_ids:
         _expand_tool_bundles_for_default_schema_ids(
@@ -92,16 +126,16 @@ def resolve_default_tool_schema_metadata(
             schema_ids=tuple(direct_schema_ids),
         )
     group_refs = metadata_tool_schema_group_refs(
-        prompt.flow_hint.get("default_tool_schema_group_refs"),
+        draft.flow_hint.get("default_tool_schema_group_refs"),
     )
-    group_ref_source = "prompt_flow_hint.group_bootstrap"
+    group_ref_source = "runtime_request_flow_hint.group_bootstrap"
     if not group_refs:
         group_refs = default_tool_schema_group_refs_from_source_policy(
             tree_service=tree_service,
             session_key=session_key,
             run_id=run_id,
         )
-        group_ref_source = "source_prompt.default_tool_schema_group_refs"
+        group_ref_source = "source_runtime_request.default_tool_schema_group_refs"
     if not group_refs:
         return {}
     _expand_context_node_if_present(
@@ -110,7 +144,10 @@ def resolve_default_tool_schema_metadata(
         run_id=run_id,
         node_id="tools.available",
     )
-    tree = tree_service.list_tree(session_key, refresh=False)
+    bundle_nodes = tree_service.list_tool_nodes_by_kind(
+        session_key,
+        kinds=("tool_bundle",),
+    )
     for ref in group_refs:
         source_id = ref.get("source_id")
         if source_id is None:
@@ -118,7 +155,7 @@ def resolve_default_tool_schema_metadata(
         bundle_node = next(
             (
                 node
-                for node in tree.nodes
+                for node in bundle_nodes
                 if node.owner == "tool"
                 and node.kind == "tool_bundle"
                 and node.owner_ref.get("source_id") == source_id
@@ -133,14 +170,17 @@ def resolve_default_tool_schema_metadata(
                 node_id=bundle_node.id,
             )
 
-    tree = tree_service.list_tree(session_key, refresh=False)
+    group_nodes = tree_service.list_tool_nodes_by_kind(
+        session_key,
+        kinds=("tool_bundle_group",),
+    )
     default_schema_ids: list[str] = []
     default_sources: list[str] = []
     default_priorities: dict[str, int] = {}
     default_reasons: dict[str, str] = {}
     matched_groups: list[dict[str, str]] = []
     for group_index, ref in enumerate(group_refs):
-        group_node = _find_tool_group_node(tree.nodes, ref)
+        group_node = _find_tool_group_node(group_nodes, ref)
         if group_node is None:
             continue
         _expand_context_node_if_present(
@@ -212,10 +252,13 @@ def default_tool_schema_group_refs_from_source_policy(
         run_id=run_id,
         node_id="tools.available",
     )
-    tree = tree_service.list_tree(session_key, refresh=False)
+    bundle_nodes = tree_service.list_tool_nodes_by_kind(
+        session_key,
+        kinds=("tool_bundle",),
+    )
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
-    for bundle_node in tree.nodes:
+    for bundle_node in bundle_nodes:
         if (
             getattr(bundle_node, "owner", None) != "tool"
             or getattr(bundle_node, "kind", None) != "tool_bundle"
@@ -226,20 +269,26 @@ def default_tool_schema_group_refs_from_source_policy(
             source_id = metadata_text(bundle_node.metadata.get("source_id"))
         if source_id is None:
             continue
-        prompt_config = bundle_node.metadata.get("prompt")
-        if not isinstance(prompt_config, dict):
+        runtime_request_config = bundle_node.metadata.get("runtime_request")
+        if not isinstance(runtime_request_config, dict):
             continue
         source_policy = (
-            prompt_config.get("default_tool_schema_policy")
-            if isinstance(prompt_config.get("default_tool_schema_policy"), dict)
+            runtime_request_config.get("default_tool_schema_policy")
+            if isinstance(
+                runtime_request_config.get("default_tool_schema_policy"),
+                dict,
+            )
             else {}
         )
         source_priority = metadata_positive_int(source_policy.get("priority"))
         for ref in metadata_tool_schema_group_refs(
-            prompt_config.get("default_tool_schema_group_refs"),
+            runtime_request_config.get("default_tool_schema_group_refs"),
         ):
             normalized = _with_default_source_id(ref, source_id=source_id)
             if normalized is None:
+                continue
+            group_key = metadata_text(normalized.get("group_key"))
+            if (source_id, group_key or "") not in _CORE_DEFAULT_TOOL_GROUPS:
                 continue
             if source_priority is not None and "priority" not in normalized:
                 normalized["priority"] = str(source_priority)
@@ -255,6 +304,192 @@ def default_tool_schema_group_refs_from_source_policy(
     return refs
 
 
+def _resolve_default_tool_schema_metadata_from_catalog(
+    *,
+    runtime_request_catalog: ToolRuntimeRequestCatalog | None,
+    draft: RuntimeLlmRequestDraft,
+) -> dict[str, object]:
+    if runtime_request_catalog is None:
+        return {}
+    bundles = _runtime_request_bundles_from_catalog(
+        runtime_request_catalog,
+        function_ids=_draft_tool_schema_names(draft),
+    )
+    if not bundles:
+        return {}
+    group_refs = metadata_tool_schema_group_refs(
+        draft.flow_hint.get("default_tool_schema_group_refs"),
+    )
+    group_ref_source = "runtime_request_flow_hint.group_bootstrap"
+    if not group_refs:
+        group_refs = _default_tool_schema_group_refs_from_catalog_source_policy(
+            bundles,
+        )
+        group_ref_source = "source_runtime_request.default_tool_schema_group_refs"
+    if not group_refs:
+        return {}
+    default_schema_ids: list[str] = []
+    default_sources: list[str] = []
+    default_priorities: dict[str, int] = {}
+    default_reasons: dict[str, str] = {}
+    matched_groups: list[dict[str, str]] = []
+    for group_index, ref in enumerate(group_refs):
+        group_match = _find_catalog_group(bundles, ref)
+        if group_match is None:
+            continue
+        bundle, group = group_match
+        group_schema_ids = metadata_string_list(
+            group.metadata.get("default_tool_schema_ids"),
+        )
+        max_count = metadata_positive_int(
+            group.metadata.get("default_tool_schema_max_count"),
+        )
+        if max_count is not None:
+            group_schema_ids = group_schema_ids[:max_count]
+        group_priority = _catalog_group_priority(
+            ref,
+            group=group,
+            fallback=group_index,
+        )
+        reason = metadata_text(ref.get("reason"))
+        for schema_index, schema_id in enumerate(group_schema_ids):
+            if schema_id not in default_schema_ids:
+                default_schema_ids.append(schema_id)
+            default_priorities.setdefault(
+                schema_id,
+                group_priority + schema_index,
+            )
+            if reason is not None:
+                default_reasons.setdefault(schema_id, reason)
+        source = metadata_text(group.metadata.get("default_tool_schema_source"))
+        if source is not None and source not in default_sources:
+            default_sources.append(source)
+        matched_groups.append(
+            {
+                "node_id": _tool_bundle_group_node_id(
+                    bundle.source_id,
+                    group.group_key,
+                ),
+                "source_id": bundle.source_id,
+                "group_key": group.group_key,
+                "priority": str(group_priority),
+                **({"reason": reason} if reason is not None else {}),
+            },
+        )
+    if not default_schema_ids:
+        return {}
+    return {
+        "default_tool_schema_ids": default_schema_ids,
+        "default_tool_schema_source": (
+            ",".join(default_sources)
+            if default_sources
+            else group_ref_source
+        ),
+        "default_tool_schema_group_refs": [dict(ref) for ref in group_refs],
+        "default_tool_schema_group_matches": matched_groups,
+        "default_tool_schema_priorities": dict(default_priorities),
+        "default_tool_schema_reasons": dict(default_reasons),
+    }
+
+
+def _runtime_request_bundles_from_catalog(
+    runtime_request_catalog: ToolRuntimeRequestCatalog,
+    *,
+    function_ids: tuple[str, ...],
+) -> tuple[ToolRuntimeRequestBundle, ...]:
+    if not function_ids:
+        return ()
+    try:
+        return runtime_request_catalog.list_runtime_request_bundles(function_ids)
+    except Exception:
+        return ()
+
+
+def _draft_tool_schema_names(draft: RuntimeLlmRequestDraft) -> tuple[str, ...]:
+    names: list[str] = []
+    for schema in draft.tool_schemas:
+        name = schema.name.strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _default_tool_schema_group_refs_from_catalog_source_policy(
+    bundles: tuple[ToolRuntimeRequestBundle, ...],
+) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for bundle in bundles:
+        runtime_request_config = bundle.metadata.get("runtime_request")
+        if not isinstance(runtime_request_config, dict):
+            continue
+        source_policy = (
+            runtime_request_config.get("default_tool_schema_policy")
+            if isinstance(
+                runtime_request_config.get("default_tool_schema_policy"),
+                dict,
+            )
+            else {}
+        )
+        source_priority = metadata_positive_int(source_policy.get("priority"))
+        for ref in metadata_tool_schema_group_refs(
+            runtime_request_config.get("default_tool_schema_group_refs"),
+        ):
+            normalized = _with_default_source_id(ref, source_id=bundle.source_id)
+            if normalized is None:
+                continue
+            group_key = metadata_text(normalized.get("group_key"))
+            if (bundle.source_id, group_key or "") not in _CORE_DEFAULT_TOOL_GROUPS:
+                continue
+            if source_priority is not None and "priority" not in normalized:
+                normalized["priority"] = str(source_priority)
+            key = (
+                normalized.get("node_id", ""),
+                normalized.get("source_id", ""),
+                normalized.get("group_key", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(normalized)
+    return refs
+
+
+def _find_catalog_group(
+    bundles: tuple[ToolRuntimeRequestBundle, ...],
+    ref: dict[str, str],
+) -> tuple[ToolRuntimeRequestBundle, ToolRuntimeRequestBundleGroup] | None:
+    source_id = ref.get("source_id")
+    group_key = ref.get("group_key")
+    node_id = ref.get("node_id")
+    for bundle in bundles:
+        for group in bundle.groups:
+            if node_id is not None and _tool_bundle_group_node_id(
+                bundle.source_id,
+                group.group_key,
+            ) == node_id:
+                return (bundle, group)
+            if (
+                source_id is not None
+                and group_key is not None
+                and bundle.source_id == source_id
+                and group.group_key == group_key
+            ):
+                return (bundle, group)
+    return None
+
+
+def _catalog_group_priority(
+    ref: dict[str, str],
+    *,
+    group: ToolRuntimeRequestBundleGroup,
+    fallback: int,
+) -> int:
+    source_priority = metadata_positive_int(ref.get("priority")) or 100
+    group_order = metadata_positive_int(group.metadata.get("order")) or fallback
+    return (source_priority * 10_000) + (group_order * 100)
+
+
 def _expand_tool_bundles_for_default_schema_ids(
     *,
     tree_service: ContextTreeService,
@@ -263,16 +498,18 @@ def _expand_tool_bundles_for_default_schema_ids(
     schema_ids: tuple[str, ...],
 ) -> None:
     source_ids = _default_schema_source_ids(schema_ids)
-    if not source_ids:
-        return
     _expand_context_node_if_present(
         tree_service=tree_service,
         session_key=session_key,
         run_id=run_id,
         node_id="tools.available",
     )
-    tree = tree_service.list_tree(session_key, refresh=False)
-    for node in tree.nodes:
+    bundle_nodes = tree_service.list_tool_nodes_by_kind(
+        session_key,
+        kinds=("tool_bundle",),
+    )
+    expanded_bundle_ids: set[str] = set()
+    for node in bundle_nodes:
         if (
             getattr(node, "owner", None) != "tool"
             or getattr(node, "kind", None) != "tool_bundle"
@@ -281,13 +518,51 @@ def _expand_tool_bundles_for_default_schema_ids(
         source_id = metadata_text(node.owner_ref.get("source_id"))
         if source_id is None:
             source_id = metadata_text(node.metadata.get("source_id"))
-        if source_id in source_ids:
+        if not source_ids or source_id in source_ids:
             _expand_context_node_if_present(
                 tree_service=tree_service,
                 session_key=session_key,
                 run_id=run_id,
                 node_id=node.id,
             )
+            expanded_bundle_ids.add(str(node.id))
+    if not expanded_bundle_ids:
+        for node in bundle_nodes:
+            if (
+                getattr(node, "owner", None) != "tool"
+                or getattr(node, "kind", None) != "tool_bundle"
+            ):
+                continue
+            _expand_context_node_if_present(
+                tree_service=tree_service,
+                session_key=session_key,
+                run_id=run_id,
+                node_id=node.id,
+            )
+    group_nodes = tree_service.list_tool_nodes_by_kind(
+        session_key,
+        kinds=("tool_bundle_group",),
+    )
+    wanted_schema_ids = set(schema_ids)
+    for node in group_nodes:
+        if (
+            getattr(node, "owner", None) != "tool"
+            or getattr(node, "kind", None) != "tool_bundle_group"
+        ):
+            continue
+        function_ids = set(
+            metadata_string_list(node.owner_ref.get("function_ids"))
+            + metadata_string_list(node.metadata.get("function_ids"))
+            + metadata_string_list(node.metadata.get("default_tool_schema_ids"))
+        )
+        if wanted_schema_ids.isdisjoint(function_ids):
+            continue
+        _expand_context_node_if_present(
+            tree_service=tree_service,
+            session_key=session_key,
+            run_id=run_id,
+            node_id=node.id,
+        )
 
 
 def _default_schema_source_ids(schema_ids: tuple[str, ...]) -> frozenset[str]:
@@ -310,6 +585,18 @@ def _default_schema_source_ids(schema_ids: tuple[str, ...]) -> frozenset[str]:
         source_ids.add(f"bundled.openapi.{namespace}")
         source_ids.add(f"bundled.local_package.{namespace}")
     return frozenset(source_ids)
+
+
+def _tool_bundle_group_node_id(source_id: str, group_key: str) -> str:
+    return f"{_tool_bundle_node_id(source_id)}.group.{_node_token(group_key)}"
+
+
+def _tool_bundle_node_id(source_id: str) -> str:
+    return f"tools.bundle.{_node_token(source_id)}"
+
+
+def _node_token(value: str) -> str:
+    return quote(value.strip(), safe="")
 
 
 def metadata_tool_schema_group_refs(value: object) -> list[dict[str, str]]:

@@ -1,6 +1,6 @@
 kind: local_package
 namespace: openai_image
-prompt:
+runtime_request:
   title: Image Generation
   summary: Generate and edit images through configured provider credentials and artifact outputs.
 capabilities:

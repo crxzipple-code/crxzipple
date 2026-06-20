@@ -30,7 +30,7 @@ from crxzipple.modules.orchestration.application.coordinators import (
 )
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    RunPromptInputPreview,
+    RuntimeLlmRequestPreview,
 )
 from crxzipple.modules.orchestration.application.execution import RunExecutionService
 from crxzipple.modules.orchestration.application.followups import (
@@ -202,7 +202,7 @@ class OrchestrationServiceGraph:
             wait_for_confirmation=self.assignment_lifecycle.wait_for_confirmation,
             complete_assignment=self.assignment_lifecycle.complete_assignment,
             fail_assignment=self.assignment_lifecycle.fail_assignment,
-            clear_prompt_flow_hint=self.assignment_lifecycle.clear_prompt_flow_hint,
+            clear_runtime_request_flow_hint=self.assignment_lifecycle.clear_runtime_request_flow_hint,
             events_service=events_service,
             metrics=metrics,
         )
@@ -379,8 +379,8 @@ class OrchestrationServiceGraph:
             OrchestrationRunStatus.CANCELLED,
         }
 
-    def preview_prompt(self, run_id: str) -> RunPromptInputPreview:
-        return self.inspection_service.preview_prompt(run_id)
+    def preview_runtime_llm_request(self, run_id: str) -> RuntimeLlmRequestPreview:
+        return self.inspection_service.preview_runtime_llm_request(run_id)
 
     def resolve_tools(self, run: OrchestrationRun) -> ResolvedToolSet:
         return self.inspection_service.resolve_tools(run)
@@ -398,15 +398,16 @@ class OrchestrationServiceGraph:
             target=target,
         )
 
-    def set_memory_flush_transcript_max_chars(self, max_chars: int) -> None:
-        self.inspection_service.set_memory_flush_transcript_max_chars(max_chars)
-
     def list_runs(
         self,
         *,
         status: OrchestrationRunStatus | None = None,
+        session_key: str | None = None,
     ) -> list[OrchestrationRun]:
-        return self.run_query_service.list_runs(status=status)
+        return self.run_query_service.list_runs(
+            status=status,
+            session_key=session_key,
+        )
 
     def resolve_approval_request(
         self,

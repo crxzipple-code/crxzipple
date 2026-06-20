@@ -32,14 +32,14 @@ class PreparedSessionRunPlan:
     active_session_id: str
     priority: int | None
     route_metadata: dict[str, object]
-    prompt_flow_hint: dict[str, object] | None = None
+    runtime_request_flow_hint: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
 class SessionRunPreparationWorkflow:
     resolve_session_bundle: Callable[[ResolveSessionInput], ResolvedSessionBundle]
     resolve_session_input_factory: Callable[..., ResolveSessionInput]
-    prompt_flow_hint_factory: Callable[
+    runtime_request_flow_hint_factory: Callable[
         ["PrepareSessionRunInput", ResolvedSessionBundle],
         dict[str, object] | None,
     ]
@@ -70,7 +70,7 @@ class SessionRunPreparationWorkflow:
             active_session_id=bundle.active_instance.id,
             priority=data.priority,
             route_metadata=route_metadata,
-            prompt_flow_hint=self.prompt_flow_hint_factory(data, bundle),
+            runtime_request_flow_hint=self.runtime_request_flow_hint_factory(data, bundle),
         )
 
     @staticmethod
@@ -81,7 +81,7 @@ class SessionRunPreparationWorkflow:
         return value or None
 
 
-def session_start_prompt_flow_hint(
+def session_start_runtime_request_flow_hint(
     bundle: ResolvedSessionBundle,
 ) -> dict[str, object] | None:
     resolution = bundle.resolution.resolution
@@ -103,29 +103,29 @@ def session_start_prompt_flow_hint(
     return None
 
 
-def prompt_flow_hint_from_input(
+def runtime_request_flow_hint_from_input(
     data: "PrepareSessionRunInput",
     bundle: ResolvedSessionBundle,
 ) -> dict[str, object] | None:
     payload: dict[str, object] = {}
-    session_start_hint = session_start_prompt_flow_hint(bundle)
+    session_start_hint = session_start_runtime_request_flow_hint(bundle)
     if session_start_hint is not None:
         payload.update(session_start_hint)
-    explicit_hint = _metadata_dict(data.metadata.get("prompt_flow_hint"))
+    explicit_hint = _metadata_dict(data.metadata.get("runtime_request_flow_hint"))
     if explicit_hint:
         payload.update(explicit_hint)
-    prompt_bootstrap = _prompt_bootstrap_policy(data.metadata)
-    if prompt_bootstrap:
-        payload.update(prompt_bootstrap)
+    runtime_request_bootstrap = _runtime_request_bootstrap_policy(data.metadata)
+    if runtime_request_bootstrap:
+        payload.update(runtime_request_bootstrap)
     return payload or None
 
 
-def _prompt_bootstrap_policy(metadata: dict[str, object]) -> dict[str, object]:
-    policy = _metadata_dict(metadata.get("prompt_bootstrap_policy"))
+def _runtime_request_bootstrap_policy(metadata: dict[str, object]) -> dict[str, object]:
+    policy = _metadata_dict(metadata.get("runtime_request_bootstrap_policy"))
     runtime_policy = _metadata_dict(metadata.get("runtime_task_policy"))
-    runtime_prompt_bootstrap = _metadata_dict(runtime_policy.get("prompt_bootstrap"))
-    if runtime_prompt_bootstrap:
-        policy = {**runtime_prompt_bootstrap, **policy}
+    runtime_request_bootstrap = _metadata_dict(runtime_policy.get("runtime_request_bootstrap"))
+    if runtime_request_bootstrap:
+        policy = {**runtime_request_bootstrap, **policy}
     payload: dict[str, object] = {}
     default_schema_ids = _metadata_string_list(policy.get("default_tool_schema_ids"))
     if default_schema_ids:
@@ -140,7 +140,7 @@ def _prompt_bootstrap_policy(metadata: dict[str, object]) -> dict[str, object]:
     if group_refs:
         payload["default_tool_schema_group_refs"] = [dict(ref) for ref in group_refs]
     if payload and "default_tool_schema_source" not in payload:
-        payload["default_tool_schema_source"] = "prompt_bootstrap_policy"
+        payload["default_tool_schema_source"] = "runtime_request_bootstrap_policy"
     return payload
 
 
@@ -242,7 +242,7 @@ def build_session_run_preparation_workflow(
     return SessionRunPreparationWorkflow(
         resolve_session_bundle=resolve_session_bundle,
         resolve_session_input_factory=lambda **kwargs: ResolveSessionInput(**kwargs),
-        prompt_flow_hint_factory=prompt_flow_hint_from_input,
+        runtime_request_flow_hint_factory=runtime_request_flow_hint_from_input,
     )
 
 

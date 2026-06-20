@@ -7,6 +7,7 @@ from typing import Any
 from crxzipple.modules.events.application import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicRecord
 from crxzipple.shared import EventDefinitionRegistry
+from crxzipple.shared.domain.events import NAMED_EVENT_TOPIC_PREFIX, named_event_topic
 from crxzipple.shared.runtime_console import TraceContext
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
@@ -107,13 +108,13 @@ class EventTraceReadModelProvider:
         trace_id: str,
         *,
         aliases: set[str] | None = None,
-        step_id: str | None = None,
+        focus_id: str | None = None,
         limit: int = 200,
     ) -> TraceSummaryView:
         events = self.list_trace_events(
             trace_id,
             aliases=aliases,
-            step_id=step_id,
+            focus_id=focus_id,
             limit=limit,
         )
         timestamps = [
@@ -150,7 +151,7 @@ class EventTraceReadModelProvider:
         trace_id: str,
         *,
         aliases: set[str] | None = None,
-        step_id: str | None = None,
+        focus_id: str | None = None,
         limit: int = 200,
     ) -> tuple[TraceEventView, ...]:
         normalized_aliases = {
@@ -158,20 +159,26 @@ class EventTraceReadModelProvider:
             for item in {trace_id, *(aliases or set())}
             if isinstance(item, str) and item.strip()
         }
-        normalized_step_id = step_id.strip() if isinstance(step_id, str) else ""
+        normalized_focus_id = focus_id.strip() if isinstance(focus_id, str) else ""
         if not normalized_aliases:
             return ()
         records: list[EventTopicRecord] = []
-        per_topic_limit = min(max(limit * 2, 50), 500)
-        for topic in self.events_service.list_event_topics():
+        per_topic_limit = _per_topic_trace_limit(
+            limit=limit,
+            focus_id=normalized_focus_id,
+        )
+        for topic in _trace_source_topics(
+            events_service=self.events_service,
+            registry=self.definition_registry,
+        ):
             for record in self.events_service.read_recent_event_topic(
                 topic,
                 limit=per_topic_limit,
             ):
                 if _record_matches_alias(record, normalized_aliases):
-                    if normalized_step_id and not _record_matches_alias(
+                    if normalized_focus_id and not _record_matches_alias(
                         record,
-                        {normalized_step_id},
+                        {normalized_focus_id},
                     ):
                         continue
                     records.append(record)
@@ -257,6 +264,46 @@ class EventTraceReadModelProvider:
             cursor=record.cursor,
             payload=payload,
         )
+
+
+def _trace_source_topics(
+    *,
+    events_service: EventsApplicationService,
+    registry: EventDefinitionRegistry,
+) -> tuple[str, ...]:
+    topics: set[str] = set()
+    for definition in registry.list_definitions():
+        definition_topics = definition.topics or (named_event_topic(definition.event_name),)
+        for topic in definition_topics:
+            normalized = _normalized_named_event_topic(topic)
+            if normalized is not None:
+                topics.add(normalized)
+    for topic in events_service.list_event_topics():
+        normalized = _normalized_named_event_topic(topic)
+        if normalized is not None:
+            topics.add(normalized)
+    return tuple(sorted(topics))
+
+
+def _per_topic_trace_limit(*, limit: int, focus_id: str) -> int:
+    if focus_id:
+        return min(max(limit // 2, 50), 100)
+    return min(max(limit, 50), 200)
+
+
+def _normalized_named_event_topic(topic: str) -> str | None:
+    if not isinstance(topic, str):
+        return None
+    normalized = topic.strip()
+    if not normalized:
+        return None
+    if "{" in normalized or "}" in normalized:
+        return None
+    if normalized == NAMED_EVENT_TOPIC_PREFIX or normalized.startswith(
+        f"{NAMED_EVENT_TOPIC_PREFIX}.",
+    ):
+        return normalized
+    return None
 
 
 def _record_matches_alias(record: EventTopicRecord, aliases: set[str]) -> bool:

@@ -13,7 +13,7 @@ class SessionRuntimeRunRecord:
     current_step: int | None = None
     max_steps: int | None = None
     waiting_reason: str | None = None
-    prompt_mode: str | None = None
+    runtime_request_mode: str | None = None
     worker_id: str | None = None
     session_key: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)

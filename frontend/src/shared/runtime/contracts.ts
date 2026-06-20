@@ -67,7 +67,7 @@ export interface UiTraceContext {
   tool_call_id?: string;
   llm_invocation_id?: string;
   llm_response_item_id?: string;
-  context_render_snapshot_id?: string;
+  request_render_snapshot_id?: string;
   session_item_id?: string;
   continuation_decision_id?: string;
   artifact_id?: string;
@@ -569,7 +569,12 @@ export interface OperationsLlmInvocationDetail {
   tone: UiTone;
   summary: UiKeyValueItem[];
   request_context: UiKeyValueItem[];
+  runtime_observations: UiKeyValueSection;
+  runtime_request_summary: Record<string, unknown>;
   request_payload: unknown;
+  provider_render_report: Record<string, unknown>;
+  provider_wire_preview: Record<string, unknown>;
+  provider_context_mapping: UiTableSection;
   result_payload: unknown;
   result_summary: string;
   error: string;
@@ -577,6 +582,7 @@ export interface OperationsLlmInvocationDetail {
   error_facts: UiKeyValueSection;
   policy_trace: UiTableSection;
   response_items: UiTableSection;
+  response_runtime_mapping: UiTableSection;
   response_events: UiTableSection;
   events: UiTableSection;
 }

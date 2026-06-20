@@ -200,7 +200,7 @@ class OrchestrationServiceSurfaceTests(unittest.TestCase):
         self.assertIn("plan_prepared_session_run", fields)
         self.assertNotIn("resolve_session_bundle", fields)
         self.assertNotIn("resolve_session_bundle_input_factory", fields)
-        self.assertNotIn("session_start_prompt_flow_hint", fields)
+        self.assertNotIn("session_start_runtime_request_flow_hint", fields)
 
     def test_prompt_and_turn_submission_depend_on_outbound_ports(self) -> None:
         self.assertTrue(hasattr(orchestration_ports, "AgentProfileCatalogPort"))
@@ -221,7 +221,7 @@ class OrchestrationServiceSurfaceTests(unittest.TestCase):
             / "modules"
             / "orchestration"
             / "application"
-            / "prompt_input.py",
+            / "runtime_llm_request_draft.py",
             REPO_ROOT
             / "src"
             / "crxzipple"

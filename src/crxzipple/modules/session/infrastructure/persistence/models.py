@@ -71,10 +71,6 @@ class SessionItemModel(Base):
         nullable=False,
         default=dict,
     )
-    model_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
-    user_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
-    chat_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
-    trace_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
     source_module: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_kind: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -82,6 +78,10 @@ class SessionItemModel(Base):
     provider_item_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     call_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    model_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
+    user_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
+    chat_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
+    trace_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
     metadata_payload: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,

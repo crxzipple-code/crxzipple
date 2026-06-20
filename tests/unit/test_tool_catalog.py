@@ -225,7 +225,9 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertEqual(missing["checks"][0]["requirement"], "agent_id")
         self.assertTrue(ready["ready"])
 
-    def test_build_tool_surface_groups_ready_functions_by_source_prompt(self) -> None:
+    def test_build_tool_surface_groups_ready_functions_by_source_runtime_request(
+        self,
+    ) -> None:
         source_id = "test.local_package.workspace_runtime"
         self.seed_tool(
             tool_id="surface_read",
@@ -254,7 +256,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
             self.assertIsNotNone(source)
             source.config = {
                 **source.config,
-                "prompt": {
+                "runtime_request": {
                     "title": "Workspace Runtime",
                     "summary": "Workspace tool surface.",
                     "groups": {

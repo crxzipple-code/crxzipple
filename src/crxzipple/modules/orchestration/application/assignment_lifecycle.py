@@ -142,12 +142,12 @@ class RunAssignmentLifecycleService:
             self.lease_manager.release_executor_assignment(worker_id=release_worker_id)
         return failed
 
-    def clear_prompt_flow_hint(self, run_id: str) -> None:
+    def clear_runtime_request_flow_hint(self, run_id: str) -> None:
         with self.uow_factory() as uow:
             run = self._get_run_from_uow(uow, run_id)
-            if "prompt_flow_hint" not in run.metadata:
+            if "runtime_request_flow_hint" not in run.metadata:
                 return
-            run.metadata.pop("prompt_flow_hint", None)
+            run.metadata.pop("runtime_request_flow_hint", None)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()

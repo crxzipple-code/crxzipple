@@ -19,25 +19,36 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmResult,
     LlmUsage,
 )
-from crxzipple.modules.llm.infrastructure.adapters.common import (
-    async_sleep_before_openai_stream_retry,
-    build_openai_continuation_signal,
-    build_openai_response_items,
-    build_openai_tool_name_aliases,
-    default_base_url,
+from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     ensure_image_input_supported,
-    httpx_response_text,
-    is_retryable_openai_stream_exception,
-    join_url,
-    openai_provider_request_preview,
-    openai_response_stream_event,
-    openai_response_input_items,
-    openai_tool_schema,
+)
+from crxzipple.modules.llm.infrastructure.adapters.http_helpers import (
     OPENAI_TRANSIENT_HTTP_STATUS_CODES,
     OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS,
     RetryableOpenAIStreamError,
+    async_sleep_before_openai_stream_retry,
+    httpx_response_text,
+    is_retryable_openai_stream_exception,
     resolve_credential_binding,
     sleep_before_openai_stream_retry,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_responses_renderer import (
+    OpenAIResponsesRenderer,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_response_projection import (
+    build_openai_continuation_signal,
+    build_openai_response_items,
+    openai_response_stream_event,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_protocol import (
+    ProviderRenderInput,
+    ProviderWireRequest,
+)
+from crxzipple.modules.llm.infrastructure.adapters.tool_schemas import (
+    build_openai_tool_name_aliases,
+)
+from crxzipple.modules.llm.infrastructure.rendering.input_projection import (
+    messages_from_projected_input_items,
 )
 from crxzipple.shared.infrastructure.http import get_async_http_client
 
@@ -45,22 +56,18 @@ from crxzipple.shared.infrastructure.http import get_async_http_client
 class OpenAIResponsesAdapter:
     DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
+    def __init__(self) -> None:
+        self._renderer = OpenAIResponsesRenderer(
+            default_base_url=self.DEFAULT_BASE_URL,
+        )
+
     def preview_request(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> dict[str, Any]:
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
-        endpoint = join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses")
-        payload = self._build_payload(
-            profile,
-            request,
-            tool_name_aliases=tool_name_aliases,
-        )
-        return openai_provider_request_preview(
-            profile=profile,
-            endpoint=endpoint,
-            payload=payload,
+        return self._renderer.preview_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
         )
 
     def invoke(
@@ -136,7 +143,8 @@ class OpenAIResponsesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> Iterator[LlmStreamEvent]:
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        tool_name_aliases = build_openai_tool_name_aliases(render_input.tool_schemas)
         alias_to_original = {
             alias: original
             for original, alias in tool_name_aliases.items()
@@ -150,6 +158,7 @@ class OpenAIResponsesAdapter:
                 response = self._open_stream(
                     profile,
                     request,
+                    render_input=render_input,
                     tool_name_aliases=tool_name_aliases,
                 )
                 for event in self._stream_sse_response(
@@ -181,7 +190,8 @@ class OpenAIResponsesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> AsyncIterator[LlmStreamEvent]:
-        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
+        render_input = ProviderRenderInput.from_request(profile=profile, request=request)
+        tool_name_aliases = build_openai_tool_name_aliases(render_input.tool_schemas)
         alias_to_original = {
             alias: original
             for original, alias in tool_name_aliases.items()
@@ -191,21 +201,26 @@ class OpenAIResponsesAdapter:
         while True:
             emitted_output = False
             try:
-                url, headers, payload = self._stream_request(
+                wire_request = self._wire_request(
                     profile,
                     request,
+                    render_input=render_input,
                     tool_name_aliases=tool_name_aliases,
                 )
                 client = get_async_http_client(
-                    url,
+                    wire_request.endpoint,
                     timeout=profile.timeout_seconds,
                     client_factory=httpx.AsyncClient,
                 )
                 async with client.stream(
                     "POST",
-                    url,
-                    headers=headers,
-                    json=payload,
+                    wire_request.endpoint,
+                    headers=self._request_headers(
+                        profile,
+                        request,
+                        render_input=render_input,
+                    ),
+                    json=wire_request.payload,
                 ) as response:
                     async for event in self._stream_sse_response_async(
                         profile,
@@ -232,29 +247,37 @@ class OpenAIResponsesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
         *,
+        render_input: ProviderRenderInput | None = None,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> requests.Response:
-        url, headers, payload = self._stream_request(
+        wire_request = self._wire_request(
             profile,
             request,
+            render_input=render_input,
             tool_name_aliases=tool_name_aliases,
         )
-        return requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
-            stream=True,
+        return self._send_stream_wire_request(
+            profile,
+            request,
+            wire_request,
+            render_input=render_input,
         )
 
-    def _stream_request(
+    def _request_headers(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
         *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> tuple[str, dict[str, str], dict[str, Any]]:
-        ensure_image_input_supported(profile, request.messages)
+        render_input: ProviderRenderInput | None = None,
+    ) -> dict[str, str]:
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        ensure_image_input_supported(
+            profile,
+            messages_from_projected_input_items(model_input.input_items),
+        )
         token = resolve_credential_binding(
             profile.credential_binding_id,
             required=profile.provider.value == "openai",
@@ -267,17 +290,46 @@ class OpenAIResponsesAdapter:
         }
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
+        return headers
 
-        payload = self._build_payload(
-            profile,
-            request,
-            tool_name_aliases=tool_name_aliases,
+    def _send_stream_wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        wire_request: ProviderWireRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+    ) -> requests.Response:
+        return requests.post(
+            wire_request.endpoint,
+            headers=self._request_headers(
+                profile,
+                request,
+                render_input=render_input,
+            ),
+            json=wire_request.payload,
+            timeout=profile.timeout_seconds,
+            stream=True,
         )
 
-        return (
-            join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses"),
-            headers,
-            payload,
+    def _wire_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        render_input: ProviderRenderInput | None = None,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> ProviderWireRequest:
+        del tool_name_aliases
+        model_input = render_input or ProviderRenderInput.from_request(
+            profile=profile,
+            request=request,
+        )
+        rendered = self._renderer.render_input(model_input)
+        return ProviderWireRequest.from_rendered(
+            renderer_id=self._renderer.renderer_id,
+            rendered=rendered,
+            preview=self._renderer.preview_input(model_input),
         )
 
     def _build_payload(
@@ -287,43 +339,10 @@ class OpenAIResponsesAdapter:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": profile.model_name,
-            "input": openai_response_input_items(
-                request.messages,
-                tool_name_aliases=tool_name_aliases,
-                continuation_delta_only=_uses_provider_native_continuation(request),
-            ),
-        }
-        _apply_provider_continuation(payload, request)
-        if request.tool_schemas:
-            payload["tools"] = [
-                openai_tool_schema(tool, tool_name_aliases=tool_name_aliases)
-                for tool in request.tool_schemas
-            ]
-        if request.response_format is not None:
-            payload["text"] = {"format": dict(request.response_format)}
-
-        defaults = profile.default_params
-        if defaults.temperature is not None:
-            payload["temperature"] = defaults.temperature
-        if defaults.top_p is not None:
-            payload["top_p"] = defaults.top_p
-        if defaults.max_output_tokens is not None:
-            payload["max_output_tokens"] = defaults.max_output_tokens
-        reasoning = _merged_reasoning_payload(
-            defaults_reasoning_effort=defaults.reasoning_effort,
-            override_reasoning=request.overrides.get("reasoning"),
+        return self._renderer.build_payload_input(
+            ProviderRenderInput.from_request(profile=profile, request=request),
+            tool_name_aliases=tool_name_aliases,
         )
-        if reasoning:
-            payload["reasoning"] = reasoning
-
-        for key, value in request.overrides.items():
-            if key not in {"model", "input", "tools", "reasoning"}:
-                payload[key] = value
-
-        payload["stream"] = True
-        return payload
 
     @classmethod
     def _stream_sse_response(
@@ -680,40 +699,3 @@ def _continuation_from_completed_event(
     if not isinstance(payload, dict):
         return None
     return LlmContinuationSignal.from_payload(payload)
-
-
-def _merged_reasoning_payload(
-    *,
-    defaults_reasoning_effort: str | None,
-    override_reasoning: object,
-) -> dict[str, Any]:
-    reasoning: dict[str, Any] = {}
-    if defaults_reasoning_effort is not None:
-        reasoning["effort"] = defaults_reasoning_effort
-    if isinstance(override_reasoning, dict):
-        reasoning.update(override_reasoning)
-    return reasoning
-
-
-def _apply_provider_continuation(
-    payload: dict[str, Any],
-    request: LlmAdapterRequest,
-) -> None:
-    continuation = request.continuation
-    if continuation is None:
-        return
-    if continuation.mode != "provider_native":
-        return
-    if continuation.previous_response_id is None:
-        return
-    payload["type"] = "response.create"
-    payload["previous_response_id"] = continuation.previous_response_id
-
-
-def _uses_provider_native_continuation(request: LlmAdapterRequest) -> bool:
-    continuation = request.continuation
-    return (
-        continuation is not None
-        and continuation.mode == "provider_native"
-        and continuation.previous_response_id is not None
-    )

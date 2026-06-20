@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 from collections.abc import Mapping
 
@@ -8,7 +9,11 @@ import typer
 from crxzipple.interfaces.authorization import authorize_llm_action
 from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
-from crxzipple.modules.llm.application import InvokeLlmInput, RegisterLlmProfileInput
+from crxzipple.modules.llm.application import (
+    InvokeLlmInput,
+    RegisterLlmProfileInput,
+    WarmupLlmProfileInput,
+)
 from crxzipple.modules.llm.application.services import (
     register_llm_profile_input_from_config,
 )
@@ -414,6 +419,29 @@ def build_cli() -> typer.Typer:
         )
         echo_data(LlmInvocationDTO.from_entity(invocation))
 
+    @app.command("warmup")
+    def warmup_profile(
+        ctx: typer.Context,
+        llm_id: str = typer.Argument(..., help="LLM identifier."),
+    ) -> None:
+        container = ensure_container(ctx)
+        authorize_llm_action(
+            container,
+            llm_id=llm_id,
+            action="llm.warmup",
+            interface_name="cli",
+        )
+        result = container.require(AppKey.LLM_SERVICE).warmup_profile(
+            WarmupLlmProfileInput(llm_id=llm_id),
+        )
+        echo_data(
+            {
+                "llm_id": result.llm_id,
+                "status": result.status,
+                "details": dict(result.details),
+            },
+        )
+
     @app.command("invocations")
     def list_invocations(
         ctx: typer.Context,
@@ -435,4 +463,99 @@ def build_cli() -> typer.Typer:
         invocation = container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id)
         echo_data(LlmInvocationDTO.from_entity(invocation))
 
+    @app.command("request-preview")
+    def request_preview(
+        ctx: typer.Context,
+        invocation_id: str = typer.Argument(..., help="Invocation identifier."),
+        include_provider_preview: bool = typer.Option(
+            False,
+            "--include-provider-preview",
+            help="Include the stored redacted provider request preview payload.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        invocation = container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id)
+        echo_data(
+            _invocation_request_preview_report(
+                invocation,
+                include_provider_preview=include_provider_preview,
+            ),
+        )
+
     return app
+
+
+def _invocation_request_preview_report(
+    invocation: object,
+    *,
+    include_provider_preview: bool = False,
+) -> dict[str, object]:
+    preview = dict(getattr(invocation, "provider_request_payload_preview", {}) or {})
+    input_items = tuple(getattr(invocation, "input_items", ()) or ())
+    messages = tuple(getattr(invocation, "messages", ()) or ())
+    provider_context_messages = tuple(
+        getattr(invocation, "provider_context_messages", ()) or (),
+    )
+    tool_schemas = tuple(getattr(invocation, "tool_schemas", ()) or ())
+    request_metadata = dict(getattr(invocation, "request_metadata", {}) or {})
+    continuation = getattr(invocation, "continuation", None)
+    input_kind_counts = Counter(
+        str(getattr(item.kind, "value", item.kind)) for item in input_items
+    )
+    message_role_counts = Counter(
+        str(getattr(message.role, "value", message.role)) for message in messages
+    )
+    provider_context_role_counts = Counter(
+        str(getattr(message.role, "value", message.role))
+        for message in provider_context_messages
+    )
+    report: dict[str, object] = {
+        "invocation_id": getattr(invocation, "id", ""),
+        "llm_id": getattr(invocation, "llm_id", ""),
+        "status": str(
+            getattr(
+                getattr(invocation, "status", None),
+                "value",
+                getattr(invocation, "status", ""),
+            ),
+        ),
+        "provider_request_id": getattr(invocation, "provider_request_id", None),
+        "transport": preview.get("transport") or preview.get("provider_transport"),
+        "renderer": preview.get("renderer"),
+        "render_strategy": preview.get("render_strategy"),
+        "message_type": preview.get("message_type"),
+        "has_previous_response_id": bool(preview.get("has_previous_response_id")),
+        "input_delta_mode": bool(preview.get("input_delta_mode")),
+        "input_baseline_count": preview.get("input_baseline_count"),
+        "input_delta_count": preview.get("input_delta_count"),
+        "canonical_input_item_count": len(input_items),
+        "canonical_input_item_kind_counts": dict(sorted(input_kind_counts.items())),
+        "message_count": len(messages),
+        "message_role_counts": dict(sorted(message_role_counts.items())),
+        "provider_context_message_count": len(provider_context_messages),
+        "provider_context_role_counts": dict(
+            sorted(provider_context_role_counts.items()),
+        ),
+        "provider_input_item_count": preview.get("input_item_count"),
+        "provider_input_item_kinds": preview.get("input_item_kinds", []),
+        "tool_schema_count": len(tool_schemas),
+        "tool_schema_names": [
+            getattr(schema, "name", "")
+            for schema in tool_schemas
+            if str(getattr(schema, "name", "")).strip()
+        ],
+        "preview_tool_count": preview.get("tool_count"),
+        "preview_tool_names": preview.get("tool_names", []),
+        "request_metadata_keys": sorted(str(key) for key in request_metadata),
+        "request_render_snapshot_id": request_metadata.get(
+            "request_render_snapshot_id",
+        ),
+        "continuation": (
+            continuation.to_payload()
+            if hasattr(continuation, "to_payload")
+            else None
+        ),
+    }
+    if include_provider_preview:
+        report["provider_request_payload_preview"] = preview
+    return report

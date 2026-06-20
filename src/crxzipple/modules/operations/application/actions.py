@@ -62,6 +62,7 @@ class OperationsActionService:
     channel_runtime_manager: Any
     daemon_manager: Any | None = None
     tool_service: Any | None = None
+    llm_service: Any | None = None
     skill_manager: Any | None = None
     access_service: Any | None = None
     access_inventory_collector: Any | None = None
@@ -235,6 +236,15 @@ class OperationsActionService:
             self.tool_service,
             "tool run control service",
         ).retry_tool_run(run_id)
+
+    def warmup_llm_profile(self, *, llm_id: str, reason: str | None = None) -> Any:
+        del reason
+        from crxzipple.modules.llm.application import WarmupLlmProfileInput
+
+        return _required_dependency(
+            self.llm_service,
+            "llm service",
+        ).warmup_profile(WarmupLlmProfileInput(llm_id=llm_id))
 
     def prune_expired_tool_workers(
         self,

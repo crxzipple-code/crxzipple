@@ -10,7 +10,7 @@ from crxzipple.modules.skills.application.events import (
 from crxzipple.modules.skills.application.governance_service import SkillGovernanceService
 from crxzipple.modules.skills.application.models import (
     InstalledSkill,
-    SkillCatalogPrompt,
+    SkillRuntimeRequestCatalog,
     SkillCreateRequest,
     SkillDraft,
     SkillDraftAuditRecord,
@@ -41,9 +41,9 @@ from crxzipple.modules.skills.application.owner_state import (
     SkillOwnerStateService,
 )
 from crxzipple.modules.skills.application.package_service import SkillPackageService
-from crxzipple.modules.skills.application.prompt_resolver import (
-    SkillPromptResolution,
-    SkillPromptResolver,
+from crxzipple.modules.skills.application.runtime_request_resolver import (
+    SkillRuntimeRequestResolution,
+    SkillRuntimeRequestResolver,
     SkillToolReadinessPort,
 )
 from crxzipple.modules.skills.application.readiness_service import SkillReadinessService
@@ -64,7 +64,8 @@ class SkillManager(
     repository: SkillRepositoryPort
     owner_catalog_repository: SkillOwnerCatalogRepositoryPort | None = None
     event_emitter: SkillEventEmitter | None = None
-    prompt_resolver: SkillPromptResolver = field(default_factory=SkillPromptResolver)
+    runtime_request_resolver: SkillRuntimeRequestResolver = field(default_factory=SkillRuntimeRequestResolver)
+    persist_runtime_request_readiness: bool = True
     tool_readiness_port: SkillToolReadinessPort | None = None
     owner_state: SkillOwnerStateService | None = None
     catalog_service: SkillCatalogService | None = None
@@ -85,7 +86,10 @@ class SkillManager(
             self.catalog_service = SkillCatalogService(
                 repository=self.repository,
                 owner_state=self.owner_state,
-                prompt_resolver=self.prompt_resolver,
+                runtime_request_resolver=self.runtime_request_resolver,
+                persist_runtime_request_readiness=(
+                    self.persist_runtime_request_readiness
+                ),
             )
         assert self.catalog_service is not None
         if self.source_service is None:
@@ -115,7 +119,7 @@ class SkillManager(
             self.readiness_service = SkillReadinessService(
                 catalog_service=self.catalog_service,
                 owner_state=self.owner_state,
-                prompt_resolver=self.prompt_resolver,
+                runtime_request_resolver=self.runtime_request_resolver,
                 tool_readiness_port=self.tool_readiness_port,
             )
         if self.authoring_service is None:
@@ -126,7 +130,7 @@ class SkillManager(
                     else None
                 ),
                 package_service=self.package_service,
-                prompt_resolver=self.prompt_resolver,
+                runtime_request_resolver=self.runtime_request_resolver,
                 tool_readiness_port=self.tool_readiness_port,
                 event_emitter=self.event_emitter,
             )
@@ -194,19 +198,19 @@ class SkillManager(
             path=path,
         )
 
-    def build_prompt_catalog(
+    def build_runtime_request_catalog(
         self,
         *,
         workspace_dir: str | None,
         surface: str,
-    ) -> SkillCatalogPrompt | None:
+    ) -> SkillRuntimeRequestCatalog | None:
         assert self.catalog_service is not None
-        return self.catalog_service.build_prompt_catalog(
+        return self.catalog_service.build_runtime_request_catalog(
             workspace_dir=workspace_dir,
             surface=surface,
         )
 
-    def resolve_prompt_catalog(
+    def resolve_runtime_request_catalog(
         self,
         *,
         workspace_dir: str | None,
@@ -217,9 +221,9 @@ class SkillManager(
         run_id: str | None = None,
         session_key: str | None = None,
         active_session_id: str | None = None,
-    ) -> SkillPromptResolution:
+    ) -> SkillRuntimeRequestResolution:
         assert self.catalog_service is not None
-        return self.catalog_service.resolve_prompt_catalog(
+        return self.catalog_service.resolve_runtime_request_catalog(
             workspace_dir=workspace_dir,
             surface=surface,
             available_tool_ids=available_tool_ids,

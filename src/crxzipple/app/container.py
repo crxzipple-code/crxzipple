@@ -43,6 +43,7 @@ def build_app_container(
     *,
     target: AssemblyTarget | str,
     overrides: Mapping[str, object] | None = None,
+    run_activation_tasks: bool = True,
 ) -> AppContainer:
     resolved_target = AssemblyTarget.parse(target)
     return AppContainer(
@@ -51,6 +52,7 @@ def build_app_container(
             plan,
             target=resolved_target,
             overrides=overrides,
+            run_activation_tasks=run_activation_tasks,
         ),
     )
 

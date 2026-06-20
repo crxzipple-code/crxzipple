@@ -59,10 +59,27 @@ LlmResult
 | Message phase | `commentary` / `final_answer` 等阶段 | 未一等化 |
 | Response item lifecycle | item added/delta/done/completed | 未一等化 |
 | Continuation signal | `end_turn=false` / needs follow-up | 未一等化 |
+| Provider-native continuation transport | provider 是否支持用原生 response state 承接下一轮 | OpenAI Responses HTTP 已支持；Codex HTTP 不支持；Codex WebSocket 同步/async 桥接路径已支持 |
+| Incremental input | provider-native continuation 下是否只发送新增 input delta | Codex WebSocket input-item prefix、instructions、tool schema fingerprint 已支持 |
 | Hosted builtin tools | provider 自带 web/image/search 等 | 不作为 CRXZipple Tool Source 默认路线 |
 | Prompt cache / service tier | provider 请求优化参数 | 部分通过 `extra_body` 或 adapter 支持 |
 
 ## OpenAI Responses / Codex Responses
+
+### Continuation Transport Matrix
+
+验证日期：2026-06-14。
+
+| API family / transport | `previous_response_id` 支持 | input 形态 | CRXZipple 状态 | 依据 |
+| --- | --- | --- | --- | --- |
+| `openai_responses` HTTP | 支持 | HTTP Responses payload 顶层 `previous_response_id` + provider input | 已支持，transport 标记为 `http` | 本仓 adapter 与单测 |
+| `openai_codex_responses` HTTP | 不支持 | HTTP `/backend-api/codex/responses` full request | 已禁止发送 `previous_response_id`，防止 `Unsupported parameter` | Codex 源码 `ResponsesApiRequest` 无字段；本地实测错误 |
+| `openai_codex_responses` WebSocket | 支持 | WebSocket `response.create(previous_response_id + delta input)` | 同步 adapter 与事件级 async bridge 已实现；input-item prefix、instructions、tool schema fingerprint fallback 已实现；warmup/reuse 待补 | `/Users/crxzy/Documents/codex` 中 `ResponseCreateWsRequest` 与 WebSocket continuation test；本仓 adapter 单测 |
+
+结论：不能只按 `api_family` 判断 provider-native continuation。是否能发送
+`previous_response_id` 必须同时看 provider family、transport 和 request schema。
+Codex-like continuation 要走 WebSocket transport；Codex HTTP profile 在 WebSocket
+完成前只能使用完整 request / tool-result replay。
 
 ### Provider Input Shape
 

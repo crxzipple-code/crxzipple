@@ -140,6 +140,7 @@ def _local_package_candidates(
     return tuple(
         _candidate_from_local_handler(source, plan, handler)
         for handler in plan.local_handlers
+        if handler.tool.enabled
     )
 
 
@@ -246,8 +247,8 @@ def _source_config(plan: ToolPackagePlan) -> dict[str, Any]:
         "manifest_path": plan.manifest_path,
         "capability_ids": list(plan.capability_ids),
     }
-    if plan.prompt:
-        payload["prompt"] = _stable_payload(plan.prompt)
+    if plan.runtime_request:
+        payload["runtime_request"] = _stable_payload(plan.runtime_request)
     if plan.local_handlers:
         payload["local_tools"] = [
             {
@@ -257,6 +258,7 @@ def _source_config(plan: ToolPackagePlan) -> dict[str, Any]:
                 "capability_ids": list(handler.capability_ids),
             }
             for handler in plan.local_handlers
+            if handler.tool.enabled
         ]
     if plan.remote_runtimes:
         payload["remote_runtimes"] = [

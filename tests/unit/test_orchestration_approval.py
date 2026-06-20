@@ -826,20 +826,15 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         assert completed is not None
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertGreaterEqual(len(adapter.requests), 3)
+        flow_context = _request_flow_context_text(adapter.requests[-1])
+        self.assertIn("Flow: Approval Resume", flow_context)
+        self.assertIn("approved the requested additional access", flow_context)
+        self.assertIn("valid only for the current turn", flow_context)
         resume_system_messages = [
             message
             for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        context_tree_message = next(
-            message
-            for message in resume_system_messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
-        )
-        self.assertIn("run.flow", str(context_tree_message.content))
-        self.assertIn("Flow: Approval Resume", str(context_tree_message.content))
-        self.assertIn("approved the requested additional access", str(context_tree_message.content))
-        self.assertIn("valid only for the current turn", str(context_tree_message.content))
         self.assertFalse(
             any("# Approval Update" in str(message.content) for message in resume_system_messages),
         )
@@ -1227,19 +1222,14 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         assert completed is not None
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(completed.result_payload["output_text"], "fallback after denial")
+        flow_context = _request_flow_context_text(adapter.requests[-1])
+        self.assertIn("Flow: Approval Denied", flow_context)
+        self.assertIn("denied the requested additional access", flow_context)
         denied_system_messages = [
             message
             for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        context_tree_message = next(
-            message
-            for message in denied_system_messages
-            if message.metadata.get("prompt_block_kind") == "context_workspace"
-        )
-        self.assertIn("run.flow", str(context_tree_message.content))
-        self.assertIn("Flow: Approval Denied", str(context_tree_message.content))
-        self.assertIn("denied the requested additional access", str(context_tree_message.content))
         self.assertFalse(
             any("# Approval Update" in str(message.content) for message in denied_system_messages),
         )

@@ -532,10 +532,17 @@ class SqlAlchemyOrchestrationRunRepository:
         self,
         *,
         status: OrchestrationRunStatus | None = None,
+        session_key: str | None = None,
     ) -> list[OrchestrationRun]:
         statement = select(OrchestrationRunModel)
         if status is not None:
             statement = statement.where(OrchestrationRunModel.status == status.value)
+        normalized_session_key = (session_key or "").strip()
+        if normalized_session_key:
+            statement = statement.where(
+                OrchestrationRunModel.metadata_payload["session_key"].as_string()
+                == normalized_session_key,
+            )
         models = self.session.scalars(
             statement.order_by(
                 OrchestrationRunModel.created_at.desc(),

@@ -106,8 +106,6 @@ BrowserPageActionKind: TypeAlias = Literal[
     "code-search",
     "script-inspect",
     "script-extract-request",
-    "runtime-probe-client",
-    "runtime-call-client",
     "cdp-raw",
 ]
 BrowserNetworkCaptureStatus: TypeAlias = Literal["active", "stopped"]

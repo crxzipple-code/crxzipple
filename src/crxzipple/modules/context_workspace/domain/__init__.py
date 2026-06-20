@@ -1,13 +1,14 @@
 from crxzipple.modules.context_workspace.domain.entities import (
     ContextNode,
-    ContextRenderSnapshot,
+    ContextRequestRenderSnapshot,
+    ContextSnapshot,
     ContextTreeOperation,
     ContextWorkspace,
 )
 from crxzipple.modules.context_workspace.domain.exceptions import (
     ContextActionNotAllowedError,
     ContextNodeNotFoundError,
-    ContextRenderSnapshotNotFoundError,
+    ContextSnapshotNotFoundError,
     ContextWorkspaceError,
     ContextWorkspaceNotFoundError,
     ContextWorkspaceValidationError,
@@ -15,7 +16,8 @@ from crxzipple.modules.context_workspace.domain.exceptions import (
 from crxzipple.modules.context_workspace.domain.repositories import (
     ContextNodeRepository,
     ContextOperationRepository,
-    ContextRenderSnapshotRepository,
+    ContextRequestRenderSnapshotRepository,
+    ContextSnapshotRepository,
     ContextWorkspaceRepository,
 )
 from crxzipple.modules.context_workspace.domain.value_objects import (
@@ -36,12 +38,14 @@ __all__ = [
     "ContextNode",
     "ContextNodeNotFoundError",
     "ContextNodeRepository",
+    "ContextRequestRenderSnapshot",
+    "ContextRequestRenderSnapshotRepository",
     "ContextNodeSeed",
     "ContextNodeState",
     "ContextOperationRepository",
-    "ContextRenderSnapshot",
-    "ContextRenderSnapshotNotFoundError",
-    "ContextRenderSnapshotRepository",
+    "ContextSnapshot",
+    "ContextSnapshotNotFoundError",
+    "ContextSnapshotRepository",
     "ContextTreeOperation",
     "ContextWorkspace",
     "ContextWorkspaceError",

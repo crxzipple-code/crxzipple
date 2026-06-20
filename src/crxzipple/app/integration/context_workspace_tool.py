@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import logging
 from typing import Protocol
 from urllib.parse import quote
 
@@ -14,11 +15,12 @@ from crxzipple.modules.context_workspace.domain import (
     ContextNodeSeed,
     ContextNodeState,
 )
-from crxzipple.modules.tool.application import ToolPromptBundle, ToolPromptBundleGroup
+from crxzipple.modules.tool.application import ToolRuntimeRequestBundle, ToolRuntimeRequestBundleGroup
 from crxzipple.modules.tool.domain import Tool
 
 
-TOOL_CONTEXT_PROMPT_REVISION = "2026-06-09.tool_prompt_budget.v1"
+TOOL_CONTEXT_RUNTIME_REQUEST_REVISION = "2026-06-09.tool_runtime_request_budget.v1"
+_LOGGER = logging.getLogger(__name__)
 
 
 class ToolContextService(Protocol):
@@ -29,11 +31,11 @@ class ToolContextService(Protocol):
         ...
 
 
-class ToolPromptCatalog(Protocol):
-    def list_prompt_bundles(
+class ToolRuntimeRequestCatalog(Protocol):
+    def list_runtime_request_bundles(
         self,
         function_ids: Iterable[str],
-    ) -> tuple[ToolPromptBundle, ...]:
+    ) -> tuple[ToolRuntimeRequestBundle, ...]:
         ...
 
 
@@ -43,10 +45,10 @@ class ToolContextNodeProvider:
     def __init__(
         self,
         tool_service: ToolContextService,
-        prompt_catalog: ToolPromptCatalog,
+        runtime_request_catalog: ToolRuntimeRequestCatalog,
     ) -> None:
         self._tool_service = tool_service
-        self._prompt_catalog = prompt_catalog
+        self._runtime_request_catalog = runtime_request_catalog
 
     def children(
         self,
@@ -55,7 +57,7 @@ class ToolContextNodeProvider:
         if request.node.id == "tools.available":
             bundles = _available_bundles(
                 request.workspace.metadata,
-                self._prompt_catalog,
+                self._runtime_request_catalog,
             )
             return tuple(
                 _tool_bundle_node_seed(
@@ -72,7 +74,7 @@ class ToolContextNodeProvider:
             return ()
         bundles = _available_bundles(
             request.workspace.metadata,
-            self._prompt_catalog,
+            self._runtime_request_catalog,
         )
         bundle = next(
             (item for item in bundles if item.source_id == source_id),
@@ -133,7 +135,7 @@ _TOOL_BUNDLE_ACTIONS = (
 
 
 def _tool_bundle_node_seed(
-    bundle: ToolPromptBundle,
+    bundle: ToolRuntimeRequestBundle,
     *,
     parent_id: str,
     display_order: int,
@@ -157,7 +159,7 @@ def _tool_bundle_node_seed(
             "function_count": bundle.function_count,
         },
         estimate=_text_estimate(summary),
-        revision=TOOL_CONTEXT_PROMPT_REVISION,
+        revision=TOOL_CONTEXT_RUNTIME_REQUEST_REVISION,
         display_order=display_order,
         metadata={
             "source_id": bundle.source_id,
@@ -172,8 +174,8 @@ def _tool_bundle_node_seed(
 
 
 def _tool_bundle_group_node_seed(
-    bundle: ToolPromptBundle,
-    group: ToolPromptBundleGroup,
+    bundle: ToolRuntimeRequestBundle,
+    group: ToolRuntimeRequestBundleGroup,
     *,
     parent_id: str,
     display_order: int,
@@ -198,7 +200,7 @@ def _tool_bundle_group_node_seed(
             "function_ids": list(group.function_ids),
         },
         estimate=_text_estimate(summary),
-        revision=TOOL_CONTEXT_PROMPT_REVISION,
+        revision=TOOL_CONTEXT_RUNTIME_REQUEST_REVISION,
         display_order=display_order,
         metadata={
             "source_id": bundle.source_id,
@@ -211,7 +213,7 @@ def _tool_bundle_group_node_seed(
     )
 
 
-def _bundle_summary(bundle: ToolPromptBundle) -> str:
+def _bundle_summary(bundle: ToolRuntimeRequestBundle) -> str:
     parts = [
         bundle.summary.strip(),
         f"Contains {bundle.function_count} tool "
@@ -228,7 +230,7 @@ def _bundle_summary(bundle: ToolPromptBundle) -> str:
     return " ".join(part for part in parts if part)
 
 
-def _bundle_group_summary(group: ToolPromptBundleGroup) -> str:
+def _bundle_group_summary(group: ToolRuntimeRequestBundleGroup) -> str:
     parts = [
         group.summary.strip(),
         f"Contains {group.function_count} tool "
@@ -237,25 +239,20 @@ def _bundle_group_summary(group: ToolPromptBundleGroup) -> str:
     return " ".join(part for part in parts if part)
 
 
-def _bundle_collapsed(bundle: ToolPromptBundle) -> bool:
-    return not bundle.source_id.endswith(".context_tree")
+def _bundle_collapsed(bundle: ToolRuntimeRequestBundle) -> bool:
+    return True
 
 
 def _bundle_group_collapsed(
-    bundle: ToolPromptBundle,
-    group: ToolPromptBundleGroup,
+    bundle: ToolRuntimeRequestBundle,
+    group: ToolRuntimeRequestBundleGroup,
 ) -> bool:
-    if (
-        bundle.source_id.endswith(".context_tree")
-        and bool(group.metadata.get("auto_source_group"))
-    ):
-        return False
     return True
 
 
 def _tool_bundle_children(
     *,
-    bundle: ToolPromptBundle,
+    bundle: ToolRuntimeRequestBundle,
     tools_by_id: dict[str, Tool],
     parent_id: str,
 ) -> tuple[ContextNodeSeed, ...]:
@@ -300,7 +297,7 @@ def _tool_bundle_children(
     return (*seeds, *direct_children)
 
 
-def _is_auto_source_group(group: ToolPromptBundleGroup) -> bool:
+def _is_auto_source_group(group: ToolRuntimeRequestBundleGroup) -> bool:
     return bool(group.metadata.get("auto_source_group"))
 
 
@@ -379,7 +376,7 @@ def _tool_node_seed(
             "runtime_key": tool.resolved_runtime_key(),
         },
         estimate=_tool_estimate(tool, summary),
-        revision=TOOL_CONTEXT_PROMPT_REVISION,
+        revision=TOOL_CONTEXT_RUNTIME_REQUEST_REVISION,
         display_order=display_order,
         metadata={
             "display_name": tool.name,
@@ -390,7 +387,6 @@ def _tool_node_seed(
             "context_requirements": list(tool.context_requirements),
             "capability_ids": list(tool.capability_ids),
             "schema_default_enabled": _schema_enabled_by_default(tool),
-            "provider_schema": _provider_tool_schema(tool),
         },
     )
 
@@ -424,7 +420,7 @@ def _cli_source_node_seed(
             "hidden_function_ids": list(hidden_function_ids),
         },
         estimate=_text_estimate(summary),
-        revision=TOOL_CONTEXT_PROMPT_REVISION,
+        revision=TOOL_CONTEXT_RUNTIME_REQUEST_REVISION,
         display_order=display_order,
         metadata={
             "source_kind": "cli",
@@ -437,16 +433,26 @@ def _cli_source_node_seed(
 
 def _available_bundles(
     metadata: dict[str, object],
-    prompt_catalog: ToolPromptCatalog,
-) -> tuple[ToolPromptBundle, ...]:
-    return prompt_catalog.list_prompt_bundles(_available_tool_names(metadata))
+    runtime_request_catalog: ToolRuntimeRequestCatalog,
+) -> tuple[ToolRuntimeRequestBundle, ...]:
+    try:
+        return runtime_request_catalog.list_runtime_request_bundles(
+            _available_tool_names(metadata),
+        )
+    except Exception:
+        _LOGGER.warning("failed to list context workspace tool bundles", exc_info=True)
+        return ()
 
 
 def _available_tools_by_id(
     metadata: dict[str, object],
     tool_service: ToolContextService,
 ) -> dict[str, Tool]:
-    return tool_service.get_tools(_available_tool_names(metadata))
+    try:
+        return tool_service.get_tools(_available_tool_names(metadata))
+    except Exception:
+        _LOGGER.warning("failed to list context workspace tools", exc_info=True)
+        return {}
 
 
 def _available_tool_names(metadata: dict[str, object]) -> tuple[str, ...]:
@@ -498,11 +504,7 @@ def _sort_tools(tools: Iterable[Tool]) -> tuple[Tool, ...]:
 
 
 def _schema_enabled_by_default(tool: Tool) -> bool:
-    return (
-        tool.id.startswith("context_tree.")
-        or tool.source_id.endswith(".context_tree")
-        or "context_tree" in tool.tags
-    )
+    return tool.id == "capability.search"
 
 
 def _optional_text(value: object) -> str | None:
@@ -543,48 +545,6 @@ def _text_estimate(text: str) -> ContextEstimate:
         text_chars=len(normalized),
         text_tokens=max((len(normalized) + 3) // 4, 1) if normalized else 0,
     )
-
-
-def _provider_tool_schema(tool: Tool) -> dict[str, object]:
-    properties: dict[str, object] = {}
-    required: list[str] = []
-    for parameter in tool.parameters:
-        schema = _parameter_schema(parameter.data_type)
-        schema["description"] = parameter.description
-        properties[parameter.name] = schema
-        if parameter.required:
-            required.append(parameter.name)
-    input_schema: dict[str, object] = {
-        "type": "object",
-        "properties": properties,
-        "additionalProperties": True,
-    }
-    if required:
-        input_schema["required"] = required
-    return {
-        "name": tool.id,
-        "description": tool.description,
-        "input_schema": input_schema,
-    }
-
-
-def _parameter_schema(data_type: str) -> dict[str, object]:
-    normalized = data_type.strip().lower()
-    if normalized.startswith("array[") and normalized.endswith("]"):
-        item_type = normalized[6:-1].strip() or "string"
-        return {
-            "type": "array",
-            "items": _parameter_schema(item_type),
-        }
-    if normalized in {"integer", "int"}:
-        return {"type": "integer"}
-    if normalized in {"number", "float", "double"}:
-        return {"type": "number"}
-    if normalized in {"boolean", "bool"}:
-        return {"type": "boolean"}
-    if normalized in {"object", "json"}:
-        return {"type": "object"}
-    return {"type": "string"}
 
 
 def _truncate(value: str, limit: int) -> str:

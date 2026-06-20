@@ -41,10 +41,10 @@ from crxzipple.modules.skills.application.package_service import SkillPackageSer
 from crxzipple.modules.skills.application.ports import (
     SkillAuthoringDraftRepositoryPort,
 )
-from crxzipple.modules.skills.application.prompt_resolver import (
+from crxzipple.modules.skills.application.runtime_request_resolver import (
     ResolvedSkillReadiness,
-    SkillPromptResolutionContext,
-    SkillPromptResolver,
+    SkillRuntimeRequestResolutionContext,
+    SkillRuntimeRequestResolver,
     SkillToolReadinessPort,
 )
 from crxzipple.modules.skills.domain import (
@@ -63,7 +63,7 @@ _DEFAULT_DRAFT_TTL_DAYS = 30
 class SkillAuthoringService:
     draft_repository: SkillAuthoringDraftRepositoryPort | None
     package_service: SkillPackageService
-    prompt_resolver: SkillPromptResolver = field(default_factory=SkillPromptResolver)
+    runtime_request_resolver: SkillRuntimeRequestResolver = field(default_factory=SkillRuntimeRequestResolver)
     tool_readiness_port: SkillToolReadinessPort | None = None
     event_emitter: SkillEventEmitter | None = None
 
@@ -480,10 +480,10 @@ class SkillAuthoringService:
                 missing_effects=missing_effects,
                 unsupported_platforms=unsupported_platform_values,
             )
-        resolution = self.prompt_resolver.resolve(
+        resolution = self.runtime_request_resolver.resolve(
             (_draft_package(draft),),
             available_tool_ids=self.tool_readiness_port.list_available_tool_ids(),
-            context=SkillPromptResolutionContext(
+            context=SkillRuntimeRequestResolutionContext(
                 workspace_dir=draft.workspace_dir,
             ),
         )

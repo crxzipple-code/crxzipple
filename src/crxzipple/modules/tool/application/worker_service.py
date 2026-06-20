@@ -1521,7 +1521,7 @@ def _artifact_result_envelope(
         omitted_count=len(artifacts),
         omitted_chars=omitted_chars,
         truncated=True,
-        model_visible_payload={
+        provider_replay_payload={
             "summary": _artifact_result_summary(
                 large_text_artifacts=large_text_artifacts,
                 raw_output_artifacts=raw_output_artifacts,
@@ -1532,7 +1532,7 @@ def _artifact_result_envelope(
                 for artifact_id in evidence_refs
             ],
         },
-        user_visible_payload={
+        user_summary_payload={
             "summary": _artifact_result_summary(
                 large_text_artifacts=large_text_artifacts,
                 raw_output_artifacts=raw_output_artifacts,
@@ -1557,22 +1557,29 @@ def _merge_tool_result_envelopes(
     for key in (
         "artifact_refs",
         "evidence_refs",
-        "read_handles",
         "warnings",
     ):
         merged[key] = _merged_json_list(merged.get(key), artifact_payload.get(key))
+    artifact_read_handles = _json_list(artifact_payload.get("read_handles"))
+    if artifact_read_handles:
+        merged["read_handles"] = artifact_read_handles
+    else:
+        merged["read_handles"] = _merged_json_list(
+            merged.get("read_handles"),
+            artifact_payload.get("read_handles"),
+        )
     for key in ("output_payload", "key_facts", "trace_payload"):
         merged[key] = _merged_json_mapping(
             merged.get(key),
             artifact_payload.get(key),
         )
-    merged["model_visible_payload"] = _merged_model_visible_payload(
-        merged.get("model_visible_payload"),
-        artifact_payload.get("model_visible_payload"),
+    merged["provider_replay_payload"] = _merged_provider_replay_payload(
+        merged.get("provider_replay_payload"),
+        artifact_payload.get("provider_replay_payload"),
     )
-    merged["user_visible_payload"] = _merged_json_mapping(
-        merged.get("user_visible_payload"),
-        artifact_payload.get("user_visible_payload"),
+    merged["user_summary_payload"] = _merged_json_mapping(
+        merged.get("user_summary_payload"),
+        artifact_payload.get("user_summary_payload"),
     )
     merged["omitted_count"] = int(merged.get("omitted_count") or 0) + int(
         artifact_payload.get("omitted_count") or 0,
@@ -1607,7 +1614,7 @@ def _merged_json_mapping(first: Any, second: Any) -> dict[str, Any]:
     return merged
 
 
-def _merged_model_visible_payload(first: Any, second: Any) -> dict[str, Any]:
+def _merged_provider_replay_payload(first: Any, second: Any) -> dict[str, Any]:
     merged = _merged_json_mapping(first, second)
     if isinstance(first, Mapping) and "summary" in first:
         merged["summary"] = first["summary"]
@@ -1615,6 +1622,11 @@ def _merged_model_visible_payload(first: Any, second: Any) -> dict[str, Any]:
         first.get("read_handles") if isinstance(first, Mapping) else None,
         second.get("read_handles") if isinstance(second, Mapping) else None,
     )
+    second_read_handles = (
+        _json_list(second.get("read_handles")) if isinstance(second, Mapping) else []
+    )
+    if second_read_handles:
+        read_handles = second_read_handles
     if read_handles:
         merged["read_handles"] = read_handles
     artifact_refs = _merged_json_list(

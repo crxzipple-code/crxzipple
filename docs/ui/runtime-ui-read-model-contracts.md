@@ -163,7 +163,7 @@ owner module：
 owner module：
 
 - context_workspace：workspace、nodes、estimate、render snapshot。
-- orchestration：当前 run id、`context_render_snapshot_id` 引用。
+- orchestration：当前 run id、`context_snapshot_id` 引用。
 - tool / skills / memory / artifacts：只通过 Context Workspace owner adapter 暴露节点或 provider mirror，不由 Workbench 直接拼 owner 数据。
 
 当前前端接口：

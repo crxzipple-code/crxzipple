@@ -1,0 +1,139 @@
+{
+  "api_family": "openai_codex_responses",
+  "context_slice_id": "ctxslice-crx-failed-run",
+  "context_slice_projected_input_item_count": 3,
+  "context_slice_unresolved_ref_count": 0,
+  "has_previous_response_id": false,
+  "input": [
+    {
+      "content": [
+        {
+          "text": "去东航官网查昆明到上海周日的票",
+          "type": "input_text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "arguments": "{\"cmd\": \"python - <<PY\\nprint(\\\"probe\\\")\\nPY\"}",
+      "call_id": "call-exec-1",
+      "name": "command_exec",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call-exec-1",
+      "output": "probe",
+      "type": "function_call_output"
+    }
+  ],
+  "input_delta_count": 0,
+  "input_delta_mode": false,
+  "input_item_count": 3,
+  "input_item_types": [
+    "user",
+    "function_call",
+    "function_call_output"
+  ],
+  "instructions": "Runtime contract.",
+  "message_type": null,
+  "model": "gpt-5.5",
+  "option_summary": {
+    "include": [],
+    "parallel_tool_calls": true,
+    "prompt_cache_key": null,
+    "reasoning": null,
+    "service_tier": null,
+    "store": false,
+    "stream": true,
+    "text": null,
+    "tool_choice": "auto"
+  },
+  "payload_keys": [
+    "include",
+    "input",
+    "instructions",
+    "model",
+    "parallel_tool_calls",
+    "store",
+    "stream",
+    "tool_choice",
+    "tools"
+  ],
+  "previous_response_id": null,
+  "provider": "openai_codex",
+  "render_report": {
+    "input_item_mapping": [
+      {
+        "input_item_index": 1,
+        "input_item_kind": "message",
+        "input_item_source": "session_item",
+        "node_id": "session.item.user-1",
+        "provider_payload_index": 0,
+        "session_item_id": "session-item-user-1",
+        "trace_status": "runtime_input_item"
+      },
+      {
+        "input_item_index": 2,
+        "input_item_kind": "function_call",
+        "input_item_source": "session_item",
+        "node_id": "session.step.item.call-1",
+        "provider_payload_index": 1,
+        "session_item_id": "session-item-call-1",
+        "tool_call_id": "call-exec-1",
+        "trace_status": "runtime_input_item"
+      },
+      {
+        "input_item_index": 3,
+        "input_item_kind": "function_call_output",
+        "input_item_source": "session_item",
+        "node_id": "session.step.item.result-1",
+        "provider_payload_index": 2,
+        "session_item_id": "session-item-result-1",
+        "tool_call_id": "call-exec-1",
+        "tool_run_id": "tool-run-1",
+        "trace_status": "runtime_input_item"
+      }
+    ],
+    "input_item_mapping_coverage": {
+      "canonical_input_item_count": 3,
+      "provider_generated_or_unattributed": [],
+      "provider_input_item_count": 3,
+      "traced_input_item_count": 3,
+      "untraced_input_item_count": 0
+    },
+    "loss_report": {},
+    "render_strategy": "full_wire_payload",
+    "tool_surface": {
+      "dropped_tool_schema_count": 0,
+      "provider_tool_mapping": [
+        {
+          "node_id": "tools.command.exec",
+          "provider_name": "command_exec",
+          "runtime_tool_name": "command.exec",
+          "source": "context_slice",
+          "source_id": "configured.command",
+          "tool_id": "tool.command.exec",
+          "tool_ref_id": "tools.command.exec",
+          "trace_status": "runtime_tool_surface"
+        }
+      ],
+      "provider_visible_tool_count": 1,
+      "provider_visible_tool_names": [
+        "command_exec"
+      ],
+      "source_tool_schema_count": 1
+    }
+  },
+  "render_strategy": "full_wire_payload",
+  "renderer_id": "openai_codex_responses",
+  "request_context_source": "context_slice",
+  "tools": [
+    {
+      "description": "",
+      "name": "command_exec",
+      "parameters": {},
+      "type": "function"
+    }
+  ],
+  "transport": "http"
+}

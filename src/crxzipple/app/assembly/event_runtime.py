@@ -29,11 +29,13 @@ from crxzipple.modules.orchestration.application import (
     RunObservationObserver,
     TOOL_OBSERVATION_SOURCE_EVENT_NAMES,
     ToolRunObservationObserver,
+    turn_session_topic,
 )
 from crxzipple.modules.tool.application import (
     ToolDispatchEventSubscriber,
     ToolRuntimeEventService,
 )
+from crxzipple.shared.domain.events import Event
 from crxzipple.shared import ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT
 
 OPERATIONS_STATE_PROJECTION_MODULES: tuple[str, ...] = OPERATIONS_PROJECTION_MODULES
@@ -190,6 +192,15 @@ def _build_event_relay_runtime_event_service(ctx):
         handler=workbench_observer.observe_session_item_event,
     )
     runtime.subscribe_event_name(
+        "session.item.appended",
+        subscription_id="event_relay.turn-session.session-item",
+        handler=lambda event: _publish_session_item_to_turn_session(
+            events_service,
+            event,
+        ),
+        replay_existing_on_first_run=True,
+    )
+    runtime.subscribe_event_name(
         ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
         subscription_id="event_relay.workbench.llm-text-delta",
         handler=workbench_observer.observe_live_llm_event,
@@ -207,6 +218,37 @@ def _build_event_relay_runtime_event_service(ctx):
             replay_existing_on_first_run=True,
         )
     return runtime
+
+
+def _publish_session_item_to_turn_session(
+    events_service: EventsApplicationService,
+    event: Event,
+) -> None:
+    session_key = event.payload.get("session_key")
+    if not isinstance(session_key, str) or not session_key.strip():
+        return
+    item_id = event.payload.get("item_id")
+    ordering_key = (
+        str(event.payload.get("source_id") or "").strip()
+        or str(event.payload.get("session_id") or "").strip()
+        or session_key.strip()
+    )
+    dedupe_key = (
+        f"{event.event_name or event.name}:{item_id}"
+        if isinstance(item_id, str) and item_id.strip()
+        else event.id
+    )
+    events_service.publish(
+        Event(
+            name=event.name,
+            topic=turn_session_topic(session_key),
+            kind="fact",
+            ordering_key=ordering_key,
+            dedupe_key=dedupe_key,
+            payload=dict(event.payload),
+            trace=dict(event.trace),
+        ),
+    )
 
 
 def _build_tool_runtime_event_service(ctx):

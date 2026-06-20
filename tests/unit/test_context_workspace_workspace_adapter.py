@@ -6,6 +6,7 @@ from crxzipple.app.integration.context_workspace_workspace import (
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     ContextOwnerRegistry,
+    ContextSliceBuilderService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
@@ -62,12 +63,33 @@ def test_workspace_adapter_expands_task_workspace_resource_file_handles(tmp_path
         "BOOTSTRAP.md",
         "TOOLS.md",
     ]
-    assert "Follow the project boundaries" in file_nodes[0].summary
+    assert "Follow the project boundaries" not in file_nodes[0].summary
+    assert "available through workspace file tools" in file_nodes[0].summary
     assert file_nodes[0].owner_ref == {"path": "AGENTS.md"}
     assert file_nodes[0].metadata["source"] == "workspace.resources"
+    assert file_nodes[0].metadata["content_available_via"] == "workspace_read"
     assert {"AGENT.md", "SOUL.md", "USER.md", "IDENTITY.md"}.isdisjoint(
         {node.title for node in file_nodes},
     )
+
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:workspace",
+            node_id=file_nodes[0].id,
+            action=ContextAction.PIN,
+        ),
+    )
+    context_slice = services["slice"].build_slice(
+        session_key="session:workspace",
+        run_id="run-workspace",
+        provider_profile="codex",
+    )
+    slice_items = {item.item_id: item for item in context_slice.items}
+    workspace_item = slice_items[file_nodes[0].id]
+
+    assert "Follow the project boundaries" not in workspace_item.summary
+    assert "Follow the project boundaries" not in workspace_item.text
+    assert workspace_item.metadata["owner_resolution"] == "handle_only"
 
 
 def _context_services():
@@ -87,5 +109,9 @@ def _context_services():
             node_repository=nodes,
             operation_repository=operations,
             owner_registry=registry,
+        ),
+        "slice": ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
         ),
     }

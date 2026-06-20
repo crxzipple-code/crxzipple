@@ -50,7 +50,7 @@ from crxzipple.modules.orchestration.application import (
 from crxzipple.modules.session.domain import DirectSessionScope
 from crxzipple.shared import ReplyAddress
 from tests.unit.orchestration_test_support import process_next_orchestration_assignment
-from tests.unit.support import SqliteTestHarness
+from tests.unit.support import SqliteTestHarness, publish_outbox_events
 
 
 def _legacy_runtime_outbound_topic(runtime_id: str) -> str:
@@ -1090,6 +1090,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             assert processed is not None
             self.assertEqual(processed.id, run.id)
 
+            publish_outbox_events(self.container)
             assert self.event_relay_runtime_event_service is not None
             self.event_relay_runtime_event_service.process_available_events(
                 limit_per_subscription=10,
@@ -1167,7 +1168,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                     topic=turn_session_topic("agent:demo:webhook-retry"),
                     kind="fact",
                     payload={
-                        "event_name": "orchestration.run.message.appended",
+                        "event_name": "session.item.appended",
                         "run_id": "run-webhook-retry-1",
                         "session_key": "agent:demo:webhook-retry",
                         "message_id": "msg-webhook-retry-1",
@@ -1269,7 +1270,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-text-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-text-1",
                     "session_key": "agent:assistant:lark:dm:ou_user_1",
                     "session_id": "session-inst-text-1",
@@ -1357,7 +1358,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(runtime.metadata["observe_observed_count"], 1)
         self.assertEqual(
             runtime.metadata["last_observe_event_name"],
-            "orchestration.run.message.appended",
+            "session.item.appended",
         )
 
     def test_lark_channel_runtime_delivers_text_and_artifacts_from_interaction_metadata(self) -> None:
@@ -1418,7 +1419,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-artifact-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-artifact-observe-1",
                     "session_key": "agent:assistant:lark:dm:ou_artifact_1",
                     "session_id": "session-inst-artifact-1",
@@ -1609,7 +1610,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-thread-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-thread-1",
                     "session_key": "agent:assistant:lark:thread:1",
                     "session_id": "session-inst-thread-1",
@@ -1726,7 +1727,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                     kind="fact",
                     ordering_key="run-lark-binding-1",
                     payload={
-                        "event_name": "orchestration.run.message.appended",
+                        "event_name": "session.item.appended",
                         "message_id": "msg-binding-1",
                         "session_key": "agent:assistant:lark:binding:1",
                         "session_id": "session-inst-binding-1",
@@ -1850,7 +1851,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             result["interaction_id"],
             "lark:default:event:evt_lark_1",
         )
-        self.assertIsNone(result["session_key"])
+        self.assertEqual(result["session_key"], "agent:assistant:lark:dm:ou_sender_1")
         self.assertEqual(result["interaction_status"], "accepted")
 
         interaction = self.channel_interaction_service.get_interaction(
@@ -2040,7 +2041,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-message-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-tool-1",
                     "session_key": "agent:assistant:lark:dm:ou_message_1",
                     "session_id": "session-inst-msg-1",
@@ -2126,7 +2127,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertFalse(refreshed.metadata["last_message_has_file_artifacts"])
         self.assertEqual(
             refreshed.metadata["last_observed_event_name"],
-            "orchestration.run.message.appended",
+            "session.item.appended",
         )
 
     def test_lark_runtime_projects_assistant_message_directly_from_observe(self) -> None:
@@ -2180,7 +2181,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-assistant-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-assistant-1",
                     "session_key": "agent:assistant:lark:dm:ou_assistant_1",
                     "session_id": "session-inst-assistant-1",
@@ -2326,7 +2327,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-tool-observe-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-tool-observe-1",
                     "session_key": "agent:assistant:lark:dm:ou_tool_observe_1",
                     "session_id": "session-inst-tool-observe-1",
@@ -2484,7 +2485,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-direct-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-direct-1",
                     "session_key": "agent:assistant:lark:dm:ou_user_direct_1",
                     "session_id": "session-inst-direct-1",
@@ -2598,7 +2599,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 kind="fact",
                 ordering_key="run-lark-override-1",
                 payload={
-                    "event_name": "orchestration.run.message.appended",
+                    "event_name": "session.item.appended",
                     "message_id": "msg-override-1",
                     "session_key": "agent:assistant:lark:dm:ou_user_override_1",
                     "session_id": "session-inst-override-1",

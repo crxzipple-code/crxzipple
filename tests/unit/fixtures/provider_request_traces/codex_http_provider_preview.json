@@ -1,0 +1,98 @@
+{
+  "api_family": "openai_codex_responses",
+  "context_slice_id": null,
+  "context_slice_projected_input_item_count": null,
+  "context_slice_unresolved_ref_count": null,
+  "has_previous_response_id": false,
+  "input": [
+    {
+      "content": [
+        {
+          "text": "Original task.",
+          "type": "input_text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "call_id": "call_http",
+      "output": "http output",
+      "type": "function_call_output"
+    }
+  ],
+  "input_delta_count": 0,
+  "input_delta_mode": false,
+  "input_item_count": 2,
+  "input_item_types": [
+    "user",
+    "function_call_output"
+  ],
+  "instructions": "You are Codex.",
+  "message_type": null,
+  "model": "gpt-5.5",
+  "option_summary": {
+    "include": [],
+    "parallel_tool_calls": true,
+    "prompt_cache_key": null,
+    "reasoning": null,
+    "service_tier": null,
+    "store": false,
+    "stream": true,
+    "text": null,
+    "tool_choice": "auto"
+  },
+  "payload_keys": [
+    "include",
+    "input",
+    "instructions",
+    "model",
+    "parallel_tool_calls",
+    "store",
+    "stream",
+    "tool_choice",
+    "tools"
+  ],
+  "previous_response_id": null,
+  "provider": "openai_codex",
+  "render_report": {
+    "input_item_mapping": [
+      {
+        "input_item_index": 0,
+        "input_item_kind": "message",
+        "input_item_source": "session_item",
+        "provider_payload_index": 0,
+        "trace_reason": "session_item",
+        "trace_status": "input_item_source"
+      },
+      {
+        "input_item_index": 1,
+        "input_item_kind": "function_call_output",
+        "input_item_source": "session_item",
+        "provider_payload_index": 1,
+        "trace_reason": "session_item",
+        "trace_status": "input_item_source"
+      }
+    ],
+    "input_item_mapping_coverage": {
+      "canonical_input_item_count": 2,
+      "provider_generated_or_unattributed": [],
+      "provider_input_item_count": 2,
+      "traced_input_item_count": 2,
+      "untraced_input_item_count": 0
+    },
+    "loss_report": {},
+    "render_strategy": "full_wire_payload",
+    "tool_surface": {
+      "dropped_tool_schema_count": 0,
+      "provider_tool_mapping": [],
+      "provider_visible_tool_count": 0,
+      "provider_visible_tool_names": [],
+      "source_tool_schema_count": 0
+    }
+  },
+  "render_strategy": "full_wire_payload",
+  "renderer_id": "openai_codex_responses",
+  "request_context_source": null,
+  "tools": [],
+  "transport": "http"
+}

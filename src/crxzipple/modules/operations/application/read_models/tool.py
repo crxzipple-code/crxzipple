@@ -896,7 +896,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="events",
             kind="navigation",
             method="GET",
-            endpoint="/ui/trace/{trace_id}",
+            endpoint="/workbench/traces/{trace_id}",
         ),
         RuntimeActionModel(
             id="cancel_tool_run",
@@ -3922,8 +3922,11 @@ def _tool_event_trace_id(
     return _context_str(run, "trace_id") or _context_str(run, "correlation_id")
 
 
-def _trace_route_from_id(trace_id: str | None) -> str:
-    return f"/ui/trace/{trace_id}" if trace_id else "-"
+def _trace_route_from_id(trace_id: str | None, *, focus_id: str | None = None) -> str:
+    if not trace_id:
+        return "-"
+    route = f"/workbench/traces/{trace_id}"
+    return f"{route}?focus_id={focus_id}" if focus_id else route
 
 
 def _short_tool_event_name(event_name: str) -> str:
@@ -6166,13 +6169,25 @@ def _execution_owner_context(
     tool_call_id = _optional_metadata_text(item.correlation_key) or _optional_metadata_text(
         summary_payload.get("tool_call_id"),
     )
+    owner_ref = getattr(item, "owner", None)
+    owner_tool_run_id = (
+        _optional_metadata_text(getattr(owner_ref, "owner_id", None))
+        if _optional_metadata_text(getattr(owner_ref, "owner_kind", None)) == "tool_run"
+        else None
+    )
+    focus_id = (
+        owner_tool_run_id
+        or _optional_metadata_text(summary_payload.get("tool_run_id"))
+        or tool_call_id
+        or _optional_metadata_text(getattr(item, "id", None))
+    )
     return {
         "run_id": run_id,
         "turn_id": _optional_metadata_text(metadata.get("turn_id")) or item.turn_id,
         "trace_id": trace_id,
         "session_key": _optional_metadata_text(metadata.get("session_key")) or "-",
         "route": f"/ui/workbench/runs/{run_id}",
-        "trace_route": f"/ui/trace/{trace_id}?step_id={item.step_id}",
+        "trace_route": _trace_route_from_id(trace_id, focus_id=focus_id),
         "chain_id": item.chain_id,
         "step_id": item.step_id,
         "step_kind": _enum_value(getattr(step, "kind", None)),
@@ -6261,8 +6276,8 @@ def _trace_route(
 ) -> str:
     route = _context_value(run_context, "trace_route", blank_as_none=True)
     if route:
-        return route
-    return f"/ui/trace/{_trace_id(run, run_context=run_context)}"
+        return route.replace("/ui/trace/", "/workbench/traces/", 1)
+    return f"/workbench/traces/{_trace_id(run, run_context=run_context)}"
 
 
 def _orchestration_run_id(

@@ -6,6 +6,17 @@ from html import escape
 from crxzipple.modules.context_workspace.application import root_nodes
 from crxzipple.modules.context_workspace.domain import ContextNode, ContextWorkspace
 
+_HANDLE_ONLY_CONTENT_OWNERS = frozenset(
+    {
+        "tool",
+        "skills",
+        "memory",
+        "artifacts",
+        "workspace",
+        "agent",
+    },
+)
+
 
 def render_context_tree(
     workspace: ContextWorkspace,
@@ -31,9 +42,13 @@ def render_context_node_without_descendants(node: ContextNode) -> str:
     return "\n".join(lines)
 
 
-def tree_prompt_visible_nodes(nodes: tuple[ContextNode, ...]) -> tuple[ContextNode, ...]:
-    prompt_nodes = tuple(node for node in nodes if node.state.prompt_visible)
-    children_by_parent = children_by_parent_for_nodes(prompt_nodes)
+def _node_content_renderable(node: ContextNode) -> bool:
+    return bool(node.content) and node.owner not in _HANDLE_ONLY_CONTENT_OWNERS
+
+
+def tree_snapshot_visible_nodes(nodes: tuple[ContextNode, ...]) -> tuple[ContextNode, ...]:
+    snapshot_nodes = tuple(node for node in nodes if node.state.snapshot_visible)
+    children_by_parent = children_by_parent_for_nodes(snapshot_nodes)
     visible: list[ContextNode] = []
 
     def has_forced_visible_descendant(node: ContextNode) -> bool:
@@ -119,7 +134,7 @@ def append_context_node_xml(
     lines.append(f"{child_indent}<title>{escape(node.title)}</title>")
     if node.summary:
         lines.append(f"{child_indent}<summary>{escape(node.summary)}</summary>")
-    if node.content and not node.state.collapsed:
+    if _node_content_renderable(node) and not node.state.collapsed:
         lines.append(f"{child_indent}<content>{escape(node.content)}</content>")
     for child in rendered_children(node, children_by_parent):
         append_context_node_xml(lines, child, children_by_parent, depth=depth + 1)
@@ -192,7 +207,7 @@ def _append_session_item_node_xml(
         f'sequence="{escape(sequence_no)}" kind="{escape(kind)}" '
         f'visibility="{escape(visibility)}">',
     )
-    if node.content and not node.state.collapsed:
+    if _node_content_renderable(node) and not node.state.collapsed:
         lines.append(f"{item_indent}<content>")
         for content_line in node.content.splitlines() or [""]:
             lines.append(f"{content_indent}{escape(content_line)}")
@@ -231,6 +246,7 @@ def _append_tool_interaction_node_xml(
     frontier = _node_bool_value(node, "frontier")
     consumed = _node_bool_value(node, "consumed")
     failed = _node_bool_value(node, "failed")
+    observed = _node_bool_value(node, "observed")
     verified = _node_bool_value(node, "verified")
     superseded = _node_bool_value(node, "superseded")
     call_sequence = str(
@@ -278,6 +294,8 @@ def _append_tool_interaction_node_xml(
                 attrs.append(
                     f'error="{escape(_truncate_xml_attr(error_summary, 120))}"',
                 )
+        if observed:
+            attrs.append('observed="true"')
         if verified:
             attrs.append('verified="true"')
         if node.summary:
@@ -411,15 +429,6 @@ def _append_tool_result_summary(
             block_indent=value_indent,
             value_indent=f"{value_indent}  ",
         )
-    evidence_path = _browser_evidence_path_ref_line(node)
-    if evidence_path is not None:
-        _append_xml_text_block(
-            lines,
-            "evidence_path",
-            evidence_path,
-            block_indent=value_indent,
-            value_indent=f"{value_indent}  ",
-        )
     artifact_refs = _text_list(envelope.get("evidence_refs"))
     if artifact_refs:
         _append_xml_text_block(
@@ -447,7 +456,11 @@ def _append_tool_result_summary(
             block_indent=value_indent,
             value_indent=f"{value_indent}  ",
         )
-    lines.append(f"{value_indent}<read_full_result>use refs or read handles</read_full_result>")
+    lines.append(
+        f"{value_indent}<full_result_refs>"
+        "artifact refs or read handles are available when needed"
+        "</full_result_refs>"
+    )
     lines.append(f"{block_indent}</result_summary>")
     return True
 
@@ -568,7 +581,7 @@ def _append_tool_function_node_xml(
     lines.append(f"{child_indent}<tool_function {' '.join(attrs)}>")
     if node.summary:
         lines.append(f"{child_indent}  <summary>{escape(node.summary)}</summary>")
-    if node.content:
+    if _node_content_renderable(node):
         lines.append(f"{child_indent}  <content>{escape(node.content)}</content>")
     lines.append(f"{child_indent}</tool_function>")
     for child in children:
@@ -651,6 +664,7 @@ def _append_session_evidence_node_xml(
     status = str(
         node.owner_ref.get("status") or node.metadata.get("status") or "",
     ).strip()
+    observed = _node_bool_value(node, "observed")
     verified = _node_bool_value(node, "verified")
     failed = _node_bool_value(node, "failed")
     superseded = _node_bool_value(node, "superseded")
@@ -663,6 +677,8 @@ def _append_session_evidence_node_xml(
     ]
     if tool_call_id and not node.state.collapsed:
         attrs.append(f'call_id="{escape(tool_call_id)}"')
+    if observed:
+        attrs.append('observed="true"')
     if verified:
         attrs.append('verified="true"')
     if failed:
@@ -688,7 +704,7 @@ def _append_session_evidence_node_xml(
         lines.append(f"{child_indent}<summary>{escape(node.summary)}</summary>")
     lines.append(f"{child_indent}<evidence {' '.join(attrs)}>")
     _append_evidence_refs(lines, node, block_indent=block_indent, compact=False)
-    if node.content:
+    if _node_content_renderable(node):
         lines.append(f"{block_indent}<content>")
         for content_line in node.content.splitlines() or [""]:
             lines.append(f"{value_indent}{escape(content_line)}")
@@ -733,23 +749,6 @@ def _tool_result_envelope(node: ContextNode) -> dict[str, object] | None:
     if not isinstance(envelope, dict):
         return None
     return envelope
-
-
-def _browser_evidence_path_ref_line(node: ContextNode) -> str | None:
-    evidence = node.metadata.get("tool_result_browser_evidence")
-    if not isinstance(evidence, dict):
-        return None
-    key = _optional_dict_text(evidence, "evidence_path_key")
-    title = _optional_dict_text(evidence, "evidence_path_title")
-    tools = _text_list(evidence.get("evidence_path_tools"))
-    if key is None and title is None and not tools:
-        return None
-    label = key or title or "browser_evidence"
-    if key is not None and title is not None:
-        label = f"{key} ({title})"
-    if tools:
-        label += ": " + ", ".join(tools[:4])
-    return label
 
 
 def _json_fragment(value: object) -> str:
@@ -881,5 +880,5 @@ __all__ = [
     "render_context_tree",
     "rendered_children",
     "sorted_nodes",
-    "tree_prompt_visible_nodes",
+    "tree_snapshot_visible_nodes",
 ]

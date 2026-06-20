@@ -839,6 +839,8 @@ const copyPairs = [
   ["Fallback Used", "已使用兜底"],
   ["No Match / Error", "无匹配 / 错误"],
   ["Availability", "可用性"],
+  ["Warmup", "预热"],
+  ["Next Action", "下一步操作"],
   ["Reachable", "可达"],
   ["Impact (24h)", "影响（24h）"],
   ["Affected Invocations", "受影响调用"],
@@ -1082,6 +1084,15 @@ const copyPairs = [
   ["All tool workers operational", "所有工具工作器运行正常"],
   ["All systems operational", "所有系统运行正常"],
   ["Operator attention recommended", "建议操作员关注"],
+  ["Not checked", "未检查"],
+  ["Warmed", "已预热"],
+  ["Skipped", "已跳过"],
+  ["Run warmup", "运行预热"],
+  ["Ready for run", "可开始运行"],
+  ["Use invoke smoke", "使用调用冒烟测试"],
+  ["Check Access then retry warmup", "检查访问配置后重试预热"],
+  ["Check WebSocket transport", "检查 WebSocket 传输"],
+  ["Retry warmup / inspect event", "重试预热 / 查看事件"],
   ["All LLM services operational", "所有 LLM 服务运行正常"],
   ["All channels accepting traffic", "所有通道正常接收流量"],
   ["All memory systems operational", "所有记忆系统运行正常"],
@@ -1425,6 +1436,15 @@ function localizeEnglishToChinese(text: string): string {
   const selectedActor = text.match(/^Selected Actor: (.+)$/);
   if (selectedActor) return `已选操作者：${selectedActor[1]}`;
 
+  const warmedTransport = text.match(/^Warmed \((.+)\)$/);
+  if (warmedTransport) return `已预热（${warmedTransport[1]}）`;
+
+  const skippedReason = text.match(/^Skipped: (.+)$/);
+  if (skippedReason) return `已跳过：${skippedReason[1]}`;
+
+  const failedReason = text.match(/^Failed: (.+)$/);
+  if (failedReason) return `失败：${failedReason[1]}`;
+
   const forAgentProfile = text.match(/^For agent profile: (.+)$/);
   if (forAgentProfile) return `适用于智能体画像：${forAgentProfile[1]}`;
 
@@ -1542,6 +1562,15 @@ function localizeChineseToEnglish(text: string): string {
 
   const selectedActor = text.match(/^已选操作者：(.+)$/);
   if (selectedActor) return `Selected Actor: ${selectedActor[1]}`;
+
+  const warmedTransport = text.match(/^已预热（(.+)）$/);
+  if (warmedTransport) return `Warmed (${warmedTransport[1]})`;
+
+  const skippedReason = text.match(/^已跳过：(.+)$/);
+  if (skippedReason) return `Skipped: ${skippedReason[1]}`;
+
+  const failedReason = text.match(/^失败：(.+)$/);
+  if (failedReason) return `Failed: ${failedReason[1]}`;
 
   const forAgentProfile = text.match(/^适用于智能体画像：(.+)$/);
   if (forAgentProfile) return `For agent profile: ${forAgentProfile[1]}`;

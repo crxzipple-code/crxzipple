@@ -1,6 +1,6 @@
 kind: local_package
 namespace: web
-prompt:
+runtime_request:
   title: Public Web Fetch
   summary: Fetch public HTTP/HTTPS resources as evidence when the model knows or discovers a source URL. Use this for open JSON APIs, public text/HTML pages, and source verification; keep source URLs and extracted fields tied to the answer.
   default_tool_schema_policy:
@@ -20,7 +20,7 @@ prompt:
         - web.fetch_json
         - web.fetch_text
       default_tool_schema_max_count: 2
-      default_tool_schema_source: bundled.local_package.web.prompt_group.public_fetch
+      default_tool_schema_source: bundled.local_package.web.runtime_request_group.public_fetch
 capabilities:
   - bounded_network.http
 local_tools:

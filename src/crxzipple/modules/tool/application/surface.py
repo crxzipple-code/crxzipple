@@ -102,7 +102,7 @@ class ToolSurfaceSource:
     readiness: Mapping[str, Any] = field(default_factory=dict)
     authorization: Mapping[str, Any] = field(default_factory=dict)
     runtime_requirements: tuple[Mapping[str, Any], ...] = ()
-    prompt_metadata: Mapping[str, Any] = field(default_factory=dict)
+    runtime_request_metadata: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
@@ -118,7 +118,7 @@ class ToolSurfaceSource:
             "runtime_requirements": [
                 dict(requirement) for requirement in self.runtime_requirements
             ],
-            "prompt_metadata": dict(self.prompt_metadata),
+            "runtime_request_metadata": dict(self.runtime_request_metadata),
             "metadata": dict(self.metadata),
         }
 
@@ -350,23 +350,23 @@ def _surface_source(
     *,
     functions: tuple[ToolSurfaceFunction, ...],
 ) -> ToolSurfaceSource:
-    prompt = _prompt_config(source)
+    runtime_request = _runtime_request_config(source)
     groups = _surface_groups(
         source,
-        prompt=prompt,
+        runtime_request=runtime_request,
         functions=functions,
     )
     return ToolSurfaceSource(
         source_id=source.source_id,
         source_key=source.source_id,
         source_kind=source.kind.value,
-        title=str(prompt.get("title") or source.display_name),
-        summary=str(prompt.get("summary") or source.description or source.display_name),
+        title=str(runtime_request.get("title") or source.display_name),
+        summary=str(runtime_request.get("summary") or source.description or source.display_name),
         groups=groups,
         readiness={"ready": True, "status": "ready"},
         authorization={"mode": "not_evaluated"},
         runtime_requirements=tuple(dict(item) for item in source.runtime_requirements),
-        prompt_metadata=dict(prompt),
+        runtime_request_metadata=dict(runtime_request),
         metadata={
             "revision": source.revision,
             "config_hash": source.config_hash,
@@ -378,11 +378,11 @@ def _surface_source(
 def _surface_groups(
     source: ToolSource,
     *,
-    prompt: Mapping[str, Any],
+    runtime_request: Mapping[str, Any],
     functions: tuple[ToolSurfaceFunction, ...],
 ) -> tuple[ToolSurfaceGroup, ...]:
     by_id = {function.function_id: function for function in functions}
-    raw_groups = prompt.get("groups")
+    raw_groups = runtime_request.get("groups")
     groups: list[tuple[int, int, ToolSurfaceGroup]] = []
     grouped: set[str] = set()
     if isinstance(raw_groups, Mapping):
@@ -392,7 +392,7 @@ def _surface_groups(
                 continue
             function_refs = tuple(
                 function_id
-                for function_id in _prompt_group_function_ids(raw_group)
+                for function_id in _runtime_request_group_function_ids(raw_group)
                 if function_id in by_id
             )
             if not function_refs:
@@ -454,32 +454,32 @@ def _surface_groups(
 
 def _group_key_for_function(function: ToolFunction, *, source: ToolSource | None) -> str:
     if source is not None:
-        prompt = _prompt_config(source)
-        raw_groups = prompt.get("groups")
+        runtime_request = _runtime_request_config(source)
+        raw_groups = runtime_request.get("groups")
         if isinstance(raw_groups, Mapping):
             for raw_key, raw_group in raw_groups.items():
                 group_key = str(raw_key).strip()
                 if not group_key or not isinstance(raw_group, Mapping):
                     continue
-                if function.function_id in _prompt_group_function_ids(raw_group):
+                if function.function_id in _runtime_request_group_function_ids(raw_group):
                     return group_key
             return "other"
     return "source"
 
 
-def _prompt_config(source: ToolSource) -> Mapping[str, Any]:
-    raw_prompt = source.config.get("prompt")
-    if isinstance(raw_prompt, Mapping):
-        return dict(raw_prompt)
+def _runtime_request_config(source: ToolSource) -> Mapping[str, Any]:
+    raw_runtime_request = source.config.get("runtime_request")
+    if isinstance(raw_runtime_request, Mapping):
+        return dict(raw_runtime_request)
     provider = source.config.get("provider")
     if isinstance(provider, Mapping):
-        provider_prompt = provider.get("prompt")
-        if isinstance(provider_prompt, Mapping):
-            return dict(provider_prompt)
+        provider_runtime_request = provider.get("runtime_request")
+        if isinstance(provider_runtime_request, Mapping):
+            return dict(provider_runtime_request)
     return {}
 
 
-def _prompt_group_function_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
+def _runtime_request_group_function_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
     raw_function_ids = group.get("function_ids")
     if raw_function_ids is None:
         raw_function_ids = group.get("tools")

@@ -315,6 +315,72 @@ def test_render_provider_attachments_records_budget_eviction_policy_metadata() -
     ]
 
 
+def test_render_provider_attachments_prioritizes_explicit_enabled_schema_over_defaults() -> None:
+    workspace = ContextWorkspace.new(
+        session_key="session:mirror",
+        agent_id="assistant",
+    )
+    default_nodes = tuple(
+        ContextNode(
+            id=f"tool.default.{index}",
+            workspace_id=workspace.id,
+            owner="tool",
+            kind="tool_function",
+            title=f"Default {index}",
+            owner_ref={"tool_id": f"default.tool_{index}"},
+            display_order=index,
+            state=ContextNodeState(schema_enabled=False),
+            metadata={
+                "provider_schema": {
+                    "name": f"default.tool_{index}",
+                    "description": f"Default tool {index}.",
+                    "input_schema": {"type": "object"},
+                },
+            },
+        )
+        for index in range(2)
+    )
+    requested_node = ContextNode(
+        id="tool.requested.network",
+        workspace_id=workspace.id,
+        owner="tool",
+        kind="tool_function",
+        title="Requested Network Tool",
+        owner_ref={"tool_id": "browser.network.inspect"},
+        display_order=100,
+        state=ContextNodeState(schema_enabled=True),
+        metadata={
+            "provider_schema": {
+                "name": "browser.network.inspect",
+                "description": "Inspect browser network evidence.",
+                "input_schema": {"type": "object"},
+            },
+        },
+    )
+
+    attachments, mirrored_node_ids, _available, report = render_provider_attachments(
+        default_nodes + (requested_node,),
+        base={},
+        render_metadata={
+            "default_tool_schema_ids": ["default.tool_0", "default.tool_1"],
+            "default_tool_schema_priorities": {
+                "default.tool_0": 100,
+                "default.tool_1": 200,
+            },
+            "tool_schema_mirror_max_count": 2,
+        },
+    )
+
+    assert [schema["name"] for schema in attachments["tool_schemas"]] == [
+        "browser.network.inspect",
+        "default.tool_0",
+    ]
+    assert "tool.requested.network" in mirrored_node_ids
+    budget = report["tool_schema_mirror_budget"]
+    assert budget["status"] == "limited"
+    assert budget["skipped"][0]["name"] == "default.tool_1"
+
+
 def test_render_provider_attachments_mirrors_opened_artifact_candidate() -> None:
     workspace = ContextWorkspace.new(
         session_key="session:mirror",

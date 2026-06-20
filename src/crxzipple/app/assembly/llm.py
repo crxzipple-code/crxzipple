@@ -6,14 +6,7 @@ from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ApplicationFactory
 from crxzipple.modules.llm.application import LlmApplicationService
 from crxzipple.modules.llm.domain import LlmApiFamily
-from crxzipple.modules.llm.infrastructure import (
-    AnthropicMessagesAdapter,
-    GeminiGenerateContentAdapter,
-    LlmAdapterRegistry,
-    OpenAIChatCompatibleAdapter,
-    OpenAICodexResponsesAdapter,
-    OpenAIResponsesAdapter,
-)
+from crxzipple.modules.llm.infrastructure.adapters.registry import LlmAdapterRegistry
 
 
 def llm_factories() -> tuple[ApplicationFactory, ...]:
@@ -51,27 +44,67 @@ def llm_adapter_registry_factories() -> tuple[ApplicationFactory, ...]:
 
 def build_llm_adapter_registry() -> LlmAdapterRegistry:
     registry = LlmAdapterRegistry()
-    registry.register(
+    registry.register_factory(
         LlmApiFamily.OPENAI_RESPONSES,
-        OpenAIResponsesAdapter(),
+        _build_openai_responses_adapter,
     )
-    registry.register(
+    registry.register_factory(
         LlmApiFamily.OPENAI_CODEX_RESPONSES,
-        OpenAICodexResponsesAdapter(),
+        _build_openai_codex_responses_adapter,
     )
-    registry.register(
+    registry.register_factory(
         LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
-        OpenAIChatCompatibleAdapter(),
+        _build_openai_chat_compatible_adapter,
     )
-    registry.register(
+    registry.register_factory(
         LlmApiFamily.ANTHROPIC_MESSAGES,
-        AnthropicMessagesAdapter(),
+        _build_anthropic_messages_adapter,
     )
-    registry.register(
+    registry.register_factory(
         LlmApiFamily.GEMINI_GENERATE_CONTENT,
-        GeminiGenerateContentAdapter(),
+        _build_gemini_generate_content_adapter,
     )
     return registry
+
+
+def _build_openai_responses_adapter():
+    from crxzipple.modules.llm.infrastructure.adapters.openai_responses import (
+        OpenAIResponsesAdapter,
+    )
+
+    return OpenAIResponsesAdapter()
+
+
+def _build_openai_codex_responses_adapter():
+    from crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses import (
+        OpenAICodexResponsesAdapter,
+    )
+
+    return OpenAICodexResponsesAdapter()
+
+
+def _build_openai_chat_compatible_adapter():
+    from crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible import (
+        OpenAIChatCompatibleAdapter,
+    )
+
+    return OpenAIChatCompatibleAdapter()
+
+
+def _build_anthropic_messages_adapter():
+    from crxzipple.modules.llm.infrastructure.adapters.anthropic_messages import (
+        AnthropicMessagesAdapter,
+    )
+
+    return AnthropicMessagesAdapter()
+
+
+def _build_gemini_generate_content_adapter():
+    from crxzipple.modules.llm.infrastructure.adapters.gemini_generate_content import (
+        GeminiGenerateContentAdapter,
+    )
+
+    return GeminiGenerateContentAdapter()
 
 
 __all__ = [

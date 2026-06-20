@@ -82,17 +82,17 @@ _DEFAULT_CAPABILITY_DESCRIPTIONS: tuple[tuple[str, str, str], ...] = (
     (
         "context_workspace.read",
         "Context Workspace Read",
-        "Read prompt context tree nodes and state.",
+        "Read runtime context tree nodes and state.",
     ),
     (
         "context_workspace.write",
         "Context Workspace Write",
-        "Mutate prompt context tree node state.",
+        "Mutate runtime context tree node state.",
     ),
     (
         "context_workspace.render",
         "Context Workspace Render",
-        "Render or estimate prompt context tree payloads.",
+        "Render or estimate runtime context tree payloads.",
     ),
     ("tool_catalog.read", "Tool Catalog Read", "Read the tool catalog."),
     ("skill.read", "Skill Read", "Read skill package content or metadata."),

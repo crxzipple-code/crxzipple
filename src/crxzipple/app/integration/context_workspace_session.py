@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any, Protocol
 
 from crxzipple.modules.context_workspace.application import (
@@ -93,12 +92,18 @@ class SessionContextNodeProvider:
     ) -> tuple[ContextNodeSeed, ...]:
         if request.node.id == "session.current":
             return self._current_session_children(request)
-        if request.node.id == "evidence.frontier":
-            return self._current_evidence_frontier_children(request)
-        if request.node.id == "session.segment.current":
-            return self._current_segment_children(request)
-        if request.node.id == "session.evidence.current":
-            return self._current_evidence_children(request)
+        if _is_session_instance_node_id(request.node.id):
+            return self._session_instance_children(request)
+        if _is_session_segments_root_node_id(request.node.id):
+            return self._session_segments_children(request)
+        if _is_session_segment_node_id(request.node.id):
+            return self._session_segment_children(request)
+        if request.node.id == "session.turn.current":
+            return self._current_turn_children(request)
+        if request.node.id == "session.steps.current":
+            return self._current_steps_children(request)
+        if request.node.id.startswith("session.step."):
+            return self._session_step_children(request)
         if _is_historical_segment_node_id(request.node.id):
             return self._historical_segment_range_children(request)
         if request.node.id.startswith("session.segment.items."):
@@ -131,10 +136,11 @@ class SessionContextNodeProvider:
         seeds: list[ContextNodeSeed] = []
         if active_instance is not None:
             seeds.append(
-                _current_segment_seed(
+                _session_instance_seed(
                     instance=active_instance,
                     item_count=active_item_count,
                     parent_id="session.current",
+                    active=True,
                     display_order=10,
                 ),
             )
@@ -143,24 +149,101 @@ class SessionContextNodeProvider:
         for instance in instances:
             if instance.id == session.active_session_id:
                 continue
-            segment_kind = _historical_segment_kind(instance)
             seeds.append(
-                _historical_segment_seed(
+                _session_instance_seed(
                     instance=instance,
-                    messages=None,
                     parent_id="session.current",
-                    segment_kind=segment_kind,
-                    message_visibility=(
-                        "archived" if segment_kind == "compacted" else "all"
-                    ),
-                    fallback_summary=None,
+                    item_count=None,
+                    active=False,
                     display_order=display_order,
                 ),
             )
             display_order += 10
         return tuple(seeds)
 
-    def _current_segment_children(
+    def _session_instance_children(
+        self,
+        request: ContextChildrenRequest,
+    ) -> tuple[ContextNodeSeed, ...]:
+        session_key = request.workspace.session_key
+        try:
+            session = self._session_service.get_session(session_key)
+            instances = self._session_service.list_instances(
+                ListSessionInstancesInput(session_key=session_key),
+            )
+        except SessionNotFoundError:
+            return ()
+        instance_id = _optional_text(request.node.owner_ref.get("session_id"))
+        instance = next((item for item in instances if item.id == instance_id), None)
+        if instance is None:
+            return ()
+        active = instance.id == session.active_session_id
+        root_id = _session_segments_root_id(instance, active=active)
+        summary = f"Segments for session instance #{instance.sequence_no}."
+        return (
+            ContextNodeSeed(
+                node_id=root_id,
+                parent_id=request.node.id,
+                owner="session",
+                kind="session_segments_root",
+                title="Segments",
+                summary=summary,
+                state=ContextNodeState(collapsed=False, loaded=True),
+                actions=_BASIC_ACTIONS,
+                owner_ref={
+                    "session_key": session_key,
+                    "session_id": instance.id,
+                    "active": active,
+                },
+                estimate=_text_estimate(summary),
+                display_order=10,
+            ),
+        )
+
+    def _session_segments_children(
+        self,
+        request: ContextChildrenRequest,
+    ) -> tuple[ContextNodeSeed, ...]:
+        session_key = request.workspace.session_key
+        try:
+            session = self._session_service.get_session(session_key)
+            instances = self._session_service.list_instances(
+                ListSessionInstancesInput(session_key=session_key),
+            )
+            active_messages = self._active_transcript_items_or_messages(session_key)
+        except SessionNotFoundError:
+            return ()
+        instance_id = _optional_text(request.node.owner_ref.get("session_id"))
+        instance = next((item for item in instances if item.id == instance_id), None)
+        if instance is None:
+            return ()
+        active = instance.id == session.active_session_id
+        if active:
+            return (
+                _session_segment_seed(
+                    instance=instance,
+                    item_count=len(active_messages),
+                    parent_id=request.node.id,
+                    active=True,
+                    display_order=10,
+                ),
+            )
+        segment_kind = _historical_segment_kind(instance)
+        return (
+            _historical_segment_seed(
+                instance=instance,
+                messages=None,
+                parent_id=request.node.id,
+                segment_kind=segment_kind,
+                message_scope=(
+                    "archived" if segment_kind == "compacted" else "all"
+                ),
+                fallback_summary=None,
+                display_order=10,
+            ),
+        )
+
+    def _session_segment_children(
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
@@ -170,31 +253,38 @@ class SessionContextNodeProvider:
             active_messages = self._active_transcript_items_or_messages(session_key)
         except SessionNotFoundError:
             return ()
+        if request.node.id != "session.segment.active":
+            return self._historical_segment_range_children(request)
         if not active_messages:
             return ()
         first_sequence = active_messages[0].sequence_no
         last_sequence = active_messages[-1].sequence_no
         current_run_id = _optional_text(request.workspace.metadata.get("last_run_id"))
-        tool_lifecycle_facts = _tool_lifecycle_facts_from_execution_query(
-            self._execution_query,
-            current_run_id,
-        )
-        evidence_items = _evidence_items_for_current_run(
+        seeds: list[ContextNodeSeed] = []
+        if current_run_id is not None:
+            seeds.append(
+                _current_turn_seed(
+                    run_id=current_run_id,
+                    session_key=session_key,
+                    session_id=session.active_session_id,
+                    parent_id=request.node.id,
+                    display_order=5,
+                ),
+            )
+        current_items_content = _current_items_range_prompt_content(
             tuple(active_messages),
             current_run_id=current_run_id,
-            tool_lifecycle_facts=tool_lifecycle_facts,
+            visible_tool_limit=self._active_consumed_tool_history_limit,
         )
-        seeds = [
+        seeds.append(
             ContextNodeSeed(
                 node_id="session.items.current",
                 parent_id=request.node.id,
                 owner="session",
                 kind="session_item_range",
                 title="Current Items",
-                summary=(
-                    f"{len(active_messages)} visible items in the active "
-                    f"segment, sequences {first_sequence}-{last_sequence}."
-                ),
+                summary=_truncate(current_items_content.replace("\n", " "), 320),
+                content=current_items_content,
                 state=ContextNodeState(
                     collapsed=False,
                     loaded=True,
@@ -219,19 +309,62 @@ class SessionContextNodeProvider:
                 display_order=10,
                 metadata={"item_count": len(active_messages)},
             ),
-        ]
-        if evidence_items:
-            seeds.append(
-                _current_evidence_ledger_seed(
-                    session_key=session_key,
-                    session_id=session.active_session_id,
-                    current_run_id=current_run_id,
-                    evidence_items=evidence_items,
-                    parent_id=request.node.id,
-                    display_order=20,
-                ),
         )
         return tuple(seeds)
+
+    def _current_turn_children(
+        self,
+        request: ContextChildrenRequest,
+    ) -> tuple[ContextNodeSeed, ...]:
+        run_id = _optional_text(request.node.owner_ref.get("run_id"))
+        if run_id is None:
+            return ()
+        summary = f"Runtime steps for current turn {run_id}."
+        return (
+            ContextNodeSeed(
+                node_id="session.steps.current",
+                parent_id=request.node.id,
+                owner="session",
+                kind="session_steps_root",
+                title="Steps",
+                summary=summary,
+                state=ContextNodeState(collapsed=False, loaded=True),
+                actions=_BASIC_ACTIONS,
+                owner_ref={
+                    "session_key": request.workspace.session_key,
+                    "run_id": run_id,
+                    "turn_id": run_id,
+                },
+                estimate=_text_estimate(summary),
+                display_order=10,
+            ),
+        )
+
+    def _current_steps_children(
+        self,
+        request: ContextChildrenRequest,
+    ) -> tuple[ContextNodeSeed, ...]:
+        run_id = _optional_text(request.node.owner_ref.get("run_id"))
+        if run_id is None or self._execution_query is None:
+            return ()
+        return _execution_step_node_seeds(
+            self._execution_query,
+            run_id,
+            parent_id=request.node.id,
+        )
+
+    def _session_step_children(
+        self,
+        request: ContextChildrenRequest,
+    ) -> tuple[ContextNodeSeed, ...]:
+        step_id = _optional_text(request.node.owner_ref.get("step_id"))
+        if step_id is None or self._execution_query is None:
+            return ()
+        return _execution_step_item_node_seeds(
+            self._execution_query,
+            step_id,
+            parent_id=request.node.id,
+        )
 
     def _active_transcript_items_or_messages(
         self,
@@ -259,7 +392,6 @@ class SessionContextNodeProvider:
                 ListSessionItemsInput(
                     session_key=session_key,
                     active_session_only=True,
-                    model_visible=True,
                     after_sequence_no=(
                         after_sequence_no - 1
                         if after_sequence_no is not None
@@ -291,63 +423,10 @@ class SessionContextNodeProvider:
                 ListSessionItemsInput(
                     session_key=session_key,
                     active_session_only=active_session_only,
-                    model_visible=True,
                     after_sequence_no=after_sequence_no,
                     before_sequence_no=before_sequence_no,
                 ),
             ),
-        )
-
-    def _current_evidence_frontier_children(
-        self,
-        request: ContextChildrenRequest,
-    ) -> tuple[ContextNodeSeed, ...]:
-        session_key = request.workspace.session_key
-        try:
-            messages = tuple(self._active_transcript_items_or_messages(session_key))
-        except SessionNotFoundError:
-            return ()
-        current_run_id = _optional_text(request.workspace.metadata.get("last_run_id"))
-        records = _browser_tool_records_for_current_run(
-            messages,
-            current_run_id=current_run_id,
-        )
-        warnings = _browser_investigation_warnings(records)
-        return tuple(
-            _browser_investigation_warning_seed(
-                item,
-                parent_id=request.node.id,
-                display_order=(index + 1) * 10,
-            )
-            for index, item in enumerate(warnings)
-        )
-
-    def _current_evidence_children(
-        self,
-        request: ContextChildrenRequest,
-    ) -> tuple[ContextNodeSeed, ...]:
-        session_key = request.workspace.session_key
-        try:
-            messages = tuple(self._active_transcript_items_or_messages(session_key))
-        except SessionNotFoundError:
-            return ()
-        current_run_id = _optional_text(request.workspace.metadata.get("last_run_id"))
-        tool_lifecycle_facts = _tool_lifecycle_facts_from_execution_query(
-            self._execution_query,
-            current_run_id,
-        )
-        evidence_items = _evidence_items_for_current_run(
-            messages,
-            current_run_id=current_run_id,
-            tool_lifecycle_facts=tool_lifecycle_facts,
-        )
-        return tuple(
-            _evidence_item_seed(
-                item,
-                parent_id=request.node.id,
-                display_order=(index + 1) * 10,
-            )
-            for index, item in enumerate(evidence_items)
         )
 
     def _current_item_children(
@@ -374,7 +453,7 @@ class SessionContextNodeProvider:
             else ()
         )
         consumed_through_sequence_no = (
-            _consumed_direct_transcript_through_sequence_no_from_summaries(
+            _consumed_draft_input_through_sequence_no_from_summaries(
                 execution_summaries,
                 session_id=session_id,
             )
@@ -429,7 +508,7 @@ class SessionContextNodeProvider:
             else ()
         )
         consumed_through_sequence_no = (
-            _consumed_direct_transcript_through_sequence_no_from_summaries(
+            _consumed_draft_input_through_sequence_no_from_summaries(
                 execution_summaries,
                 session_id=session_id,
             )
@@ -455,7 +534,7 @@ class SessionContextNodeProvider:
         session_key = request.workspace.session_key
         owner_ref = request.node.owner_ref
         session_id = _optional_text(owner_ref.get("session_id"))
-        message_visibility = _optional_text(owner_ref.get("message_visibility")) or "all"
+        message_scope = _optional_text(owner_ref.get("message_scope")) or "all"
         if session_id is None:
             return ()
         try:
@@ -468,7 +547,7 @@ class SessionContextNodeProvider:
         segment_messages = _segment_messages(
             tuple(messages),
             session_id=session_id,
-            message_visibility=message_visibility,
+            message_scope=message_scope,
         )
         ranges: list[ContextNodeSeed] = []
         display_order = 10
@@ -482,7 +561,7 @@ class SessionContextNodeProvider:
                     session_id=session_id,
                     messages=chunk,
                     segment_kind=owner_ref.get("segment_kind"),
-                    message_visibility=message_visibility,
+                    message_scope=message_scope,
                     range_token_soft_limit=self._range_token_soft_limit,
                     display_order=display_order,
                 )
@@ -506,7 +585,7 @@ class SessionContextNodeProvider:
                         "notice_kind": "range_limit",
                         "range_reason_code": "range_page_limit",
                         "segment_kind": owner_ref.get("segment_kind"),
-                        "message_visibility": message_visibility,
+                        "message_scope": message_scope,
                         "omitted_range_count": len(omitted_chunks),
                         "omitted_item_count": omitted_item_count,
                         "range_page_limit": self._historical_range_limit,
@@ -522,7 +601,7 @@ class SessionContextNodeProvider:
         session_key = request.workspace.session_key
         owner_ref = request.node.owner_ref
         session_id = _optional_text(owner_ref.get("session_id"))
-        message_visibility = _optional_text(owner_ref.get("message_visibility")) or "all"
+        message_scope = _optional_text(owner_ref.get("message_scope")) or "all"
         from_sequence_no = _optional_int(owner_ref.get("from_sequence_no"))
         to_sequence_no = _optional_int(owner_ref.get("to_sequence_no"))
         if session_id is None or from_sequence_no is None or to_sequence_no is None:
@@ -540,9 +619,9 @@ class SessionContextNodeProvider:
             message
             for message in messages
             if message.session_id == session_id
-            and _matches_message_visibility(
+            and _matches_message_scope(
                 message,
-                message_visibility=message_visibility,
+                message_scope=message_scope,
             )
         )
         range_estimate = _items_estimate(
@@ -557,7 +636,7 @@ class SessionContextNodeProvider:
                     session_id=session_id,
                     messages=range_messages,
                     segment_kind=owner_ref.get("segment_kind"),
-                    message_visibility=message_visibility,
+                    message_scope=message_scope,
                     range_token_soft_limit=self._range_token_soft_limit,
                 )
             return (
@@ -580,7 +659,7 @@ class SessionContextNodeProvider:
                         "estimated_expanded_text_chars": range_estimate.text_chars,
                         "item_count": len(range_messages),
                         "segment_kind": owner_ref.get("segment_kind"),
-                        "message_visibility": message_visibility,
+                        "message_scope": message_scope,
                     },
                 ),
             )
@@ -603,608 +682,6 @@ _BASIC_ACTIONS = (
 
 _CURRENT_MESSAGES_RANGE_REVISION = "2026-06-09.current_messages_visible_history.v2"
 _TOOL_INTERACTION_NODE_REVISION = "2026-06-09.tool_interaction_visible_result.v2"
-_BROWSER_INVESTIGATION_WARNING_REVISION = "2026-06-09.browser_investigation_warnings.v1"
-_ENDPOINT_CANDIDATES_RE = re.compile(r"Endpoint candidates:\s*(\d+)")
-
-
-def _current_evidence_ledger_seed(
-    *,
-    session_key: str,
-    session_id: str,
-    current_run_id: str | None,
-    evidence_items: tuple[dict[str, object], ...],
-    parent_id: str,
-    display_order: int,
-) -> ContextNodeSeed:
-    evidence_types = tuple(
-        dict.fromkeys(
-            _optional_text(item.get("evidence_type")) or "observation"
-            for item in evidence_items
-        ),
-    )
-    summary = (
-        f"{len(evidence_items)} current-run evidence items extracted from tool "
-        "results. Items contain compact facts and refs; expand message/tool refs "
-        "only when raw evidence is needed."
-    )
-    return ContextNodeSeed(
-        node_id="session.evidence.current",
-        parent_id=parent_id,
-        owner="session",
-        kind="evidence_ledger",
-        title="Current Evidence Ledger",
-        summary=summary,
-        state=ContextNodeState(collapsed=False, loaded=True),
-        actions=_BASIC_ACTIONS,
-        owner_ref={
-            "session_key": session_key,
-            "session_id": session_id,
-            "run_id": current_run_id or "",
-            "evidence_count": len(evidence_items),
-        },
-        estimate=_text_estimate(summary),
-        display_order=display_order,
-        metadata={
-            "evidence_count": len(evidence_items),
-            "evidence_types": list(evidence_types),
-            "run_id": current_run_id or "",
-        },
-    )
-
-
-def _evidence_item_seed(
-    item: dict[str, object],
-    *,
-    parent_id: str,
-    display_order: int,
-) -> ContextNodeSeed:
-    tool_call_id = _optional_text(item.get("tool_call_id")) or str(display_order)
-    tool_name = _optional_text(item.get("tool_name")) or "tool"
-    evidence_type = _optional_text(item.get("evidence_type")) or "observation"
-    status = _optional_text(item.get("status")) or "unknown"
-    summary = _optional_text(item.get("summary")) or f"{tool_name} {status}."
-    content = _evidence_item_content(item)
-    return ContextNodeSeed(
-        node_id=(
-            f"session.evidence.{_short_node_part(_optional_text(item.get('session_id')) or 'active')}."
-            f"{_short_node_part(tool_call_id)}"
-        ),
-        parent_id=parent_id,
-        owner="session",
-        kind="session_evidence",
-        title=f"{evidence_type}: {tool_name}",
-        summary=_truncate(summary, 320),
-        content=content,
-        state=ContextNodeState(collapsed=True, loaded=True, consumed=True),
-        actions=_BASIC_ACTIONS,
-        owner_ref={
-            "session_key": _optional_text(item.get("session_key")) or "",
-            "session_id": _optional_text(item.get("session_id")) or "",
-            "tool_call_id": tool_call_id,
-            "tool_name": tool_name,
-            "tool_run_id": _optional_text(item.get("tool_run_id")) or "",
-            "status": status,
-            "evidence_type": evidence_type,
-            "evidence_lifecycle_status": _optional_text(
-                item.get("evidence_lifecycle_status"),
-            )
-            or "observed",
-            "verified": bool(item.get("verified")),
-            "failed": bool(item.get("failed")),
-            "superseded": bool(item.get("superseded")),
-            "hypothesis": bool(item.get("hypothesis")),
-            "unresolved": bool(item.get("unresolved")),
-            "call_session_item_id": _optional_text(item.get("call_session_item_id")) or "",
-            "result_session_item_id": _optional_text(item.get("result_session_item_id")) or "",
-            "call_sequence_no": item.get("call_sequence_no") or 0,
-            "result_sequence_no": item.get("result_sequence_no") or 0,
-        },
-        estimate=_text_estimate(summary),
-        display_order=display_order,
-        metadata=dict(item),
-    )
-
-
-def _browser_investigation_warning_seed(
-    item: dict[str, object],
-    *,
-    parent_id: str,
-    display_order: int,
-) -> ContextNodeSeed:
-    code = _optional_text(item.get("code")) or "browser_investigation_warning"
-    summary = _optional_text(item.get("summary")) or "Browser investigation needs attention."
-    content = _browser_investigation_warning_content(item)
-    warning_types = _browser_investigation_warning_types(
-        code=code,
-        latest_tool=_optional_text(item.get("latest_tool")) or "",
-    )
-    metadata = dict(item)
-    metadata["warning_types"] = list(warning_types)
-    metadata["warning_type"] = warning_types[0] if warning_types else "browser_investigation"
-    return ContextNodeSeed(
-        node_id=f"evidence.frontier.browser_warning.{_short_node_part(code)}",
-        parent_id=parent_id,
-        owner="session",
-        kind="investigation_warning",
-        title="Browser Investigation Warning",
-        summary=summary,
-        content=content,
-        state=ContextNodeState(collapsed=False, loaded=True),
-        actions=_BASIC_ACTIONS,
-        owner_ref={
-            "code": code,
-            "warning_types": list(warning_types),
-            "warning_type": warning_types[0] if warning_types else "browser_investigation",
-            "severity": _optional_text(item.get("severity")) or "warning",
-            "latest_tool": _optional_text(item.get("latest_tool")) or "",
-            "latest_sequence_no": item.get("latest_sequence_no") or 0,
-        },
-        estimate=_text_estimate(f"{summary}\n{content}"),
-        revision=_BROWSER_INVESTIGATION_WARNING_REVISION,
-        display_order=display_order,
-        metadata=metadata,
-    )
-
-
-def _browser_investigation_warning_content(item: dict[str, object]) -> str:
-    lines = [
-        "investigation_warning:",
-        f"  code: {_optional_text(item.get('code')) or 'browser_investigation_warning'}",
-    ]
-    for key in ("latest_tool", "latest_sequence_no", "action_required", "reason"):
-        value = item.get(key)
-        if value is not None:
-            lines.append(f"  {key}: {_json_fragment(value)}")
-    return "\n".join(lines)
-
-
-def _browser_investigation_warning_types(
-    *,
-    code: str,
-    latest_tool: str,
-) -> tuple[str, ...]:
-    if code == "browser.endpoint_candidate_not_escalated":
-        return ("candidate_not_escalated",)
-    if code == "browser.network_capture_no_requests":
-        return ("evidence_path_no_terminal_fact",)
-    if code == "browser.same_probe_repeated":
-        if latest_tool in {
-            "browser.script.extract_request",
-            "browser.script.find_request",
-            "browser.code.search",
-        }:
-            return ("same_script_candidate_repetition", "same_tool_repetition")
-        return ("same_tool_repetition",)
-    return ("browser_investigation",)
-
-
-def _evidence_items_for_current_run(
-    messages: tuple[SessionItem, ...],
-    *,
-    current_run_id: str | None,
-    tool_lifecycle_facts: dict[str, dict[str, object]] | None = None,
-    limit: int = 16,
-) -> tuple[dict[str, object], ...]:
-    sorted_messages = tuple(sorted(messages, key=lambda item: item.sequence_no))
-    current_inbound_sequence_no = _current_inbound_sequence_no(
-        sorted_messages,
-        current_run_id=current_run_id,
-    )
-    current_messages = tuple(
-        message
-        for message in sorted_messages
-        if current_inbound_sequence_no is None
-        or message.sequence_no >= current_inbound_sequence_no
-    )
-    calls_by_id = {
-        tool_call_id: message
-        for message in current_messages
-        if _is_function_call_message(message)
-        for tool_call_id in (_tool_call_id(message),)
-        if tool_call_id is not None
-    }
-    items: list[dict[str, object]] = []
-    for result_message in current_messages:
-        if result_message.role != "tool":
-            continue
-        tool_call_id = _tool_call_id(result_message)
-        call_message = calls_by_id.get(tool_call_id or "")
-        item = _tool_result_evidence_item(
-            result_message=result_message,
-            call_message=call_message,
-            lifecycle_facts=_tool_lifecycle_facts_for_result(
-                result_message,
-                tool_lifecycle_facts or {},
-            ),
-        )
-        if item is not None:
-            items.append(item)
-        if len(items) >= limit:
-            break
-    return tuple(items)
-
-
-def _browser_tool_records_for_current_run(
-    messages: tuple[SessionItem, ...],
-    *,
-    current_run_id: str | None,
-) -> tuple[dict[str, object], ...]:
-    sorted_messages = tuple(sorted(messages, key=lambda item: item.sequence_no))
-    current_inbound_sequence_no = _current_inbound_sequence_no(
-        sorted_messages,
-        current_run_id=current_run_id,
-    )
-    current_messages = tuple(
-        message
-        for message in sorted_messages
-        if current_inbound_sequence_no is None
-        or message.sequence_no >= current_inbound_sequence_no
-    )
-    calls_by_id = {
-        tool_call_id: message
-        for message in current_messages
-        if _is_function_call_message(message)
-        for tool_call_id in (_tool_call_id(message),)
-        if tool_call_id is not None
-    }
-    records: list[dict[str, object]] = []
-    for result_message in current_messages:
-        if result_message.role != "tool":
-            continue
-        tool_call_id = _tool_call_id(result_message)
-        call_message = calls_by_id.get(tool_call_id or "")
-        tool_name = _tool_name(result_message) or (
-            _tool_name(call_message) if call_message is not None else None
-        )
-        if tool_name is None or not tool_name.startswith("browser."):
-            continue
-        call_arguments = (
-            call_message.content_payload.get("arguments")
-            if call_message is not None
-            and isinstance(call_message.content_payload.get("arguments"), dict)
-            else {}
-        )
-        records.append(
-            {
-                "tool_name": tool_name,
-                "tool_call_id": tool_call_id or "",
-                "call_sequence_no": call_message.sequence_no if call_message else 0,
-                "result_sequence_no": result_message.sequence_no,
-                "arguments": call_arguments,
-                "status": _tool_result_status(result_message) or "unknown",
-                "result_content": _tool_result_content(result_message),
-            },
-        )
-    return tuple(records)
-
-
-def _browser_investigation_warnings(
-    records: tuple[dict[str, object], ...],
-) -> tuple[dict[str, object], ...]:
-    if not records:
-        return ()
-    warnings: list[dict[str, object]] = []
-    for item in (
-        _browser_network_capture_no_requests_warning(records),
-        _browser_endpoint_candidate_not_escalated_warning(records),
-        _browser_repeated_probe_warning(records),
-    ):
-        if item is not None:
-            warnings.append(item)
-    return tuple(warnings[:3])
-
-
-def _browser_network_capture_no_requests_warning(
-    records: tuple[dict[str, object], ...],
-) -> dict[str, object] | None:
-    zero_list_record = next(
-        (
-            record
-            for record in reversed(records)
-            if record.get("tool_name") == "browser.network.list_requests"
-            and _network_list_returned_no_requests(record)
-        ),
-        None,
-    )
-    if zero_list_record is None:
-        return None
-    list_sequence = _optional_int(zero_list_record.get("result_sequence_no")) or 0
-    start_records = tuple(
-        record
-        for record in records
-        if record.get("tool_name") == "browser.network.start_capture"
-        and (_optional_int(record.get("result_sequence_no")) or 0) <= list_sequence
-    )
-    if not start_records:
-        return None
-    latest_start_sequence = _optional_int(start_records[-1].get("result_sequence_no")) or 0
-    triggered = any(
-        record.get("tool_name")
-        in {
-            "browser.runtime.probe_client",
-            "browser.runtime.call_client",
-            "browser.evaluate",
-            "browser.observe",
-            "browser.action.trace",
-            "browser.click",
-            "browser.form.fill",
-            "browser.overlay.select",
-        }
-        and latest_start_sequence
-        <= (_optional_int(record.get("result_sequence_no")) or 0)
-        <= list_sequence
-        for record in records
-    )
-    if not triggered:
-        return None
-    return {
-        "code": "browser.network_capture_no_requests",
-        "severity": "warning",
-        "latest_tool": "browser.network.list_requests",
-        "latest_sequence_no": list_sequence,
-        "summary": (
-            "Network capture returned 0 requests after capture/probe. Trigger one "
-            "concrete action or report a gap; do not repeat observe/runtime probes."
-        ),
-        "action_required": (
-            "Choose one concrete trigger for the selected endpoint/client candidate, "
-            "or stop and report verified facts/gaps."
-        ),
-        "reason": "network.list_requests produced no matching requests after capture was active.",
-    }
-
-
-def _browser_endpoint_candidate_not_escalated_warning(
-    records: tuple[dict[str, object], ...],
-) -> dict[str, object] | None:
-    extract_record = next(
-        (
-            record
-            for record in reversed(records)
-            if record.get("tool_name") == "browser.script.extract_request"
-            and _endpoint_candidate_count(record) > 0
-        ),
-        None,
-    )
-    if extract_record is None:
-        return None
-    extract_sequence = _optional_int(extract_record.get("result_sequence_no")) or 0
-    after = tuple(
-        record
-        for record in records
-        if (_optional_int(record.get("result_sequence_no")) or 0) > extract_sequence
-    )
-    if len(after) < 2:
-        return None
-    if any(
-        record.get("tool_name")
-        in {
-            "browser.network.get_response_body",
-            "browser.network.get_request_body",
-            "browser.network.fetch_as_page",
-            "browser.network.replay_request",
-        }
-        for record in after
-    ):
-        return None
-    count = _endpoint_candidate_count(extract_record)
-    return {
-        "code": "browser.endpoint_candidate_not_escalated",
-        "severity": "warning",
-        "latest_tool": after[-1].get("tool_name") or "",
-        "latest_sequence_no": after[-1].get("result_sequence_no") or 0,
-        "summary": (
-            f"script.extract_request found {count} endpoint candidate(s), but the "
-            "run has not escalated to body read, page fetch, or replay."
-        ),
-        "action_required": (
-            "Select one candidate and verify it with network body/fetch/replay, "
-            "or stop and report why the candidate cannot be verified."
-        ),
-        "reason": "Endpoint candidates are partial evidence; more broad observe/search is no longer useful.",
-    }
-
-
-def _browser_repeated_probe_warning(
-    records: tuple[dict[str, object], ...],
-) -> dict[str, object] | None:
-    signatures: dict[str, list[dict[str, object]]] = {}
-    for record in records:
-        signature = _browser_probe_signature(record)
-        if signature is None:
-            continue
-        signatures.setdefault(signature, []).append(record)
-    latest_sequence = _optional_int(records[-1].get("result_sequence_no")) or 0
-    repeated = tuple(
-        items
-        for items in signatures.values()
-        if len(items) >= 2
-        and (_optional_int(items[-1].get("result_sequence_no")) or 0) >= latest_sequence - 4
-    )
-    if not repeated:
-        return None
-    latest_group = max(
-        repeated,
-        key=lambda items: _optional_int(items[-1].get("result_sequence_no")) or 0,
-    )
-    latest = latest_group[-1]
-    return {
-        "code": "browser.same_probe_repeated",
-        "severity": "warning",
-        "latest_tool": latest.get("tool_name") or "",
-        "latest_sequence_no": latest.get("result_sequence_no") or 0,
-        "summary": (
-            "The same browser probe/search was repeated without a clear new fact. "
-            "Switch evidence path or stop with verified facts/gaps."
-        ),
-        "action_required": (
-            "Do not call the same probe again unless its arguments materially change."
-        ),
-        "reason": f"Repeated signature: {_browser_probe_signature(latest) or 'unknown'}",
-    }
-
-
-def _network_list_returned_no_requests(record: dict[str, object]) -> bool:
-    content = _optional_text(record.get("result_content")) or ""
-    return "0 shown of 0" in content or "No matching requests" in content
-
-
-def _endpoint_candidate_count(record: dict[str, object]) -> int:
-    content = _optional_text(record.get("result_content")) or ""
-    match = _ENDPOINT_CANDIDATES_RE.search(content)
-    if match is None:
-        return 0
-    try:
-        return max(int(match.group(1)), 0)
-    except ValueError:
-        return 0
-
-
-def _browser_probe_signature(record: dict[str, object]) -> str | None:
-    tool_name = _optional_text(record.get("tool_name"))
-    if tool_name not in {
-        "browser.observe",
-        "browser.runtime.inspect",
-        "browser.runtime.probe_client",
-        "browser.runtime.call_client",
-        "browser.code.search",
-        "browser.script.find_request",
-        "browser.script.extract_request",
-        "browser.network.list_requests",
-    }:
-        return None
-    arguments = record.get("arguments")
-    if not isinstance(arguments, dict):
-        arguments = {}
-    if tool_name == "browser.runtime.probe_client":
-        return _signature_from_arguments(
-            tool_name,
-            arguments,
-            ("target_id", "object_path", "method_name"),
-        )
-    if tool_name == "browser.runtime.call_client":
-        return _signature_from_arguments(
-            tool_name,
-            arguments,
-            ("target_id", "object_path", "method_name", "arguments", "argument"),
-        )
-    if tool_name == "browser.runtime.inspect":
-        return _signature_from_arguments(
-            tool_name,
-            arguments,
-            ("target_id", "global_names", "include_storage"),
-        )
-    if tool_name in {"browser.code.search", "browser.script.find_request"}:
-        return _signature_from_arguments(
-            tool_name,
-            arguments,
-            ("target_id", "query", "regex"),
-        )
-    if tool_name == "browser.script.extract_request":
-        return _signature_from_arguments(
-            tool_name,
-            arguments,
-            ("target_id", "script_id", "start_line", "start_column", "column"),
-        )
-    if tool_name == "browser.network.list_requests":
-        return _signature_from_arguments(
-            tool_name,
-            arguments,
-            ("target_id", "capture_id", "keyword", "domain", "path", "method"),
-        )
-    return _signature_from_arguments(tool_name, arguments, ("target_id", "mode"))
-
-
-def _signature_from_arguments(
-    tool_name: str,
-    arguments: dict[str, object],
-    keys: tuple[str, ...],
-) -> str:
-    parts = [tool_name]
-    for key in keys:
-        value = _optional_text(arguments.get(key))
-        if value is not None:
-            parts.append(f"{key}={value}")
-    return "|".join(parts)
-
-
-def _tool_result_evidence_item(
-    *,
-    result_message: SessionItem,
-    call_message: SessionItem | None,
-    lifecycle_facts: dict[str, object] | None = None,
-) -> dict[str, object] | None:
-    tool_call_id = _tool_call_id(result_message) or (
-        _tool_call_id(call_message) if call_message is not None else None
-    )
-    tool_name = _tool_name(result_message) or (
-        _tool_name(call_message) if call_message is not None else None
-    )
-    if tool_call_id is None or tool_name is None:
-        return None
-    if not _is_evidence_tool(tool_name):
-        return None
-    status = _tool_result_status(result_message) or "unknown"
-    payload = result_message.content_payload
-    details = payload.get("details")
-    metadata = payload.get("metadata")
-    facts = _evidence_facts(
-        tool_name=tool_name,
-        payload=payload,
-        details=details,
-        metadata=metadata,
-    )
-    evidence_type = _evidence_type(tool_name=tool_name, status=status, facts=facts)
-    lifecycle_status = _evidence_lifecycle_status(
-        evidence_type=evidence_type,
-        status=status,
-        facts=facts,
-        result_message=result_message,
-        lifecycle_facts=lifecycle_facts,
-    )
-    evidence_flags = _evidence_lifecycle_flags(lifecycle_status)
-    summary = _evidence_summary(
-        tool_name=tool_name,
-        status=status,
-        evidence_type=evidence_type,
-        facts=facts,
-        result_preview=_tool_result_content(result_message),
-        error_json=_tool_result_error_json(result_message),
-    )
-    read_hints = _evidence_read_hints(
-        session_key=result_message.session_key,
-        tool_run_id=_optional_text(payload.get("tool_run_id")) or "",
-        tool_name=tool_name,
-        result_session_item_id=result_message.id,
-        result_sequence_no=result_message.sequence_no,
-        facts=facts,
-    )
-    return {
-        "session_key": result_message.session_key,
-        "session_id": result_message.session_id,
-        "evidence_type": evidence_type,
-        "tool_call_id": tool_call_id,
-        "tool_name": tool_name,
-        "tool_run_id": _optional_text(payload.get("tool_run_id")) or "",
-        "status": status,
-        "evidence_lifecycle_status": lifecycle_status,
-        **evidence_flags,
-        "summary": summary,
-        "facts": facts,
-        "call_session_item_id": call_message.id if call_message is not None else "",
-        "result_session_item_id": result_message.id,
-        "call_sequence_no": (
-            call_message.sequence_no if call_message is not None else 0
-        ),
-        "result_sequence_no": result_message.sequence_no,
-        "result_source_kind": result_message.source_kind,
-        "result_source_id": result_message.source_id,
-        "read_hints": [dict(item) for item in read_hints],
-    }
-
-
-def _is_evidence_tool(tool_name: str) -> bool:
-    return not tool_name.startswith("context_tree.")
 
 
 def _evidence_facts(
@@ -1301,21 +778,6 @@ def _merge_structured_evidence_facts(
     evidence = source.get("browser_evidence")
     if not isinstance(evidence, dict):
         return
-    path_key = _optional_text(evidence.get("evidence_path_key"))
-    if path_key is not None and "evidence_path" not in facts:
-        facts["evidence_path"] = _truncate(path_key, 80)
-    path_title = _optional_text(evidence.get("evidence_path_title"))
-    if path_title is not None and "evidence_path_title" not in facts:
-        facts["evidence_path_title"] = _truncate(path_title, 120)
-    path_tools = evidence.get("evidence_path_tools")
-    if isinstance(path_tools, list) and "evidence_path_tools" not in facts:
-        normalized_tools = [
-            _truncate(value, 120)
-            for value in (_optional_text(item) for item in path_tools)
-            if value is not None
-        ][:6]
-        if normalized_tools:
-            facts["evidence_path_tools"] = list(dict.fromkeys(normalized_tools))
     for key, alias in (
         ("payload_shape", None),
         ("result_shape", None),
@@ -1361,90 +823,6 @@ def _small_structured_evidence_fact(value: object, *, depth: int = 0) -> object 
     return _truncate(str(value), 240)
 
 
-def _evidence_read_hints(
-    *,
-    session_key: str,
-    tool_run_id: str,
-    tool_name: str,
-    result_session_item_id: str,
-    result_sequence_no: int,
-    facts: dict[str, object],
-) -> tuple[dict[str, object], ...]:
-    hints: list[dict[str, object]] = []
-    if tool_run_id:
-        hints.append(
-            {
-                "owner": "tool",
-                "label": "Read full tool run result",
-                "ref": tool_run_id,
-                "http": f"/tools/runs/{tool_run_id}",
-                "cli": f"python -m crxzipple.main tool get-run {tool_run_id}",
-            },
-        )
-    if session_key and result_session_item_id:
-        before_sequence_no = max(result_sequence_no - 1, 1)
-        hints.append(
-            {
-                "owner": "session",
-                "label": "Read raw session result item",
-                "ref": result_session_item_id,
-                "http": (
-                    f"/sessions/{session_key}/items"
-                    f"?after_sequence_no={before_sequence_no - 1}"
-                    f"&before_sequence_no={result_sequence_no + 1}"
-                ),
-            },
-        )
-    for artifact_id in _evidence_artifact_ids(facts):
-        hints.append(
-            {
-                "owner": "artifact",
-                "label": "Download artifact content",
-                "ref": artifact_id,
-                "http": f"/artifacts/{artifact_id}/download",
-            },
-        )
-    browser_hint = _browser_network_body_read_hint(tool_name=tool_name, facts=facts)
-    if browser_hint is not None:
-        hints.append(browser_hint)
-    return tuple(hints)
-
-
-def _evidence_artifact_ids(facts: dict[str, object]) -> tuple[str, ...]:
-    raw = facts.get("artifact_ids")
-    if isinstance(raw, list):
-        values = [_optional_text(item) for item in raw]
-        return tuple(dict.fromkeys(item for item in values if item is not None))
-    value = _optional_text(raw)
-    return (value,) if value is not None else ()
-
-
-def _browser_network_body_read_hint(
-    *,
-    tool_name: str,
-    facts: dict[str, object],
-) -> dict[str, object] | None:
-    if not tool_name.startswith("browser.") and not str(facts.get("kind") or "").startswith("network"):
-        return None
-    request_id = _optional_text(facts.get("request_id"))
-    target_id = _optional_text(facts.get("target_id"))
-    if request_id is None:
-        return None
-    arguments: dict[str, object] = {"request_id": request_id}
-    profile = _optional_text(facts.get("profile"))
-    if profile is not None:
-        arguments["profile"] = profile
-    if target_id is not None:
-        arguments["target_id"] = target_id
-    return {
-        "owner": "browser",
-        "label": "Read captured network response body",
-        "ref": request_id,
-        "tool": "browser.network.get_response_body",
-        "arguments": arguments,
-    }
-
-
 def _evidence_type(
     *,
     tool_name: str,
@@ -1465,7 +843,7 @@ def _evidence_type(
     if tool_name.startswith("browser.") and (
         "selector" in facts or "ref" in facts
     ):
-        return "verified_fact"
+        return "observation"
     if tool_name.startswith("browser."):
         return "observation"
     return "user_visible_result"
@@ -1475,7 +853,7 @@ def _is_failed_tool_status(status: str) -> bool:
     return status.strip().lower() not in {"succeeded", "completed", "success"}
 
 
-def _tool_interaction_verified(
+def _tool_interaction_observed(
     *,
     tool_name: str,
     status: str,
@@ -1497,7 +875,13 @@ def _tool_interaction_verified(
         status=status,
         facts=facts,
     )
-    return evidence_type == "verified_fact"
+    return evidence_type in {
+        "api_endpoint",
+        "result_shape",
+        "payload_shape",
+        "user_visible_result",
+        "observation",
+    }
 
 
 def _tool_interaction_superseded(
@@ -1535,119 +919,6 @@ def _tool_interaction_superseded_by_tool_call_id(
     return None
 
 
-def _evidence_lifecycle_status(
-    *,
-    evidence_type: str,
-    status: str,
-    facts: dict[str, object],
-    result_message: SessionItem,
-    lifecycle_facts: dict[str, object] | None = None,
-) -> str:
-    explicit = _explicit_evidence_lifecycle_status(
-        result_message,
-        lifecycle_facts=lifecycle_facts,
-    )
-    if explicit is not None:
-        return explicit
-    if _tool_interaction_superseded(
-        result_message,
-        lifecycle_facts=lifecycle_facts,
-    ):
-        return "superseded"
-    if _is_failed_tool_status(status):
-        return "failed"
-    if evidence_type == "hypothesis":
-        return "hypothesis"
-    if evidence_type in {
-        "api_endpoint",
-        "result_shape",
-        "payload_shape",
-        "user_visible_result",
-        "verified_fact",
-    }:
-        return "verified"
-    if "endpoint" in facts or "result_shape" in facts or "payload_shape" in facts:
-        return "verified"
-    return "observed"
-
-
-def _explicit_evidence_lifecycle_status(
-    result_message: SessionItem,
-    lifecycle_facts: dict[str, object] | None = None,
-) -> str | None:
-    for source in _tool_interaction_fact_sources(
-        result_message,
-        lifecycle_facts=lifecycle_facts,
-    ):
-        for key in (
-            "evidence_lifecycle_status",
-            "evidence_lifecycle",
-            "lifecycle_status",
-        ):
-            normalized = _normalize_evidence_lifecycle_status(source.get(key))
-            if normalized is not None:
-                return normalized
-        browser_evidence = source.get("browser_evidence")
-        if isinstance(browser_evidence, dict):
-            for key in (
-                "evidence_lifecycle_status",
-                "evidence_lifecycle",
-                "lifecycle_status",
-            ):
-                normalized = _normalize_evidence_lifecycle_status(
-                    browser_evidence.get(key),
-                )
-                if normalized is not None:
-                    return normalized
-    return None
-
-
-def _normalize_evidence_lifecycle_status(value: object) -> str | None:
-    text = _optional_text(value)
-    if text is None:
-        return None
-    normalized = text.strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "complete": "verified",
-        "completed": "verified",
-        "success": "verified",
-        "succeeded": "verified",
-        "valid": "verified",
-        "validated": "verified",
-        "failure": "failed",
-        "error": "failed",
-        "invalid": "failed",
-        "blocked": "failed",
-        "replaced": "superseded",
-        "obsolete": "superseded",
-        "assumption": "hypothesis",
-        "assumed": "hypothesis",
-        "unknown": "unresolved",
-        "pending": "unresolved",
-    }
-    normalized = aliases.get(normalized, normalized)
-    if normalized in {
-        "verified",
-        "failed",
-        "superseded",
-        "hypothesis",
-        "observed",
-        "unresolved",
-    }:
-        return normalized
-    return None
-
-
-def _evidence_lifecycle_flags(lifecycle_status: str) -> dict[str, object]:
-    return {
-        "verified": lifecycle_status == "verified",
-        "failed": lifecycle_status == "failed",
-        "superseded": lifecycle_status == "superseded",
-        "hypothesis": lifecycle_status == "hypothesis",
-        "unresolved": lifecycle_status == "unresolved",
-    }
-
-
 def _tool_interaction_fact_sources(
     result_message: SessionItem,
     lifecycle_facts: dict[str, object] | None = None,
@@ -1664,105 +935,6 @@ def _tool_interaction_fact_sources(
         if isinstance(candidate, dict):
             sources.append(candidate)
     return tuple(sources)
-
-
-def _evidence_summary(
-    *,
-    tool_name: str,
-    status: str,
-    evidence_type: str,
-    facts: dict[str, object],
-    result_preview: str,
-    error_json: str | None,
-) -> str:
-    ordered_fact_items = tuple(_ordered_evidence_summary_facts(facts))
-    fact_bits = [
-        f"{key}={value}"
-        for key, value in ordered_fact_items
-        if key not in {"tool_run_id", "status"} and str(value).strip()
-    ]
-    prefix = f"{tool_name} {evidence_type} ({status})."
-    if fact_bits:
-        return _truncate(f"{prefix} {'; '.join(fact_bits[:5])}.", 320)
-    if error_json:
-        return _truncate(f"{prefix} error={error_json}", 320)
-    if result_preview:
-        result_digest = _short_digest(result_preview)
-        if result_digest is not None:
-            return f"{prefix} result_sha256={result_digest}; read result handle if needed."
-    return prefix
-
-
-def _ordered_evidence_summary_facts(
-    facts: dict[str, object],
-) -> tuple[tuple[str, object], ...]:
-    priority = (
-        "endpoint",
-        "method",
-        "http_status",
-        "evidence_path",
-        "request_id",
-        "target_id",
-        "ref",
-        "selector",
-        "profile",
-        "url",
-        "kind",
-    )
-    remaining = tuple(
-        (key, value)
-        for key, value in facts.items()
-        if key not in priority
-    )
-    prioritized = tuple(
-        (key, facts[key])
-        for key in priority
-        if key in facts
-    )
-    return prioritized + remaining
-
-
-def _evidence_item_content(item: dict[str, object]) -> str:
-    facts = item.get("facts")
-    if not isinstance(facts, dict):
-        facts = {}
-    lines = [
-        f"evidence_type: {_optional_text(item.get('evidence_type')) or 'observation'}",
-        f"evidence_lifecycle: {_optional_text(item.get('evidence_lifecycle_status')) or 'observed'}",
-        f"tool: {_optional_text(item.get('tool_name')) or 'tool'}",
-        f"status: {_optional_text(item.get('status')) or 'unknown'}",
-    ]
-    if facts:
-        lines.append("facts:")
-        for key, value in facts.items():
-            if value is None or value == "":
-                continue
-            lines.append(f"  {key}: {_evidence_fact_text(value)}")
-    lines.append("refs:")
-    for key in (
-        "tool_call_id",
-        "tool_run_id",
-        "call_session_item_id",
-        "result_session_item_id",
-        "call_sequence_no",
-        "result_sequence_no",
-    ):
-        value = item.get(key)
-        if value is not None and str(value).strip():
-            lines.append(f"  {key}: {value}")
-    read_hints = item.get("read_hints")
-    if isinstance(read_hints, list) and read_hints:
-        lines.append("owner_read_hints:")
-        for hint in read_hints[:6]:
-            if isinstance(hint, dict):
-                lines.append(f"  - {_truncate(_json_fragment(hint), 280)}")
-    return "\n".join(lines)
-
-
-def _evidence_fact_text(value: object) -> str:
-    if isinstance(value, (dict, list)):
-        return _truncate(_json_fragment(value), 240)
-    return _truncate(str(value), 240)
 
 
 def _find_first_text(value: object, keys: tuple[str, ...]) -> str | None:
@@ -1796,23 +968,31 @@ def _scalar_text(value: object) -> str | None:
     return None
 
 
-def _current_segment_seed(
+def _session_instance_seed(
     *,
     instance: SessionInstance,
-    item_count: int,
+    item_count: int | None,
     parent_id: str,
+    active: bool,
     display_order: int,
 ) -> ContextNodeSeed:
-    summary = (
-        f"Active {instance.kind.value} segment #{instance.sequence_no} has "
-        f"{item_count} visible items."
-    )
+    if active:
+        summary = (
+            f"Active {instance.kind.value} instance #{instance.sequence_no} has "
+            f"{item_count or 0} visible items."
+        )
+        node_id = "session.instance.active"
+        title = "Active Instance"
+    else:
+        summary = f"Closed {instance.kind.value} instance #{instance.sequence_no}."
+        node_id = f"session.instance.closed.{_node_part(instance.id)}"
+        title = f"Closed Instance #{instance.sequence_no}"
     return ContextNodeSeed(
-        node_id="session.segment.current",
+        node_id=node_id,
         parent_id=parent_id,
         owner="session",
-        kind="session_segment",
-        title="Current Segment",
+        kind="session_instance",
+        title=title,
         summary=summary,
         state=ContextNodeState(collapsed=False, loaded=True),
         actions=_BASIC_ACTIONS,
@@ -1821,7 +1001,55 @@ def _current_segment_seed(
             "session_id": instance.id,
             "sequence_no": instance.sequence_no,
             "status": instance.status,
-            "segment_kind": "current",
+            "active": active,
+            "item_count": item_count or 0,
+        },
+        estimate=_text_estimate(summary),
+        display_order=display_order,
+        metadata={
+            "opened_at": format_datetime_utc(instance.opened_at),
+            "closed_at": (
+                format_datetime_utc(instance.closed_at)
+                if instance.closed_at is not None
+                else None
+            ),
+            "item_count": item_count,
+        },
+    )
+
+
+def _session_segment_seed(
+    *,
+    instance: SessionInstance,
+    item_count: int,
+    parent_id: str,
+    active: bool,
+    display_order: int,
+) -> ContextNodeSeed:
+    segment_kind = "active" if active else _historical_segment_kind(instance)
+    summary = (
+        f"{segment_kind.title()} segment for instance #{instance.sequence_no} has "
+        f"{item_count} visible items."
+    )
+    return ContextNodeSeed(
+        node_id=(
+            "session.segment.active"
+            if active
+            else f"session.segment.{segment_kind}.{_node_part(instance.id)}"
+        ),
+        parent_id=parent_id,
+        owner="session",
+        kind="session_segment",
+        title=f"{segment_kind.title()} Segment",
+        summary=summary,
+        state=ContextNodeState(collapsed=False, loaded=True),
+        actions=_BASIC_ACTIONS,
+        owner_ref={
+            "session_key": instance.session_key,
+            "session_id": instance.id,
+            "sequence_no": instance.sequence_no,
+            "status": instance.status,
+            "segment_kind": segment_kind,
             "item_count": item_count,
         },
         estimate=_text_estimate(summary),
@@ -1838,13 +1066,43 @@ def _current_segment_seed(
     )
 
 
+def _current_turn_seed(
+    *,
+    run_id: str,
+    session_key: str,
+    session_id: str | None,
+    parent_id: str,
+    display_order: int,
+) -> ContextNodeSeed:
+    summary = f"Current turn runtime facts are owned by orchestration run {run_id}."
+    return ContextNodeSeed(
+        node_id="session.turn.current",
+        parent_id=parent_id,
+        owner="session",
+        kind="session_turn",
+        title="Current Turn",
+        summary=summary,
+        state=ContextNodeState(collapsed=False, loaded=True),
+        actions=_BASIC_ACTIONS,
+        owner_ref={
+            "session_key": session_key,
+            "session_id": session_id or "",
+            "run_id": run_id,
+            "turn_id": run_id,
+        },
+        estimate=_text_estimate(summary),
+        display_order=display_order,
+        metadata={"run_id": run_id},
+    )
+
+
 def _historical_segment_seed(
     *,
     instance: SessionInstance,
     messages: tuple[SessionItem, ...] | None,
     parent_id: str,
     segment_kind: str,
-    message_visibility: str,
+    message_scope: str,
     fallback_summary: str | None,
     display_order: int,
 ) -> ContextNodeSeed:
@@ -1873,7 +1131,7 @@ def _historical_segment_seed(
         "sequence_no": instance.sequence_no,
         "status": instance.status,
         "segment_kind": segment_kind,
-        "message_visibility": message_visibility,
+        "message_scope": message_scope,
         "archived_count": archived_count,
         "has_summary": bool(summary_text),
     }
@@ -1886,7 +1144,7 @@ def _historical_segment_seed(
         ),
         "reset_reason": instance.reset_reason or "",
         "archived_count": archived_count,
-        "message_visibility": message_visibility,
+        "message_scope": message_scope,
         "has_summary": bool(summary_text),
     }
     if item_count is not None:
@@ -1916,13 +1174,14 @@ def _segment_message_range_seed(
     session_id: str,
     messages: tuple[SessionItem, ...],
     segment_kind: object,
-    message_visibility: str,
+    message_scope: str,
     range_token_soft_limit: int,
     display_order: int,
 ) -> ContextNodeSeed:
     first_sequence_no = messages[0].sequence_no
     last_sequence_no = messages[-1].sequence_no
     estimate = _items_estimate(messages, current_run_id=None)
+    archived = all(_is_archived_transcript_entry(message) for message in messages)
     budget_status = _range_budget_status(
         estimate=estimate,
         item_count=len(messages),
@@ -1946,6 +1205,13 @@ def _segment_message_range_seed(
         kind="session_item_range",
         title=f"Messages {first_sequence_no}-{last_sequence_no}",
         summary=summary,
+        state=ContextNodeState(
+            collapsed=True,
+            loaded=False,
+            archived=archived,
+            status="archived" if archived else "available",
+            render_reason="archived_by_compaction" if archived else "",
+        ),
         actions=_BASIC_ACTIONS,
         owner_ref={
             "session_key": session_key,
@@ -1954,14 +1220,16 @@ def _segment_message_range_seed(
             "to_sequence_no": last_sequence_no,
             "item_count": len(messages),
             "segment_kind": segment_kind,
-            "message_visibility": message_visibility,
+            "message_scope": message_scope,
+            "archived": archived,
         },
         estimate=ContextEstimate(text_chars=80, text_tokens=20),
         display_order=display_order,
         metadata={
             "item_count": len(messages),
             "segment_kind": segment_kind,
-            "message_visibility": message_visibility,
+            "message_scope": message_scope,
+            "archived": archived,
             "archived_count": sum(
                 1
                 for message in messages
@@ -1983,7 +1251,7 @@ def _split_segment_message_range_seeds(
     session_id: str,
     messages: tuple[SessionItem, ...],
     segment_kind: object,
-    message_visibility: str,
+    message_scope: str,
     range_token_soft_limit: int,
 ) -> tuple[ContextNodeSeed, ...]:
     midpoint = max(len(messages) // 2, 1)
@@ -1998,7 +1266,7 @@ def _split_segment_message_range_seeds(
                 session_id=session_id,
                 messages=chunk,
                 segment_kind=segment_kind,
-                message_visibility=message_visibility,
+                message_scope=message_scope,
                 range_token_soft_limit=range_token_soft_limit,
                 display_order=display_order,
             ),
@@ -2075,11 +1343,6 @@ def _message_node_seeds(
         for tool_call_id in (_tool_call_id(message),)
         if tool_call_id is not None
     }
-    fallback_frontier_tool_call_ids = _fallback_frontier_tool_call_ids(
-        sorted_messages,
-        current_inbound_sequence_no=current_inbound_sequence_no,
-        tool_results_by_call_id=tool_results_by_call_id,
-    )
     paired_message_ids: set[str] = set()
     seeds: list[ContextNodeSeed] = []
     for message in sorted_messages:
@@ -2099,9 +1362,6 @@ def _message_node_seeds(
                             result_message=result,
                             current_inbound_sequence_no=current_inbound_sequence_no,
                             consumed_through_sequence_no=consumed_through_sequence_no,
-                            fallback_frontier_tool_call_ids=(
-                                fallback_frontier_tool_call_ids
-                            ),
                         ),
                         consumed_through_sequence_no=consumed_through_sequence_no,
                         current_run_id=current_run_id,
@@ -2131,6 +1391,57 @@ def _message_node_seeds(
         parent_id=parent_id,
         visible_limit=consumed_tool_history_visible_limit,
     )
+
+
+def _current_items_range_prompt_content(
+    messages: tuple[SessionItem, ...],
+    *,
+    current_run_id: str | None,
+    visible_tool_limit: int,
+) -> str:
+    if not messages:
+        return ""
+    first_sequence_no = messages[0].sequence_no
+    last_sequence_no = messages[-1].sequence_no
+    lines = [
+        (
+            f"active_segment: {len(messages)} items, "
+            f"sequences {first_sequence_no}-{last_sequence_no}."
+        ),
+    ]
+    tool_seeds = tuple(
+        seed
+        for seed in _message_node_seeds(
+            messages,
+            parent_id="session.items.current.preview",
+            current_run_id=current_run_id,
+            consumed_through_sequence_no=None,
+            collapse_consumed_tool_history=True,
+            consumed_tool_history_visible_limit=visible_tool_limit,
+            only_tool_interactions=True,
+        )
+        if seed.kind == "tool_interaction" and seed.content
+    )
+    if not tool_seeds:
+        return "\n".join(lines)
+    lines.append("recent_tool_interactions:")
+    for seed in tool_seeds:
+        lines.extend(
+            f"  {line}"
+            for line in _tool_interaction_range_preview(seed).splitlines()
+        )
+    return "\n".join(lines)
+
+
+def _tool_interaction_range_preview(seed: ContextNodeSeed) -> str:
+    if bool(seed.metadata.get("frontier")) and not seed.state.collapsed and seed.content:
+        return seed.content
+    if seed.summary:
+        return f"tool_interaction: {seed.summary}"
+    content_digest = _optional_text(seed.metadata.get("content_digest"))
+    if content_digest is not None:
+        return f"tool_interaction: collapsed; content_sha256={content_digest[:12]}."
+    return "tool_interaction: collapsed; expand for refs."
 
 
 def _collapse_consumed_tool_history_seeds(
@@ -2270,6 +1581,7 @@ def _message_node_seed(
     parent_id: str,
     current_run_id: str | None = None,
 ) -> ContextNodeSeed:
+    archived = _is_archived_transcript_entry(message)
     current_inbound = _is_current_inbound_message(
         message,
         current_run_id=current_run_id,
@@ -2280,6 +1592,51 @@ def _message_node_seed(
         else _message_preview(message)
     )
     content = "" if current_inbound else _message_prompt_content(message)
+    owner_ref: dict[str, object] = {
+        "session_key": message.session_key,
+        "session_id": message.session_id,
+        "session_item_id": message.id,
+        "sequence_no": message.sequence_no,
+        "role": message.role,
+        "kind": _kind_label(message),
+        "visibility": _visibility_label(message),
+        "source_module": getattr(message, "source_module", "") or "",
+        "source_kind": message.source_kind or "",
+        "source_id": message.source_id or "",
+    }
+    for key in (
+        "archived_reason",
+        "archived_by_compaction_run_id",
+        "compacted_segment_id",
+        "archived_through_item_sequence_no",
+        "summary_item_id",
+    ):
+        value = message.metadata.get(key)
+        if value not in (None, "", {}, []):
+            owner_ref[key] = value
+    metadata: dict[str, object] = {
+        "created_at": format_datetime_utc(message.created_at),
+        "source_kind": message.source_kind,
+        "source_id": message.source_id,
+        "role": message.role,
+        "kind": _kind_label(message),
+        "sequence_no": message.sequence_no,
+        "visibility": _visibility_label(message),
+        "current_inbound": current_inbound,
+        "content_block_types": _content_block_types(message),
+        "content_digest": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "archived": archived,
+    }
+    for key in (
+        "archived_reason",
+        "archived_by_compaction_run_id",
+        "compacted_segment_id",
+        "archived_through_item_sequence_no",
+        "summary_item_id",
+    ):
+        value = message.metadata.get(key)
+        if value not in (None, "", {}, []):
+            metadata[key] = value
     return ContextNodeSeed(
         node_id=f"session.item.{message.session_id}.{message.sequence_no}",
         parent_id=parent_id,
@@ -2288,34 +1645,18 @@ def _message_node_seed(
         title=f"{message.sequence_no}. {message.role}",
         summary=preview,
         content=content,
-        state=ContextNodeState(collapsed=False, loaded=True),
+        state=ContextNodeState(
+            collapsed=False,
+            loaded=True,
+            archived=archived,
+            status="archived" if archived else "available",
+            render_reason="archived_by_compaction" if archived else "",
+        ),
         actions=_BASIC_ACTIONS,
-        owner_ref={
-            "session_key": message.session_key,
-            "session_id": message.session_id,
-            "session_item_id": message.id,
-            "sequence_no": message.sequence_no,
-            "role": message.role,
-            "kind": _kind_label(message),
-            "visibility": _visibility_label(message),
-            "source_module": getattr(message, "source_module", "") or "",
-            "source_kind": message.source_kind or "",
-            "source_id": message.source_id or "",
-        },
+        owner_ref=owner_ref,
         estimate=_message_estimate(message, content),
         display_order=message.sequence_no,
-        metadata={
-            "created_at": format_datetime_utc(message.created_at),
-            "source_kind": message.source_kind,
-            "source_id": message.source_id,
-            "role": message.role,
-            "kind": _kind_label(message),
-            "sequence_no": message.sequence_no,
-            "visibility": _visibility_label(message),
-            "current_inbound": current_inbound,
-            "content_block_types": _content_block_types(message),
-            "content_digest": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        },
+        metadata=metadata,
     )
 
 
@@ -2343,11 +1684,14 @@ def _tool_interaction_node_seed(
         current_inbound_sequence_no is not None
         and call_message.sequence_no >= current_inbound_sequence_no
     )
+    archived = _is_archived_transcript_entry(
+        call_message,
+    ) or _is_archived_transcript_entry(result_message)
     consumed = not frontier
     opened_by_default = False
     collapsed_by_default = not frontier and not opened_by_default
     failed = _is_failed_tool_status(status)
-    verified = _tool_interaction_verified(
+    observed = _tool_interaction_observed(
         tool_name=tool_name,
         status=status,
         result_message=result_message,
@@ -2369,8 +1713,8 @@ def _tool_interaction_node_seed(
         if failed
         else "superseded"
         if superseded
-        else "verified"
-        if verified
+        else "observed"
+        if observed
         else "consumed"
     )
     content = _tool_interaction_prompt_content(
@@ -2409,6 +1753,9 @@ def _tool_interaction_node_seed(
             loaded=True,
             opened=opened_by_default,
             consumed=consumed,
+            archived=archived,
+            status="archived" if archived else "available",
+            render_reason="archived_by_compaction" if archived else "",
         ),
         actions=_BASIC_ACTIONS,
         owner_ref={
@@ -2422,7 +1769,7 @@ def _tool_interaction_node_seed(
             "current_turn": current_turn,
             "consumed": consumed,
             "failed": failed,
-            "verified": verified,
+            "observed": observed,
             "superseded": superseded,
             "superseded_by_tool_call_id": superseded_by_tool_call_id or "",
             "call_session_item_id": call_message.id,
@@ -2431,6 +1778,7 @@ def _tool_interaction_node_seed(
             "result_sequence_no": result_message.sequence_no,
             "consumed_through_sequence_no": consumed_through_sequence_no,
             "visibility": _visibility_label(result_message),
+            "archived": archived,
         },
         estimate=_text_estimate(content if not collapsed_by_default else summary),
         revision=_TOOL_INTERACTION_NODE_REVISION,
@@ -2454,14 +1802,15 @@ def _tool_interaction_node_seed(
             "result_source_id": result_message.source_id,
             "call_sequence_no": call_message.sequence_no,
             "result_sequence_no": result_message.sequence_no,
+            "archived": archived,
             "consumed_through_sequence_no": consumed_through_sequence_no,
-            "prompt_visibility_status": visibility_status,
+            "snapshot_visibility_status": visibility_status,
             "lifecycle_status": lifecycle_status,
             "frontier": frontier,
             "current_turn": current_turn,
             "consumed": consumed,
             "failed": failed,
-            "verified": verified,
+            "observed": observed,
             "superseded": superseded,
             "superseded_by_tool_call_id": superseded_by_tool_call_id or "",
             "collapsed_by_default": collapsed_by_default,
@@ -2524,57 +1873,14 @@ def _is_tool_interaction_frontier(
     result_message: SessionItem,
     current_inbound_sequence_no: int | None,
     consumed_through_sequence_no: int | None,
-    fallback_frontier_tool_call_ids: frozenset[str] = frozenset(),
 ) -> bool:
     if current_inbound_sequence_no is None:
         return False
     if call_message.sequence_no < current_inbound_sequence_no:
         return False
     if consumed_through_sequence_no is None:
-        tool_call_id = _tool_call_id(call_message) or _tool_call_id(result_message)
-        return tool_call_id in fallback_frontier_tool_call_ids
+        return False
     return result_message.sequence_no > consumed_through_sequence_no
-
-
-def _fallback_frontier_tool_call_ids(
-    messages: tuple[SessionItem, ...],
-    *,
-    current_inbound_sequence_no: int | None,
-    tool_results_by_call_id: dict[str, SessionItem],
-) -> frozenset[str]:
-    if current_inbound_sequence_no is None:
-        return frozenset()
-    pairs: list[tuple[int, str, str, str]] = []
-    for message in messages:
-        if message.sequence_no < current_inbound_sequence_no:
-            continue
-        tool_call_id = _tool_call_id(message)
-        if not _is_function_call_message(message) or tool_call_id is None:
-            continue
-        result = tool_results_by_call_id.get(tool_call_id)
-        if result is None:
-            continue
-        pairs.append(
-            (
-                result.sequence_no,
-                message.source_kind,
-                message.source_id,
-                tool_call_id,
-            ),
-        )
-    if not pairs:
-        return frozenset()
-    _latest_result_sequence, latest_source_kind, latest_source_id, latest_call_id = max(
-        pairs,
-        key=lambda item: item[0],
-    )
-    if latest_source_kind == "llm_invocation" and latest_source_id:
-        return frozenset(
-            tool_call_id
-            for _result_sequence, source_kind, source_id, tool_call_id in pairs
-            if source_kind == latest_source_kind and source_id == latest_source_id
-        )
-    return frozenset({latest_call_id})
 
 
 def _message_preview(message: SessionItem) -> str:
@@ -2785,7 +2091,8 @@ def _large_tool_result_ref_content(message: SessionItem) -> str | None:
             return envelope_content
     if not artifact_ids and not body_removed:
         return None
-    lines = ["result_body: omitted_from_prompt"]
+    lines = ["tool_result_ref:"]
+    lines.append("body_storage: externalized")
     endpoint = _optional_text(details.get("endpoint"))
     method = _optional_text(details.get("method"))
     request_id = _optional_text(evidence.get("request_id")) or _optional_text(
@@ -2797,9 +2104,6 @@ def _large_tool_result_ref_content(message: SessionItem) -> str | None:
         lines.append(f"method: {method}")
     if request_id is not None:
         lines.append(f"request_id: {request_id}")
-    evidence_path = _browser_evidence_path_ref_line(evidence)
-    if evidence_path is not None:
-        lines.append(evidence_path)
     if artifact_ids:
         lines.append(f"artifact_refs: {', '.join(artifact_ids)}")
     payload_shape = _small_structured_evidence_fact(evidence.get("payload_shape"))
@@ -2808,7 +2112,7 @@ def _large_tool_result_ref_content(message: SessionItem) -> str | None:
     result_shape = _small_structured_evidence_fact(evidence.get("result_shape"))
     if result_shape is not None:
         lines.append(f"result_shape: {_json_fragment(result_shape)}")
-    lines.append("read_full_result: use owner refs or evidence read_hints")
+    lines.append("full_result_refs: artifact refs or read handles are available when needed")
     return "\n".join(lines)
 
 
@@ -2822,7 +2126,8 @@ def _tool_result_envelope_ref_content(
     truncated = envelope.get("truncated") is True
     if not truncated and not artifact_ids and not body_removed:
         return None
-    lines = ["result_body: omitted_from_prompt"]
+    lines = ["tool_result_ref:"]
+    lines.append("body_storage: externalized")
     status = _optional_text(envelope.get("status"))
     summary = _optional_text(envelope.get("summary"))
     if status is not None:
@@ -2832,9 +2137,6 @@ def _tool_result_envelope_ref_content(
     key_facts = envelope.get("key_facts")
     if isinstance(key_facts, dict) and key_facts:
         lines.append(f"key_facts: {_json_fragment(key_facts)}")
-    evidence_path = _browser_evidence_path_ref_line(browser_evidence)
-    if evidence_path is not None:
-        lines.append(evidence_path)
     refs = _envelope_text_list(envelope.get("evidence_refs"))
     if artifact_ids:
         refs = tuple(dict.fromkeys((*refs, *artifact_ids)))
@@ -2852,22 +2154,8 @@ def _tool_result_envelope_ref_content(
     warnings = _envelope_text_list(envelope.get("warnings"))
     if warnings:
         lines.append(f"warnings: {'; '.join(warnings)}")
-    lines.append("read_full_result: use owner refs or evidence read_hints")
+    lines.append("full_result_refs: artifact refs or read handles are available when needed")
     return "\n".join(lines)
-
-
-def _browser_evidence_path_ref_line(evidence: dict[str, object]) -> str | None:
-    key = _optional_text(evidence.get("evidence_path_key"))
-    title = _optional_text(evidence.get("evidence_path_title"))
-    tools = _envelope_text_list(evidence.get("evidence_path_tools"))
-    if key is None and title is None and not tools:
-        return None
-    label = key or title or "browser_evidence"
-    if key is not None and title is not None:
-        label = f"{key} ({title})"
-    if tools:
-        label += ": " + ", ".join(tools[:4])
-    return f"evidence_path: {label}"
 
 
 def _metadata_artifact_ids(metadata: dict[str, object]) -> tuple[str, ...]:
@@ -2990,19 +2278,7 @@ def _kind_label(message: Any) -> str:
 def _visibility_label(message: Any) -> str:
     if _is_archived_transcript_entry(message):
         return "archived"
-    visibility = getattr(message, "visibility", "")
-    enum_value = getattr(visibility, "value", None)
-    if enum_value is not None:
-        return str(enum_value)
-    to_payload = getattr(visibility, "to_payload", None)
-    if callable(to_payload):
-        payload = to_payload()
-        if payload.get("model_visible") is True:
-            return "default"
-        if payload.get("trace_visible") is True:
-            return "internal"
-        return "internal"
-    return str(visibility)
+    return "default"
 
 
 def _message_estimate(message: SessionItem, content: str) -> ContextEstimate:
@@ -3050,7 +2326,7 @@ def _is_current_inbound_message(
     )
 
 
-def _consumed_direct_transcript_through_sequence_no_from_summaries(
+def _consumed_draft_input_through_sequence_no_from_summaries(
     summaries: tuple[dict[str, object], ...],
     *,
     session_id: str,
@@ -3060,7 +2336,7 @@ def _consumed_direct_transcript_through_sequence_no_from_summaries(
         consumption = summary.get("llm_transcript_consumption")
         if not isinstance(consumption, dict):
             continue
-        sequence_range = consumption.get("direct_transcript_sequence_range")
+        sequence_range = consumption.get("draft_input_sequence_range")
         if not isinstance(sequence_range, dict):
             continue
         sessions = sequence_range.get("sessions")
@@ -3232,6 +2508,229 @@ def _execution_step_item_summaries(
     return tuple(summaries)
 
 
+def _execution_step_node_seeds(
+    execution_query: Any,
+    turn_id: str,
+    *,
+    parent_id: str,
+) -> tuple[ContextNodeSeed, ...]:
+    seeds: list[ContextNodeSeed] = []
+    display_order = 10
+    for chain in execution_query.list_execution_chains(turn_id):
+        chain_id = _entity_id(chain)
+        if chain_id is None:
+            continue
+        for step in execution_query.list_execution_steps(chain_id):
+            step_id = _entity_id(step)
+            if step_id is None:
+                continue
+            kind = _value_label(getattr(step, "kind", None)) or "step"
+            status = _value_label(getattr(step, "status", None)) or "unknown"
+            step_index = _optional_int(getattr(step, "step_index", None)) or 0
+            item_count = len(execution_query.list_execution_step_items(step_id))
+            summary = (
+                f"Execution step {step_index}: {kind}; status={status}; "
+                f"items={item_count}."
+            )
+            seeds.append(
+                ContextNodeSeed(
+                    node_id=f"session.step.{_node_part(step_id)}",
+                    parent_id=parent_id,
+                    owner="session",
+                    kind="session_step",
+                    title=f"{step_index}. {kind}",
+                    summary=summary,
+                    state=ContextNodeState(collapsed=False, loaded=True),
+                    actions=_BASIC_ACTIONS,
+                    owner_ref={
+                        "turn_id": turn_id,
+                        "run_id": turn_id,
+                        "chain_id": chain_id,
+                        "step_id": step_id,
+                        "step_index": step_index,
+                        "kind": kind,
+                        "status": status,
+                    },
+                    estimate=_text_estimate(summary),
+                    display_order=display_order + step_index,
+                    metadata={
+                        "item_count": item_count,
+                        "chain_status": _value_label(getattr(chain, "status", None))
+                        or "",
+                    },
+                ),
+            )
+            display_order += 10
+    return tuple(seeds)
+
+
+def _execution_step_item_node_seeds(
+    execution_query: Any,
+    step_id: str,
+    *,
+    parent_id: str,
+) -> tuple[ContextNodeSeed, ...]:
+    seeds: list[ContextNodeSeed] = []
+    for index, item in enumerate(execution_query.list_execution_step_items(step_id), start=1):
+        item_id = _entity_id(item)
+        if item_id is None:
+            continue
+        item_kind = _value_label(getattr(item, "kind", None)) or "execution_item"
+        status = _value_label(getattr(item, "status", None)) or "unknown"
+        summary_payload = getattr(item, "summary_payload", None)
+        runtime_semantic_kind = _runtime_semantic_kind(summary_payload)
+        runtime_kind = _runtime_node_kind_for_execution_item(
+            item_kind,
+            runtime_semantic_kind=runtime_semantic_kind,
+        )
+        summary = _execution_item_summary(
+            item_kind=item_kind,
+            status=status,
+            summary_payload=summary_payload,
+        )
+        owner_ref = _execution_item_owner_ref(item)
+        owner_ref.update(
+            {
+                "step_id": step_id,
+                "execution_step_item_id": item_id,
+                "kind": item_kind,
+                "status": status,
+            },
+        )
+        seeds.append(
+            ContextNodeSeed(
+                node_id=f"session.step.item.{_node_part(item_id)}",
+                parent_id=parent_id,
+                owner="session",
+                kind=runtime_kind,
+                title=f"{index}. {item_kind}",
+                summary=summary,
+                state=ContextNodeState(collapsed=True, loaded=True),
+                actions=_BASIC_ACTIONS,
+                owner_ref=owner_ref,
+                estimate=_text_estimate(summary),
+                display_order=index * 10,
+                metadata={
+                    **(
+                        {"runtime_semantic_kind": runtime_semantic_kind}
+                        if runtime_semantic_kind is not None
+                        else {}
+                    ),
+                    "summary_payload_keys": sorted(str(key) for key in summary_payload)
+                    if isinstance(summary_payload, dict)
+                    else [],
+                },
+            ),
+        )
+    return tuple(seeds)
+
+
+def _entity_id(entity: object) -> str | None:
+    return _optional_text(getattr(entity, "id", None))
+
+
+def _value_label(value: object) -> str | None:
+    raw_value = getattr(value, "value", value)
+    return _optional_text(raw_value)
+
+
+def _runtime_node_kind_for_execution_item(
+    item_kind: str,
+    *,
+    runtime_semantic_kind: str | None = None,
+) -> str:
+    semantic_kind = _runtime_node_kind_for_semantic_kind(runtime_semantic_kind)
+    if semantic_kind is not None:
+        return semantic_kind
+    return {
+        "llm_invocation": "runtime_llm_invocation",
+        "continuation_decision": "runtime_continuation_decision",
+        "tool_call": "runtime_assistant_tool_call",
+        "tool_run": "runtime_tool_run",
+        "tool_result": "runtime_tool_result",
+        "approval_request": "runtime_approval_request",
+        "session_message": "runtime_session_message",
+        "context_snapshot": "runtime_context_snapshot",
+    }.get(item_kind, "runtime_execution_item")
+
+
+def _runtime_node_kind_for_semantic_kind(runtime_semantic_kind: str | None) -> str | None:
+    if runtime_semantic_kind is None:
+        return None
+    return {
+        "runtime.assistant_progress": "runtime_assistant_progress",
+        "runtime.assistant_message": "runtime_assistant_message",
+        "runtime.assistant_tool_call": "runtime_assistant_tool_call",
+        "runtime.final_answer": "runtime_final_answer",
+        "runtime.reasoning": "runtime_reasoning",
+        "runtime.tool_result": "runtime_tool_result",
+        "runtime.provider_external_activity": "runtime_provider_external_activity",
+        "runtime.context_compaction": "runtime_context_compaction",
+        "runtime.structured_output": "runtime_structured_output",
+        "runtime.blocked_state": "runtime_blocked_state",
+    }.get(runtime_semantic_kind)
+
+
+def _runtime_semantic_kind(summary_payload: object) -> str | None:
+    if not isinstance(summary_payload, dict):
+        return None
+    return _optional_text(summary_payload.get("runtime_semantic_kind"))
+
+
+def _execution_item_summary(
+    *,
+    item_kind: str,
+    status: str,
+    summary_payload: object,
+) -> str:
+    facts: list[str] = [f"{item_kind}; status={status}"]
+    if isinstance(summary_payload, dict):
+        for key in (
+            "assistant_progress_item_ids",
+            "assistant_message_item_ids",
+            "tool_call_names",
+            "tool_call_id",
+            "tool_run_id",
+            "llm_invocation_id",
+            "llm_response_item_id",
+            "runtime_semantic_kind",
+            "session_item_id",
+        ):
+            value = summary_payload.get(key)
+            if value in (None, "", (), [], {}):
+                continue
+            facts.append(f"{key}={_json_fragment(value)}")
+    return _truncate("; ".join(facts), 320)
+
+
+def _execution_item_owner_ref(item: object) -> dict[str, object]:
+    owner = getattr(item, "owner", None)
+    owner_ref: dict[str, object] = {}
+    if owner is not None:
+        owner_kind = _optional_text(getattr(owner, "owner_kind", None))
+        owner_id = _optional_text(getattr(owner, "owner_id", None))
+        if owner_kind is not None:
+            owner_ref["owner_kind"] = owner_kind
+        if owner_id is not None:
+            owner_ref["owner_id"] = owner_id
+    summary_payload = getattr(item, "summary_payload", None)
+    if isinstance(summary_payload, dict):
+        for key in (
+            "llm_invocation_id",
+            "llm_response_item_id",
+            "runtime_semantic_kind",
+            "session_item_id",
+            "tool_call_id",
+            "tool_run_id",
+            "request_render_snapshot_id",
+            "approval_request_id",
+        ):
+            value = _optional_text(summary_payload.get(key))
+            if value is not None:
+                owner_ref[key] = value
+    return owner_ref
+
+
 def _text_estimate(text: str) -> ContextEstimate:
     normalized = text or ""
     return ContextEstimate(
@@ -3278,25 +2777,25 @@ def _segment_messages(
     messages: tuple[SessionItem, ...],
     *,
     session_id: str,
-    message_visibility: str,
+    message_scope: str,
 ) -> tuple[SessionItem, ...]:
     return tuple(
         message
         for message in messages
         if message.session_id == session_id
-        and _matches_message_visibility(
+        and _matches_message_scope(
             message,
-            message_visibility=message_visibility,
+            message_scope=message_scope,
         )
     )
 
 
-def _matches_message_visibility(
+def _matches_message_scope(
     message: Any,
     *,
-    message_visibility: str,
+    message_scope: str,
 ) -> bool:
-    if message_visibility == "archived":
+    if message_scope == "archived":
         return _is_archived_transcript_entry(message)
     return True
 
@@ -3311,10 +2810,34 @@ def _is_archived_transcript_entry(message: Any) -> bool:
     )
 
 
+def _is_session_instance_node_id(node_id: str) -> bool:
+    return node_id == "session.instance.active" or node_id.startswith(
+        "session.instance.closed.",
+    )
+
+
+def _is_session_segments_root_node_id(node_id: str) -> bool:
+    return node_id == "session.segments.active" or node_id.startswith(
+        "session.segments.closed.",
+    )
+
+
+def _is_session_segment_node_id(node_id: str) -> bool:
+    return node_id == "session.segment.active" or node_id.startswith(
+        "session.segment.compacted.",
+    ) or node_id.startswith("session.segment.closed.")
+
+
 def _is_historical_segment_node_id(node_id: str) -> bool:
     return node_id.startswith("session.segment.compacted.") or node_id.startswith(
         "session.segment.closed.",
     )
+
+
+def _session_segments_root_id(instance: SessionInstance, *, active: bool) -> str:
+    if active:
+        return "session.segments.active"
+    return f"session.segments.closed.{_node_part(instance.id)}"
 
 
 def _historical_segment_kind(instance: SessionInstance) -> str:

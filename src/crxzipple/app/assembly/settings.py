@@ -24,7 +24,10 @@ from crxzipple.modules.settings.infrastructure.persistence import (
 )
 
 
-def settings_factories() -> tuple[ApplicationFactory, ...]:
+def settings_factories(
+    *,
+    seed_core_resources: bool = True,
+) -> tuple[ApplicationFactory, ...]:
     """Build Settings module-local services from the database session factory."""
 
     return (
@@ -43,18 +46,29 @@ def settings_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.DATABASE_ENGINE,
                 AppKey.DATABASE_SESSION_FACTORY,
             ),
-            build=_build_settings_services,
+            build=lambda ctx: _build_settings_services(
+                ctx,
+                seed_core_resources=seed_core_resources,
+            ),
         ),
     )
 
 
-def _build_settings_services(ctx) -> dict[str, Any]:
+def _build_settings_services(
+    ctx,
+    *,
+    seed_core_resources: bool,
+) -> dict[str, Any]:
     settings = ctx.require(AppKey.CORE_SETTINGS)
     engine = ctx.require(AppKey.DATABASE_ENGINE)
     session_factory = ctx.require(AppKey.DATABASE_SESSION_FACTORY)
     _ensure_settings_schema(engine)
     services = create_sqlalchemy_settings_services(session_factory)
-    bootstrap_result = seed_core_settings_resources(settings, services=services)
+    bootstrap_result = (
+        seed_core_settings_resources(settings, services=services)
+        if seed_core_resources
+        else None
+    )
     materializer = SettingsEffectiveConfigMaterializer(
         services.queries,
         environment=settings.environment,

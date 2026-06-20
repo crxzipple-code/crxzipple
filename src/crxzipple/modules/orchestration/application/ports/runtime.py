@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.engine import RunPromptInputPreview
+    from crxzipple.modules.orchestration.application.engine import RuntimeLlmRequestPreview
     from crxzipple.modules.orchestration.application.commands import (
         RequestCompactionInput,
         RequestDueHeartbeatsInput,
@@ -134,6 +134,7 @@ class OrchestrationRunQueryPort(OrchestrationRunLookupPort, Protocol):
         self,
         *,
         status: "OrchestrationRunStatus | None" = None,
+        session_key: str | None = None,
     ) -> "list[OrchestrationRun]":
         ...
 
@@ -211,7 +212,7 @@ class OrchestrationExecutorLeaseQueryPort(Protocol):
 
 
 class OrchestrationInspectionPort(Protocol):
-    def preview_prompt(self, run_id: str) -> "RunPromptInputPreview":
+    def preview_runtime_llm_request(self, run_id: str) -> "RuntimeLlmRequestPreview":
         ...
 
     def resolve_tools(self, run: "OrchestrationRun") -> "ResolvedToolSet":
@@ -224,9 +225,6 @@ class OrchestrationInspectionPort(Protocol):
         tool: "Tool",
         target: "ToolExecutionTarget",
     ) -> "ToolExecutionDecision":
-        ...
-
-    def set_memory_flush_transcript_max_chars(self, max_chars: int) -> None:
         ...
 
 

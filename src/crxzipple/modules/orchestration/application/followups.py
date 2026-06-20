@@ -115,7 +115,7 @@ class SessionsSpawnFollowupService:
                     session_key=requester_session.id,
                     active_session_id=requester_session.active_session_id,
                     metadata={
-                        "prompt_flow_hint": {
+                        "runtime_request_flow_hint": {
                             "mode": "recovery_resume",
                             "reason": "child_session_completed",
                         },

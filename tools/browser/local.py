@@ -17,9 +17,6 @@ from crxzipple.modules.browser.application import (
     BrowserToolApplicationError,
     BrowserToolExecutionError,
 )
-from crxzipple.modules.browser.application.evidence_paths import (
-    browser_evidence_path_payload,
-)
 from crxzipple.modules.browser.interfaces.profile_payloads import build_profile_diagnostics_payload
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.shared.content_blocks import (
@@ -94,8 +91,6 @@ _CODE_PAGE_ACTION_KINDS = frozenset(
         "code-search",
         "script-inspect",
         "script-extract-request",
-        "runtime-probe-client",
-        "runtime-call-client",
     }
 )
 _LOCAL_PAGE_ACTION_KINDS = (
@@ -161,8 +156,6 @@ _ADVANCED_PAGE_ACTION_KINDS = frozenset(
         "code-search",
         "script-inspect",
         "script-extract-request",
-        "runtime-probe-client",
-        "runtime-call-client",
     }
 )
 _NETWORK_TOOL_KIND_BY_TOOL_ID = {
@@ -604,11 +597,6 @@ def _tool_result(
         details=details,
         runtime_metadata=browser_runtime_metadata,
     )
-    if browser_evidence:
-        content_blocks = _browser_content_blocks_with_evidence_path(
-            content_blocks,
-            browser_evidence,
-        )
     metadata = {
         "tool": tool_id,
         "family": family,
@@ -668,7 +656,6 @@ def _browser_evidence_metadata(
     runtime_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {"tool": tool_id}
-    evidence.update(_browser_evidence_path_metadata(tool_id=tool_id, kind=kind))
     for key, value in (
         ("family", family),
         ("kind", kind),
@@ -777,89 +764,6 @@ def _browser_evidence_metadata(
         for key, value in evidence.items()
         if value is not None and value != "" and value != [] and value != {}
     }
-
-
-def _browser_evidence_path_metadata(
-    *,
-    tool_id: str,
-    kind: str | None,
-) -> dict[str, Any]:
-    key = _browser_evidence_path_key(tool_id=tool_id, kind=kind)
-    payload = browser_evidence_path_payload(key)
-    if payload is None:
-        return {}
-    tool_ids = payload.get("tool_ids")
-    return {
-        "evidence_path_key": _normalize_text(payload.get("key")),
-        "evidence_path_title": _normalize_text(payload.get("title")),
-        "evidence_path_tools": [
-            item
-            for item in (
-                _normalize_text(entry)
-                for entry in (tool_ids if isinstance(tool_ids, list) else [])
-            )
-            if item is not None
-        ],
-    }
-
-
-def _browser_evidence_path_key(*, tool_id: str, kind: str | None) -> str | None:
-    normalized_tool = _normalize_text(tool_id)
-    normalized_kind = _normalize_text(kind)
-    runtime_code_tools = {
-        "browser.runtime.inspect",
-        "browser.script.list",
-        "browser.script.find_request",
-        "browser.code.search",
-        "browser.script.inspect",
-        "browser.script.extract_request",
-        "browser.runtime.probe_client",
-        "browser.runtime.call_client",
-    }
-    stateful_tools = {
-        "browser.action",
-        "browser.action.trace",
-        "browser.form.inspect",
-        "browser.form.fill",
-        "browser.overlay.observe",
-        "browser.overlay.select",
-        "browser.dom.inspect",
-        "browser.dom.clickability",
-    }
-    diagnostic_tools = {
-        "browser.page.errors",
-        "browser.performance.metrics",
-        "browser.diagnostics.collect",
-        "browser.trace.start",
-        "browser.trace.stop",
-        "browser.trace.export",
-    }
-    orient_tools = {"browser.observe", "browser.tabs.list", "browser.navigate"}
-    if normalized_kind in _CODE_PAGE_ACTION_KINDS or normalized_tool in runtime_code_tools:
-        return "runtime_and_code"
-    if normalized_kind in _NETWORK_PAGE_ACTION_KINDS or (
-        normalized_tool is not None and normalized_tool.startswith("browser.network.")
-    ):
-        return "network_truth"
-    if (
-        normalized_kind in _DOM_PAGE_ACTION_KINDS
-        or (normalized_kind is not None and _is_browser_interaction_kind(normalized_kind))
-        or normalized_tool in stateful_tools
-    ):
-        return "stateful_interaction"
-    if normalized_kind in (_DEEP_STORAGE_PAGE_ACTION_KINDS | _DIAGNOSTIC_PAGE_ACTION_KINDS) or (
-        normalized_tool is not None
-        and (
-            normalized_tool.startswith("browser.storage.")
-            or normalized_tool.startswith("browser.service_worker.")
-            or normalized_tool in diagnostic_tools
-        )
-    ):
-        return "diagnose_blockers"
-    if normalized_tool in orient_tools:
-        return "orient"
-    return None
-
 
 def _browser_action_evidence(
     *,
@@ -1415,24 +1319,6 @@ def _browser_content_blocks(
     return [text_content_block(summary)]
 
 
-def _browser_content_blocks_with_evidence_path(
-    content_blocks: list[dict[str, Any]],
-    evidence: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    evidence_line = _browser_evidence_path_line(evidence)
-    if evidence_line is None:
-        return content_blocks
-    for block in content_blocks:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") != "text":
-            continue
-        text = _normalize_text(block.get("text"))
-        if text is not None and "Evidence path:" in text:
-            return content_blocks
-    return [*content_blocks, text_content_block(evidence_line)]
-
-
 def _browser_batch_summary(content: Any) -> str | None:
     result = _find_browser_batch_result_payload(content)
     if result is None:
@@ -1496,21 +1382,6 @@ def _find_browser_batch_result_payload(content: Any) -> dict[str, Any] | None:
         if isinstance(result, dict) and _normalize_text(result.get("kind")) == "batch":
             return result
     return None
-
-
-def _browser_evidence_path_line(evidence: Mapping[str, Any]) -> str | None:
-    key = _normalize_text(evidence.get("evidence_path_key"))
-    title = _normalize_text(evidence.get("evidence_path_title"))
-    tools = evidence.get("evidence_path_tools")
-    payload = {
-        "key": key,
-        "title": title,
-        "tool_ids": list(tools) if isinstance(tools, list) else [],
-    }
-    formatted = _format_browser_observe_evidence_path_item(payload)
-    if formatted is None:
-        return None
-    return "Evidence path: " + formatted
 
 
 def _browser_result_summary(content: Any) -> str | None:
@@ -2247,18 +2118,6 @@ def _browser_code_summary(content: dict[str, Any]) -> str | None:
             "Browser script request extractor found "
             f"{candidate_count} endpoint candidate(s) in {script_id}."
         )
-    if kind == "runtime-probe-client":
-        object_path = _normalize_text(result.get("object_path")) or "client"
-        ok = result.get("ok") is True
-        status = "resolved" if ok else "did not resolve"
-        return f"Browser runtime client probe {status} {object_path}."
-    if kind == "runtime-call-client":
-        object_path = _normalize_text(result.get("object_path")) or "client"
-        method_name = _normalize_text(result.get("method_name"))
-        ok = result.get("ok") is True
-        status = "completed" if ok else "failed"
-        target = f"{object_path}.{method_name}" if method_name else object_path
-        return f"Browser runtime client call {status} {target}."
     return None
 
 
@@ -2355,10 +2214,6 @@ def _format_browser_code_result(kind: str, result: dict[str, Any]) -> str | None
         return _format_browser_script_inspect_result(result)
     if kind == "script-extract-request":
         return _format_browser_script_extract_request_result(result)
-    if kind == "runtime-probe-client":
-        return _format_browser_runtime_probe_client_result(result)
-    if kind == "runtime-call-client":
-        return _format_browser_runtime_call_client_result(result)
     return None
 
 
@@ -2485,10 +2340,9 @@ def _format_browser_runtime_inspect_result(result: dict[str, Any]) -> str:
             lines.extend(module_lines)
             lines.append(
                 "- Next: choose the most task-relevant client module/method shown "
-                "above, probe that method with browser.runtime.probe_client, then "
-                "call it with browser.runtime.call_client. Use browser.evaluate "
-                "only for a compact custom summary. Avoid repeating broad code "
-                "search when a relevant method is visible."
+                "above, then use browser.evaluate for a compact custom summary "
+                "or verify behavior with network capture/replay. Avoid repeating "
+                "broad code search when a relevant method is visible."
             )
     storage = result.get("storage")
     if isinstance(storage, dict):
@@ -2881,9 +2735,8 @@ def _format_browser_script_extract_request_result(result: dict[str, Any]) -> str
             lines.append(f"- Client methods nearby: {', '.join(client_methods)}")
         lines.append(
             "- Next: no endpoint literal was extracted; if a client method is visible, "
-            "probe it with browser.runtime.probe_client and call it with "
-            "browser.runtime.call_client. Use browser.evaluate only for a compact "
-            "custom summary."
+            "use browser.evaluate for a compact custom summary or verify behavior "
+            "with network capture/replay."
         )
         lines.extend(_format_browser_code_errors(result.get("errors")))
         return "\n".join(lines)
@@ -2927,535 +2780,11 @@ def _format_browser_script_extract_request_result(result: dict[str, Any]) -> str
     if len(candidates) > 5:
         lines.append(f"... {len(candidates) - 5} more endpoint candidate(s) in details")
     lines.append(
-        "- Next: if a matching page client method is known, call it with "
-        "browser.runtime.call_client using one JSON object argument. Otherwise verify "
-        "the endpoint with network capture/fetch/replay instead of repeating broad code search."
+        "- Next: verify the endpoint with network capture/fetch/replay, or use "
+        "browser.evaluate for a compact page-context summary instead of repeating broad code search."
     )
     lines.extend(_format_browser_code_errors(result.get("errors")))
     return "\n".join(lines)
-
-
-def _format_browser_runtime_probe_client_result(result: dict[str, Any]) -> str:
-    object_path = _normalize_text(result.get("object_path")) or "<client>"
-    method_name = _normalize_text(result.get("method_name"))
-    ok = result.get("ok") is True
-    lines = [
-        "Browser runtime client probe:",
-        f"- Object path: {object_path}",
-    ]
-    if method_name is not None:
-        lines.append(f"- Method name: {method_name}")
-    if not ok:
-        reason = _normalize_text(result.get("reason")) or "not available"
-        lines.append(f"- Status: not resolved ({reason})")
-        missing_segment = _normalize_text(result.get("missing_segment"))
-        if missing_segment is not None:
-            lines.append(f"- Missing segment: {missing_segment}")
-        traversed = _normalized_text_items(result.get("traversed"), limit=12)
-        if traversed:
-            lines.append(f"- Traversed: {'.'.join(traversed)}")
-        lines.append(
-            "- Next: inspect runtime globals or adjust object_path before evaluating "
-            "or replaying requests."
-        )
-        return "\n".join(lines)
-    lines.append("- Status: resolved")
-    object_description = result.get("object")
-    if isinstance(object_description, dict):
-        lines.extend(
-            _format_browser_client_probe_description(
-                object_description,
-                label="Object",
-            )
-        )
-    method_description = result.get("method")
-    if isinstance(method_description, dict):
-        lines.extend(
-            _format_browser_client_probe_description(
-                method_description,
-                label="Method",
-            )
-        )
-    if (
-        method_name is not None
-        and isinstance(method_description, dict)
-        and method_description.get("callable") is True
-    ):
-        payload_keys = _normalized_text_items(
-            method_description.get("payload_key_candidates"),
-            limit=12,
-        )
-        lines.append(
-            "- Next: call browser.runtime.call_client with "
-            f"object_path={object_path!r}, method_name={method_name!r}, and one JSON object argument."
-        )
-        if payload_keys:
-            lines.append(f"- Suggested argument keys: {', '.join(payload_keys)}")
-        lines.extend(
-            _browser_runtime_probe_client_method_hints(
-                object_path=object_path,
-                method_name=method_name,
-            )
-        )
-        lines.append(
-            "- Avoid repeating broad code search once this callable client method is resolved."
-        )
-    else:
-        lines.append(
-            "- Next: choose a callable method, then call it with browser.runtime.call_client. "
-            "Use browser.evaluate only for a compact custom summary."
-        )
-    return "\n".join(lines)
-
-
-def _browser_runtime_probe_client_method_hints(
-    *,
-    object_path: str,
-    method_name: str,
-) -> list[str]:
-    normalized_target = f"{object_path}.{method_name}".lower()
-    if normalized_target != "$nuxt.$http.shopping.getshopping":
-        return []
-    return [
-        (
-            "- Travel client guidance: this is the primary flight-shopping list "
-            "method. Call it before sibling methods such as getShoppingAll."
-        ),
-        (
-            "- Suggested travel payload keys: depCityCode, arrCityCode, depDate, "
-            "routeType, currencyCode, cabinRank, taxFeeFlag, lowestControl."
-        ),
-        (
-            "- If a thin payload returns empty data, retry this same method with "
-            "the full travel payload before widening the search."
-        ),
-    ]
-
-
-def _format_browser_runtime_call_client_result(result: dict[str, Any]) -> str:
-    object_path = _normalize_text(result.get("object_path")) or "<client>"
-    method_name = _normalize_text(result.get("method_name"))
-    ok = result.get("ok") is True
-    target = f"{object_path}.{method_name}" if method_name is not None else object_path
-    lines = [
-        "Browser runtime client call:",
-        f"- Target: {target}",
-    ]
-    argument_count = _normalize_int(
-        result.get("argument_count"),
-        label="argument_count",
-        minimum=0,
-    )
-    if argument_count is not None:
-        lines.append(f"- Arguments: {argument_count}")
-    argument_keys = _normalized_text_items(
-        result.get("argument_key_candidates"),
-        limit=20,
-    )
-    if argument_keys:
-        lines.append(f"- Argument keys: {', '.join(argument_keys)}")
-    if not ok:
-        reason = _normalize_text(result.get("reason")) or "not available"
-        lines.append(f"- Status: failed ({reason})")
-        missing_segment = _normalize_text(result.get("missing_segment"))
-        if missing_segment is not None:
-            lines.append(f"- Missing segment: {missing_segment}")
-        traversed = _normalized_text_items(result.get("traversed"), limit=12)
-        if traversed:
-            lines.append(f"- Traversed: {'.'.join(traversed)}")
-        stack_preview = _normalize_text(result.get("stack_preview"))
-        if stack_preview is not None:
-            lines.append("- Stack preview:")
-            for preview_line in _bounded_browser_code_lines(stack_preview, line_limit=3):
-                lines.append(f"  {preview_line}")
-        lines.append(
-            "- Next: probe the object path or method, then retry with corrected JSON arguments."
-        )
-        return "\n".join(lines)
-    lines.append("- Status: completed")
-    result_ref = _normalize_text(result.get("result_ref"))
-    if result_ref is not None:
-        lines.append(f"- Result ref: window.__crxzipple_client_call_results[{result_ref!r}]")
-    result_type = _normalize_text(result.get("result_type"))
-    result_chars = _normalize_int(
-        result.get("result_json_chars"),
-        label="result_json_chars",
-        minimum=0,
-    )
-    if result_type is not None or result_chars is not None:
-        detail_parts: list[str] = []
-        if result_type is not None:
-            detail_parts.append(f"type={result_type}")
-        if result_chars is not None:
-            detail_parts.append(f"json_chars={result_chars}")
-        lines.append(f"- Result: {', '.join(detail_parts)}")
-    result_overview = result.get("result_overview")
-    if isinstance(result_overview, dict):
-        lines.append("- Result overview:")
-        lines.extend(_format_browser_json_preview_lines(result_overview, indent="  ", limit=1200))
-    result_insight = result.get("result_insight")
-    if isinstance(result_insight, dict):
-        lines.extend(_format_browser_runtime_result_insight(result_insight))
-    if result.get("result_truncated") is True:
-        preview = _normalize_text(result.get("result_preview"))
-        if preview is not None:
-            lines.append("- Result preview:")
-            lines.extend(_format_browser_json_preview_lines(preview, indent="  ", limit=2400))
-        lines.extend(_browser_runtime_call_retry_hints(result))
-        lines.append(
-            "- Data extraction guard: preserve API numeric values as returned. "
-            "Do not divide, multiply, or rescale prices/totals unless the page source, "
-            "field metadata, or a visible label explicitly proves the unit."
-        )
-        if isinstance(result_insight, dict):
-            lines.append(
-                "- Next: answer from the result insight above. Do not call browser.evaluate "
-                "unless a required user-facing field is absent from the insight."
-            )
-        else:
-            lines.append(
-                "- Next: summarize the stored result with browser.evaluate using the result ref above."
-            )
-        return "\n".join(lines)
-    if "result" in result:
-        lines.append("- Result body:")
-        lines.extend(_format_browser_json_preview_lines(result.get("result"), indent="  ", limit=6000))
-    lines.extend(_browser_runtime_call_retry_hints(result))
-    if _browser_runtime_call_contains_pricing(result):
-        lines.append(
-            "- Data extraction guard: preserve API numeric values as returned. "
-            "Do not divide, multiply, or rescale prices/totals unless the page source, "
-            "field metadata, or a visible label explicitly proves the unit."
-        )
-    if _browser_runtime_call_suggests_retry(result):
-        lines.append(
-            "- Next: retry browser.runtime.call_client with the same object_path/method_name "
-            "and the suggested JSON argument before concluding there are no results."
-        )
-    else:
-        lines.append(
-            "- Next: answer from the returned data, or use browser.evaluate on the result ref "
-            "for a more compact custom summary."
-        )
-    return "\n".join(lines)
-
-
-def _format_browser_runtime_result_insight(insight: dict[str, Any]) -> list[str]:
-    kind = _normalize_text(insight.get("kind"))
-    if kind != "travel_shopping":
-        return []
-    lines = ["- Result insight: travel shopping data detected"]
-    result_code = _normalize_text(insight.get("result_code"))
-    result_message = _normalize_text(insight.get("result_message"))
-    currency_code = _normalize_text(insight.get("currency_code"))
-    total_items = _normalize_int(
-        insight.get("total_flight_items"),
-        label="total_flight_items",
-        minimum=0,
-    )
-    trip_count = _normalize_int(
-        insight.get("summarized_trip_count"),
-        label="summarized_trip_count",
-        minimum=0,
-    )
-    unique_trip_count = _normalize_int(
-        insight.get("unique_trip_count"),
-        label="unique_trip_count",
-        minimum=0,
-    )
-    facts: list[str] = []
-    if result_code is not None:
-        facts.append(f"result_code={result_code}")
-    if result_message is not None:
-        facts.append(f"result_message={result_message}")
-    if currency_code is not None:
-        facts.append(f"currency={currency_code}")
-    if total_items is not None:
-        facts.append(f"flight_items={total_items}")
-    if trip_count is not None:
-        facts.append(f"summarized_trips={trip_count}")
-    if unique_trip_count is not None:
-        facts.append(f"unique_trips={unique_trip_count}")
-    if facts:
-        lines.append("  - " + ", ".join(facts))
-    top_trips = insight.get("top_trips")
-    if isinstance(top_trips, list) and top_trips:
-        if insight.get("top_trips_policy") == "deduplicated_by_flight_route_time_price":
-            lines.append("  - Top unique trips by returned total/price:")
-        else:
-            lines.append("  - Top trips by returned total/price:")
-        for index, trip in enumerate(top_trips[:5], start=1):
-            if not isinstance(trip, dict):
-                continue
-            lines.append(
-                "    "
-                + _format_browser_runtime_travel_trip(index, trip)
-            )
-    policy = _normalize_text(insight.get("numeric_unit_policy"))
-    if policy == "preserve_api_values":
-        lines.append(
-            "  - Numeric unit policy: preserve API values exactly; do not rescale prices."
-        )
-    return lines
-
-
-def _format_browser_runtime_travel_trip(index: int, trip: dict[str, Any]) -> str:
-    route = trip.get("route") if isinstance(trip.get("route"), dict) else {}
-    flights = _normalized_text_items(trip.get("flights"), limit=6)
-    segments = trip.get("segments") if isinstance(trip.get("segments"), list) else []
-    cabin = (
-        trip.get("cheapest_cabin")
-        if isinstance(trip.get("cheapest_cabin"), dict)
-        else {}
-    )
-    route_text = (
-        f"{_normalize_text(route.get('dep_name')) or _normalize_text(route.get('dep_code')) or '?'}"
-        f"({_normalize_text(route.get('dep_code')) or '?'}) "
-        f"{_normalize_text(route.get('dep_date')) or ''} "
-        f"{_normalize_text(route.get('dep_time')) or '?'} -> "
-        f"{_normalize_text(route.get('arr_name')) or _normalize_text(route.get('arr_code')) or '?'}"
-        f"({_normalize_text(route.get('arr_code')) or '?'}) "
-        f"{_normalize_text(route.get('arr_date')) or ''} "
-        f"{_normalize_text(route.get('arr_time')) or '?'}"
-    )
-    price = _browser_price_text(trip.get("sort_price"), cabin.get("lprice"))
-    total = _browser_price_text(trip.get("sort_price_with_tax"), cabin.get("totalPrice"))
-    tax = _browser_price_text(None, cabin.get("taxPrice"))
-    segment_text = ""
-    if isinstance(segments, list) and len(segments) > 1:
-        segment_text = f", segments={len(segments)}"
-    cabin_text = _normalize_text(cabin.get("cabinLevelName"))
-    parts = [
-        f"{index}. {route_text}",
-        f"flights={'+'.join(flights) if flights else '-'}",
-        f"price={price}",
-        f"total={total}",
-    ]
-    if tax != "-":
-        parts.append(f"tax={tax}")
-    if cabin_text is not None:
-        parts.append(f"cabin={cabin_text}")
-    if segment_text:
-        parts.append(segment_text.lstrip(", "))
-    return "; ".join(parts)
-
-
-def _browser_price_text(primary: Any, fallback: Any) -> str:
-    value = primary if primary is not None else fallback
-    if value is None:
-        return "-"
-    return str(value)
-
-
-def _browser_runtime_call_retry_hints(result: dict[str, Any]) -> list[str]:
-    body = result.get("result")
-    if not isinstance(body, dict) or "data" not in body:
-        return []
-    data_value = body.get("data")
-    if data_value not in (None, {}, []):
-        return []
-    result_code = _normalize_text(body.get("resultCode"))
-    result_message = _normalize_text(body.get("resultMsg"))
-    target = ".".join(
-        item
-        for item in (
-            _normalize_text(result.get("object_path")),
-            _normalize_text(result.get("method_name")),
-        )
-        if item is not None
-    ).lower()
-    argument_keys = set(
-        _normalized_text_items(result.get("argument_key_candidates"), limit=32),
-    )
-    lines = ["- Result diagnosis: client returned empty data"]
-    details: list[str] = []
-    if result_code is not None:
-        details.append(f"resultCode={result_code}")
-    if result_message is not None:
-        details.append(f"resultMsg={result_message}")
-    if details:
-        lines[-1] += f" ({', '.join(details)})"
-    lines[-1] += "."
-    if any(term in target for term in ("shopping", "flight", "fare", "airport")):
-        default_keys = (
-            "routeType",
-            "currencyCode",
-            "cabinRank",
-            "taxFeeFlag",
-            "lowestControl",
-        )
-        missing_defaults = [key for key in default_keys if key not in argument_keys]
-        if missing_defaults:
-            lines.append(
-                "- Retry hint: the page client accepted the call, but the payload looks thin. "
-                "For travel shopping clients, preserve the city/date keys and add visible "
-                "UI/default controls when applicable: "
-                + ", ".join(missing_defaults)
-                + "."
-            )
-            retry_argument = _browser_runtime_call_travel_retry_argument(result)
-            if retry_argument:
-                lines.append("- Suggested retry argument JSON:")
-                lines.extend(
-                    _format_browser_json_preview_lines(
-                        retry_argument,
-                        indent="  ",
-                        limit=1400,
-                    )
-                )
-        lines.append(
-            "- Prefer a flat one-object payload for page client methods when the source "
-            "function forwards its argument directly to the endpoint."
-        )
-    else:
-        lines.append(
-            "- Retry hint: inspect page state or a recent successful network request to "
-            "fill missing default fields before concluding the record does not exist."
-        )
-    return lines
-
-
-def _browser_runtime_call_suggests_retry(result: dict[str, Any]) -> bool:
-    return _browser_runtime_call_travel_retry_argument(result) is not None
-
-
-def _browser_runtime_call_contains_pricing(result: dict[str, Any]) -> bool:
-    searchable: list[str] = []
-    for key in ("result", "result_preview", "result_overview"):
-        value = result.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            searchable.append(value[:4000])
-            continue
-        try:
-            searchable.append(json.dumps(value, ensure_ascii=False, default=str)[:4000])
-        except (TypeError, ValueError):
-            searchable.append(str(value)[:4000])
-    text = "\n".join(searchable).lower()
-    return any(term in text for term in ("price", "amount", "fare", "total", "currency"))
-
-
-def _browser_runtime_call_travel_retry_argument(result: dict[str, Any]) -> dict[str, Any] | None:
-    target = ".".join(
-        item
-        for item in (
-            _normalize_text(result.get("object_path")),
-            _normalize_text(result.get("method_name")),
-        )
-        if item is not None
-    ).lower()
-    if not any(term in target for term in ("shopping", "flight", "fare", "airport")):
-        return None
-    arguments = result.get("arguments")
-    if not isinstance(arguments, list) or not arguments:
-        return None
-    first_argument = arguments[0]
-    if not isinstance(first_argument, dict):
-        return None
-    base = dict(first_argument)
-    required_keys = ("depCityCode", "arrCityCode", "depDate")
-    if not all(key in base for key in required_keys):
-        return None
-    defaults: dict[str, Any] = {
-        "routeType": "OW",
-        "currencyCode": "CNY",
-        "cabinRank": "F,J,Y",
-        "taxFeeFlag": True,
-        "lowestControl": "1",
-    }
-    changed = False
-    for key, value in defaults.items():
-        if key not in base:
-            base[key] = value
-            changed = True
-    return base if changed else None
-
-
-def _format_browser_json_preview_lines(
-    value: Any,
-    *,
-    indent: str,
-    limit: int,
-) -> list[str]:
-    if isinstance(value, str):
-        text = value
-    else:
-        try:
-            text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, default=str)
-        except (TypeError, ValueError):
-            text = str(value)
-    if len(text) > limit:
-        text = f"{text[: max(0, limit - 3)].rstrip()}..."
-    return [f"{indent}{line}" for line in text.splitlines()[:80]]
-
-
-def _format_browser_client_probe_description(
-    value: dict[str, Any],
-    *,
-    label: str,
-) -> list[str]:
-    path = _normalize_text(value.get("path")) or "<path>"
-    value_type = _normalize_text(value.get("type")) or "unknown"
-    constructor_name = _normalize_text(value.get("constructor_name"))
-    exists = value.get("exists")
-    status = "exists" if exists is not False else "missing"
-    suffix = f"/{constructor_name}" if constructor_name is not None else ""
-    lines = [f"- {label}: {path} ({status}; {value_type}{suffix})"]
-    if value.get("callable") is True:
-        arity = _normalize_int(value.get("arity"), label="arity", minimum=0)
-        function_name = _normalize_text(value.get("function_name"))
-        details: list[str] = ["callable"]
-        if arity is not None:
-            details.append(f"arity={arity}")
-        if function_name is not None:
-            details.append(f"name={function_name}")
-        if value.get("is_async") is True:
-            details.append("async")
-        lines.append(f"  - Function: {', '.join(details)}")
-        endpoint_hint = _normalize_text(value.get("endpoint_hint"))
-        if endpoint_hint is not None:
-            lines.append(f"  - Endpoint hint: {endpoint_hint}")
-        payload_keys = _normalized_text_items(
-            value.get("payload_key_candidates"),
-            limit=12,
-        )
-        if payload_keys:
-            lines.append(f"  - Payload key candidates: {', '.join(payload_keys)}")
-    keys = _normalized_text_items(value.get("keys"), limit=12)
-    if keys:
-        key_count = _normalize_int(value.get("key_count"), label="key_count", minimum=0)
-        suffix_text = f" of {key_count}" if key_count is not None else ""
-        lines.append(f"  - Keys: {', '.join(keys)}{suffix_text}")
-    methods = value.get("methods")
-    if isinstance(methods, list) and methods:
-        rendered: list[str] = []
-        for item in methods[:16]:
-            if not isinstance(item, dict):
-                continue
-            name = _normalize_text(item.get("name"))
-            arity = _normalize_int(item.get("arity"), label="arity", minimum=0)
-            if name is None:
-                continue
-            endpoint_hint = _normalize_text(item.get("endpoint_hint"))
-            suffix = f" -> {endpoint_hint}" if endpoint_hint is not None else ""
-            payload_keys = _normalized_text_items(
-                item.get("payload_key_candidates"),
-                limit=4,
-            )
-            if payload_keys:
-                suffix += f" keys={','.join(payload_keys)}"
-            rendered.append(f"{name}({arity if arity is not None else '?'}){suffix}")
-        if rendered:
-            method_count = _normalize_int(value.get("method_count"), label="method_count", minimum=0)
-            suffix_text = f" of {method_count}" if method_count is not None else ""
-            lines.append(f"  - Methods: {', '.join(rendered)}{suffix_text}")
-    preview = _normalize_text(value.get("source_preview"))
-    if preview is not None:
-        lines.append("  - Source preview:")
-        for preview_line in _bounded_browser_code_lines(preview, line_limit=3):
-            lines.append(f"    {preview_line}")
-    return lines
 
 
 def _format_browser_code_errors(value: Any) -> list[str]:
@@ -3617,9 +2946,6 @@ def _format_browser_action_trace_result(result: dict[str, Any]) -> str:
             suggested_tools = _browser_action_trace_suggested_tools(next_action)
             if suggested_tools:
                 lines.append("- Suggested tools: " + ", ".join(suggested_tools))
-            evidence_path = _browser_action_trace_evidence_path(next_action)
-            if evidence_path is not None:
-                lines.append("- Evidence path: " + evidence_path)
     console = result.get("console")
     if isinstance(console, dict):
         new_console = _trace_preview_items(console.get("new"), limit=3)
@@ -3768,11 +3094,10 @@ def _browser_action_trace_suggested_tools(next_action: str) -> list[str]:
     if next_action == "inspect-script-initiator":
         return [
             "browser.script.extract_request",
-            "browser.runtime.probe_client",
-            "browser.runtime.call_client",
             "browser.script.inspect",
             "browser.network.get_response_body",
             "browser.network.replay_request",
+            "browser.evaluate",
         ]
     if next_action == "inspect-network-delta":
         return [
@@ -3780,8 +3105,7 @@ def _browser_action_trace_suggested_tools(next_action: str) -> list[str]:
             "browser.network.get_response_body",
             "browser.script.find_request",
             "browser.script.extract_request",
-            "browser.runtime.probe_client",
-            "browser.runtime.call_client",
+            "browser.evaluate",
         ]
     if next_action == "inspect-page-lifecycle":
         return ["browser.page.lifecycle", "browser.observe", "browser.snapshot"]
@@ -3798,28 +3122,6 @@ def _browser_action_trace_suggested_tools(next_action: str) -> list[str]:
     if next_action == "observe-or-inspect-clickability":
         return ["browser.observe", "browser.dom.clickability", "browser.dom.inspect"]
     return []
-
-
-def _browser_action_trace_evidence_path(next_action: str) -> str | None:
-    if next_action == "inspect-target":
-        return "refresh the target, verify clickability/selector/ref, then retry with action trace."
-    if next_action == "inspect-page-errors":
-        return "read page errors first; retry only after the failing script or form state is understood."
-    if next_action == "inspect-script-initiator":
-        return "follow the initiating script to the request, then inspect or replay the captured API call."
-    if next_action == "inspect-network-delta":
-        return "inspect the captured request/response pair and replay only when headers/body are understood."
-    if next_action == "inspect-page-lifecycle":
-        return "observe the new page lifecycle and continue from the current tab state."
-    if next_action == "inspect-storage-delta":
-        return "check storage changes and infer hidden client state before making another page action."
-    if next_action == "continue-from-after-snapshot":
-        return "use the after snapshot as the new ground truth before selecting the next action."
-    if next_action == "inspect-console-delta":
-        return "read runtime/page error details before assuming the click failed."
-    if next_action == "observe-or-inspect-clickability":
-        return "observe again; if the target still looks wrong, inspect clickability or DOM before guessing."
-    return None
 
 
 def _trace_snapshot_summary(value: Any) -> str | None:
@@ -4960,8 +4262,7 @@ def _format_browser_observe_guidance(guidance: dict[str, Any]) -> str | None:
         for item in (_normalize_text(entry) for entry in (tools if isinstance(tools, list) else []))
         if item is not None
     ][:4]
-    evidence_lines = _format_browser_observe_evidence_paths(guidance)
-    if next_action is None and reason is None and not tool_labels and not evidence_lines:
+    if next_action is None and reason is None and not tool_labels:
         return None
     lines: list[str] = []
     if next_action is not None:
@@ -4973,57 +4274,7 @@ def _format_browser_observe_guidance(guidance: dict[str, Any]) -> str | None:
         lines.append(f"Next: {reason}")
     if tool_labels:
         lines.append("Suggested tools: " + ", ".join(tool_labels))
-    if evidence_lines:
-        lines.extend(evidence_lines)
-    elif tool_labels:
-        evidence_path = _browser_observe_evidence_path(tool_labels)
-        if evidence_path is not None:
-            lines.append("Evidence path: " + evidence_path)
     return "\n".join(lines)
-
-
-def _format_browser_observe_evidence_paths(guidance: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
-    primary = guidance.get("primary_evidence_path")
-    primary_line = _format_browser_observe_evidence_path_item(primary)
-    if primary_line is not None:
-        lines.append("Evidence path: " + primary_line)
-    alternatives = guidance.get("alternative_evidence_paths")
-    alternative_lines = [
-        line
-        for line in (
-            _format_browser_observe_evidence_path_item(item)
-            for item in (alternatives if isinstance(alternatives, list) else [])
-        )
-        if line is not None
-    ][:3]
-    if alternative_lines:
-        lines.append("Alternative paths: " + " | ".join(alternative_lines))
-    return lines
-
-
-def _format_browser_observe_evidence_path_item(value: Any) -> str | None:
-    if not isinstance(value, dict):
-        return None
-    key = _normalize_text(value.get("key"))
-    title = _normalize_text(value.get("title"))
-    tools = value.get("tool_ids")
-    tool_labels = [
-        item
-        for item in (
-            _normalize_text(entry)
-            for entry in (tools if isinstance(tools, list) else [])
-        )
-        if item is not None
-    ][:4]
-    if key is None and title is None and not tool_labels:
-        return None
-    label = key or title or "browser_evidence"
-    if title is not None and key is not None:
-        label = f"{key} ({title})"
-    if tool_labels:
-        label += ": " + ", ".join(tool_labels)
-    return label
 
 
 def _format_browser_suggested_tools(value: Any, *, limit: int) -> str | None:
@@ -5037,31 +4288,6 @@ def _format_browser_suggested_tools(value: Any, *, limit: int) -> str | None:
     if not tool_labels:
         return None
     return "Suggested tools: " + ", ".join(tool_labels)
-
-
-def _browser_observe_evidence_path(tool_labels: list[str]) -> str | None:
-    tools = set(tool_labels)
-    if "browser.action.trace" in tools:
-        return (
-            "trace the next page action, then use the before/after snapshot and "
-            "network/console delta to decide whether to continue through UI, DOM, "
-            "or request analysis."
-        )
-    if "browser.network.list_requests" in tools or "browser.network.get_response_body" in tools:
-        return (
-            "inspect captured requests and response bodies before trying more UI clicks."
-        )
-    if (
-        "browser.script.extract_request" in tools
-        or "browser.runtime.probe_client" in tools
-        or "browser.runtime.call_client" in tools
-        or "browser.script.inspect" in tools
-        or "browser.script.find_request" in tools
-    ):
-        return "inspect the initiating script or endpoint candidate before retrying the UI."
-    if "browser.runtime.inspect" in tools or "browser.script.list" in tools:
-        return "inspect runtime and live scripts when the interactive tree is incomplete."
-    return None
 
 
 def _format_browser_observe_runtime(runtime: dict[str, Any]) -> str | None:
@@ -7145,15 +6371,6 @@ def _normalize_advanced_action_arguments(
             raw_value = arguments.get(argument_key)
             if raw_value is not None:
                 payload.setdefault(payload_key, raw_value)
-        if kind == "runtime-call-client":
-            for argument_key, payload_key in (
-                ("arguments", "arguments"),
-                ("args", "arguments"),
-                ("argument", "argument"),
-                ("payload", "payload"),
-            ):
-                if argument_key in arguments and arguments.get(argument_key) is not None:
-                    payload.setdefault(payload_key, arguments.get(argument_key))
         for argument_key, payload_key in (
             ("case_sensitive", "case_sensitive"),
             ("caseSensitive", "case_sensitive"),
@@ -8408,8 +7625,6 @@ _BROWSER_MANIFEST_PAGE_ACTION_KINDS = {
     "browser.page.lifecycle": "page-lifecycle",
     "browser.page.errors": "page-errors",
     "browser.runtime.inspect": "runtime-inspect",
-    "browser.runtime.probe_client": "runtime-probe-client",
-    "browser.runtime.call_client": "runtime-call-client",
     "browser.script.list": "script-list",
     "browser.script.find_request": "script-find-request",
     "browser.code.search": "code-search",

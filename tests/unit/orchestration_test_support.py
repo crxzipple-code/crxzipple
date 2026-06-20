@@ -43,6 +43,7 @@ from crxzipple.modules.llm.application.adapters import (
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
+    LlmInputItemKind,
     LlmMessagePhase,
     LlmMessageRole,
     LlmProviderKind,
@@ -89,7 +90,6 @@ from crxzipple.modules.session.domain import (
     SessionItem,
     SessionItemKind,
     SessionItemPhase,
-    SessionItemVisibility,
     SessionRouteContext,
 )
 from crxzipple.modules.tool.application import ExecuteToolInput
@@ -143,12 +143,6 @@ def _append_session_item_fixture(
                 SessionItemPhase.COMMENTARY
                 if data.role == "assistant"
                 else SessionItemPhase.UNKNOWN
-            ),
-            visibility=SessionItemVisibility(
-                model_visible=True,
-                user_visible=data.role in {"assistant", "user"},
-                chat_visible=data.role in {"assistant", "user"},
-                trace_visible=True,
             ),
             content_payload=dict(data.content_payload),
             source_module="session",
@@ -283,8 +277,7 @@ def _response_items_from_result(
                 ),
                 content_payload={"text": result.text},
                 provider_item_type="message",
-                model_visible=True,
-                user_visible=not bool(result.tool_calls),
+                user_timeline_candidate=not bool(result.tool_calls),
             ),
         )
     for tool_call in result.tool_calls:
@@ -305,8 +298,7 @@ def _response_items_from_result(
                 provider_item_type="function_call",
                 call_id=tool_call.id,
                 tool_name=tool_call.name,
-                model_visible=True,
-                user_visible=False,
+                user_timeline_candidate=False,
             ),
         )
     return tuple(items)
@@ -346,9 +338,15 @@ class _ToolCallAdapter:
 
 
 def _has_tool_message(request: LlmAdapterRequest, name: str) -> bool:
-    return any(
+    if any(
         message.role is LlmMessageRole.TOOL and message.name == name
         for message in request.messages
+    ):
+        return True
+    return any(
+        item.kind is LlmInputItemKind.FUNCTION_CALL_OUTPUT
+        and item.metadata.get("tool_name") == name
+        for item in request.input_items
     )
 
 
@@ -362,20 +360,29 @@ def _has_tool_call_message(request: LlmAdapterRequest, name: str) -> bool:
     )
 
 
-def _expand_tool_bundle_call(*, call_id: str, source_id: str) -> ToolCallIntent:
+def _schema_visible(request: LlmAdapterRequest, name: str) -> bool:
+    return any(schema.name == name for schema in request.tool_schemas)
+
+
+def _capability_search_call(
+    *,
+    call_id: str,
+    query: str,
+    limit: int = 8,
+) -> ToolCallIntent:
     return ToolCallIntent(
         id=call_id,
-        name="context_tree.expand",
-        arguments={"node_id": f"tools.bundle.{source_id}"},
+        name="capability.search",
+        arguments={"query": query, "enable": True, "limit": limit},
     )
+
+
+def _expand_tool_bundle_call(*, call_id: str, source_id: str) -> ToolCallIntent:
+    return _capability_search_call(call_id=call_id, query=source_id)
 
 
 def _enable_tool_schema_call(*, call_id: str, tool_id: str) -> ToolCallIntent:
-    return ToolCallIntent(
-        id=call_id,
-        name="context_tree.enable_tool_schema",
-        arguments={"node_id": f"tools.tool.{tool_id}"},
-    )
+    return _capability_search_call(call_id=call_id, query=tool_id)
 
 
 def _tool_schema_activation_response(
@@ -386,26 +393,21 @@ def _tool_schema_activation_response(
     expand_call_id: str,
     enable_call_id: str,
 ) -> LlmAdapterResponse | None:
-    if not _has_tool_message(request, "context_tree.expand"):
-        return _adapter_response_from_result(
-            request,
-            LlmResult(
-                tool_calls=(
-                    _expand_tool_bundle_call(
-                        call_id=expand_call_id,
-                        source_id=source_id,
-                    ),
-                ),
-            ),
-        )
     if not any(schema.name == tool_id for schema in request.tool_schemas):
+        call_id = (
+            enable_call_id
+            if _has_tool_message(request, "capability.search")
+            else expand_call_id
+        )
+        query = tool_id if _has_tool_message(request, "capability.search") else source_id
         return _adapter_response_from_result(
             request,
             LlmResult(
                 tool_calls=(
-                    _enable_tool_schema_call(
-                        call_id=enable_call_id,
-                        tool_id=tool_id,
+                    ToolCallIntent(
+                        id=call_id,
+                        name="capability.search",
+                        arguments={"query": query, "enable": True, "limit": 8},
                     ),
                 ),
             ),
@@ -469,15 +471,18 @@ class _BackgroundToolAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        activation = _tool_schema_activation_response(
-            request,
-            source_id="test.local_package.background_echo",
-            tool_id="background_echo",
-            expand_call_id="call-expand-background",
-            enable_call_id="call-enable-background",
-        )
-        if activation is not None:
-            return activation
+        if not _schema_visible(request, "background_echo"):
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
+                    tool_calls=(
+                        _capability_search_call(
+                            call_id="call-search-background-echo",
+                            query="background_echo",
+                        ),
+                    ),
+                ),
+            )
         if _has_tool_call_message(request, "background_echo"):
             return _adapter_response_from_result(
                 request,
@@ -503,15 +508,18 @@ class _BackgroundResumeAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        activation = _tool_schema_activation_response(
-            request,
-            source_id="test.local_package.background_echo",
-            tool_id="background_echo",
-            expand_call_id="call-expand-background",
-            enable_call_id="call-enable-background",
-        )
-        if activation is not None:
-            return activation
+        if not _schema_visible(request, "background_echo"):
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
+                    tool_calls=(
+                        _capability_search_call(
+                            call_id="call-search-background-echo",
+                            query="background_echo",
+                        ),
+                    ),
+                ),
+            )
         if not _has_tool_call_message(request, "background_echo"):
             return _adapter_response_from_result(
                 request,
@@ -537,15 +545,18 @@ class _BackgroundApprovalAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        activation = _tool_schema_activation_response(
-            request,
-            source_id="test.local_package.background_echo",
-            tool_id="background_echo",
-            expand_call_id="call-expand-background-approval",
-            enable_call_id="call-enable-background-approval",
-        )
-        if activation is not None:
-            return activation
+        if not _schema_visible(request, "background_echo"):
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
+                    tool_calls=(
+                        _capability_search_call(
+                            call_id="call-search-background-echo",
+                            query="background_echo",
+                        ),
+                    ),
+                ),
+            )
         if not _has_tool_call_message(request, "background_echo"):
             return _adapter_response_from_result(
                 request,
@@ -692,12 +703,8 @@ class _EffectDeniedFallbackAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        system_text = "\n\n".join(
-            str(message.content)
-            for message in request.messages
-            if message.role is LlmMessageRole.SYSTEM
-        )
-        if "The user denied the requested additional access." in system_text:
+        flow_text = _request_flow_context_text(request)
+        if "The user denied the requested additional access." in flow_text:
             return LlmAdapterResponse(
                 result=LlmResult(text="fallback after denial"),
             )
@@ -724,37 +731,34 @@ class _EffectDeniedFallbackAdapter:
         )
 
 
+def _request_render_snapshot_text(request: LlmAdapterRequest) -> str:
+    request_render_snapshot = request.request_metadata.get("request_render_snapshot")
+    if not isinstance(request_render_snapshot, dict):
+        return ""
+    return str(request_render_snapshot)
+
+
+def _request_flow_context_text(request: LlmAdapterRequest) -> str:
+    flow_context = request.request_metadata.get("runtime_request_flow_context")
+    if not isinstance(flow_context, dict):
+        return ""
+    return str(flow_context)
+
+
 class _SkillReadingAdapter:
     def __init__(self) -> None:
         self.requests: list[LlmAdapterRequest] = []
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        if not _has_tool_message(request, "context_tree.expand"):
+        if not _schema_visible(request, "skill_read"):
             return _adapter_response_from_result(
                 request,
                 LlmResult(
                     tool_calls=(
-                        ToolCallIntent(
-                            id="call-expand-skills",
-                            name="context_tree.expand",
-                            arguments={"node_id": "skills.available"},
-                        ),
-                        _expand_tool_bundle_call(
-                            call_id="call-expand-skill-tools",
-                            source_id="bundled.local_package.skills",
-                        ),
-                    ),
-                ),
-            )
-        if not _has_tool_message(request, "context_tree.enable_tool_schema"):
-            return _adapter_response_from_result(
-                request,
-                LlmResult(
-                    tool_calls=(
-                        _enable_tool_schema_call(
-                            call_id="call-enable-skill-read",
-                            tool_id="skill_read",
+                        _capability_search_call(
+                            call_id="call-search-skill-read",
+                            query="skill_read",
                         ),
                     ),
                 ),
@@ -784,39 +788,21 @@ class _SkillReadAndEchoAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        if not _has_tool_message(request, "context_tree.expand"):
+        if not (
+            _schema_visible(request, "skill_read")
+            and _schema_visible(request, "echo")
+        ):
             return _adapter_response_from_result(
                 request,
                 LlmResult(
                     tool_calls=(
-                        ToolCallIntent(
-                            id="call-expand-skills",
-                            name="context_tree.expand",
-                            arguments={"node_id": "skills.available"},
+                        _capability_search_call(
+                            call_id="call-search-skill-read",
+                            query="skill_read",
                         ),
-                        _expand_tool_bundle_call(
-                            call_id="call-expand-skill-tools",
-                            source_id="bundled.local_package.skills",
-                        ),
-                        _expand_tool_bundle_call(
-                            call_id="call-expand-echo",
-                            source_id="test.local_package.echo",
-                        ),
-                    ),
-                ),
-            )
-        if not _has_tool_message(request, "context_tree.enable_tool_schema"):
-            return _adapter_response_from_result(
-                request,
-                LlmResult(
-                    tool_calls=(
-                        _enable_tool_schema_call(
-                            call_id="call-enable-skill-read",
-                            tool_id="skill_read",
-                        ),
-                        _enable_tool_schema_call(
-                            call_id="call-enable-echo",
-                            tool_id="echo",
+                        _capability_search_call(
+                            call_id="call-search-echo",
+                            query="echo",
                         ),
                     ),
                 ),
@@ -851,31 +837,14 @@ class _MultiSkillReadAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        if not _has_tool_message(request, "context_tree.expand"):
+        if not _schema_visible(request, "skill_read"):
             return _adapter_response_from_result(
                 request,
                 LlmResult(
                     tool_calls=(
-                        ToolCallIntent(
-                            id="call-expand-skills",
-                            name="context_tree.expand",
-                            arguments={"node_id": "skills.available"},
-                        ),
-                        _expand_tool_bundle_call(
-                            call_id="call-expand-skill-tools",
-                            source_id="bundled.local_package.skills",
-                        ),
-                    ),
-                ),
-            )
-        if not _has_tool_message(request, "context_tree.enable_tool_schema"):
-            return _adapter_response_from_result(
-                request,
-                LlmResult(
-                    tool_calls=(
-                        _enable_tool_schema_call(
-                            call_id="call-enable-skill-read",
-                            tool_id="skill_read",
+                        _capability_search_call(
+                            call_id="call-search-skill-read",
+                            query="skill_read",
                         ),
                     ),
                 ),
@@ -934,30 +903,21 @@ class _MemorySearchAndReadAdapter:
             for message in tool_messages
             if message.name == "memory_read"
         ]
-        if not _has_tool_message(request, "context_tree.expand"):
+        if not (
+            _schema_visible(request, "memory_search")
+            and _schema_visible(request, "memory_read")
+        ):
             return _adapter_response_from_result(
                 request,
                 LlmResult(
                     tool_calls=(
-                        _expand_tool_bundle_call(
-                            call_id="call-expand-memory-tools",
-                            source_id="bundled.local_package.memory",
+                        _capability_search_call(
+                            call_id="call-search-memory-search",
+                            query="memory_search",
                         ),
-                    ),
-                ),
-            )
-        if not _has_tool_message(request, "context_tree.enable_tool_schema"):
-            return _adapter_response_from_result(
-                request,
-                LlmResult(
-                    tool_calls=(
-                        _enable_tool_schema_call(
-                            call_id="call-enable-memory-search",
-                            tool_id="memory_search",
-                        ),
-                        _enable_tool_schema_call(
-                            call_id="call-enable-memory-read",
-                            tool_id="memory_read",
+                        _capability_search_call(
+                            call_id="call-search-memory-read",
+                            query="memory_read",
                         ),
                     ),
                 ),

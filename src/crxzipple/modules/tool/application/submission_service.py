@@ -58,6 +58,13 @@ class ToolSubmissionService(ToolServiceBase):
                 return uow.tool_runs.list()
             return uow.tool_runs.list_for_tool(tool_id)
 
+    def list_tool_runs_for_orchestration_runs(
+        self,
+        run_ids: tuple[str, ...],
+    ) -> list[ToolRun]:
+        with self.uow_factory() as uow:
+            return uow.tool_runs.list_for_orchestration_runs(run_ids)
+
     async def execute(self, data: ExecuteToolInput) -> ToolRun:
         return (await self.execute_many((data,)))[0]
 

@@ -232,6 +232,12 @@ class ToolApplicationService:
     def list_tool_runs(self, *, tool_id: str | None = None) -> list[ToolRun]:
         return self.submission_service.list_tool_runs(tool_id=tool_id)
 
+    def list_tool_runs_for_orchestration_runs(
+        self,
+        run_ids: tuple[str, ...],
+    ) -> list[ToolRun]:
+        return self.submission_service.list_tool_runs_for_orchestration_runs(run_ids)
+
     def list_tool_workers(self) -> list[ToolWorkerRegistration]:
         return self.worker_service.list_workers()
 

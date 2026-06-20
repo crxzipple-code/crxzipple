@@ -335,12 +335,12 @@ def tool_activation_bindings_from_context(
                 capability_ids=("context_workspace.read", "context_workspace.write"),
             ),
         )
-    if ctx.has(AppKey.CONTEXT_RENDER_SERVICE):
+    if ctx.has(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE):
         ensure_tool_activation_binding(
             bindings,
             ToolDependencyBinding(
-                "context_render_service",
-                ctx.require(AppKey.CONTEXT_RENDER_SERVICE),
+                "context_observation_snapshot_service",
+                ctx.require(AppKey.CONTEXT_OBSERVATION_SNAPSHOT_SERVICE),
                 capability_ids=("context_workspace.read", "context_workspace.render"),
             ),
         )

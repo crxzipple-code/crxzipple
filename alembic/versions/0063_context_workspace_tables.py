@@ -127,13 +127,13 @@ def upgrade() -> None:
         )
 
     op.create_table(
-        "context_render_snapshots",
+        "context_snapshots",
         sa.Column("snapshot_id", sa.String(length=80), nullable=False),
         sa.Column("workspace_id", sa.String(length=80), nullable=False),
         sa.Column("session_key", sa.String(length=240), nullable=False),
         sa.Column("run_id", sa.String(length=160), nullable=False),
         sa.Column("tree_revision", sa.Integer(), nullable=False),
-        sa.Column("prompt_body", sa.Text(), nullable=False),
+        sa.Column("debug_body", sa.Text(), nullable=False),
         sa.Column("provider_attachments", sa.JSON(), nullable=False),
         sa.Column("estimate", sa.JSON(), nullable=False),
         sa.Column("included_node_ids", sa.JSON(), nullable=False),
@@ -149,8 +149,8 @@ def upgrade() -> None:
         "created_at",
     ):
         op.create_index(
-            f"ix_context_render_snapshots_{column}",
-            "context_render_snapshots",
+            f"ix_context_snapshots_{column}",
+            "context_snapshots",
             [column],
         )
 
@@ -163,10 +163,10 @@ def downgrade() -> None:
         "created_at",
     ):
         op.drop_index(
-            f"ix_context_render_snapshots_{column}",
-            table_name="context_render_snapshots",
+            f"ix_context_snapshots_{column}",
+            table_name="context_snapshots",
         )
-    op.drop_table("context_render_snapshots")
+    op.drop_table("context_snapshots")
 
     for column in (
         "workspace_id",

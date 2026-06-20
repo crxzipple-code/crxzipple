@@ -40,31 +40,30 @@ const metricIconById: Record<string, unknown> = {
   workspaces: GitBranch,
   nodes: Layers3,
   pinned: Braces,
-  investigation_warnings: Activity,
   snapshots: Activity,
   snapshot_tokens: Activity,
 };
 
 const contextTextKeys: Record<string, string> = {
   "Context Workspace": "operations.contextWorkspace.title",
-  "观察会话绑定的 Prompt Tree、可见节点、估算体积与渲染快照。": "operations.contextWorkspace.subtitle",
+  "观察会话绑定的 Context Tree、可见节点、估算体积与上下文快照。": "operations.contextWorkspace.subtitle",
   "Context Workspace operator": "operations.contextWorkspace.role.operator",
   "Context Workspaces": "operations.contextWorkspace.section.workspaces",
   "Visible Nodes": "operations.contextWorkspace.section.visibleNodes",
   "Investigation Warnings": "operations.contextWorkspace.section.investigationWarnings",
-  "Render Snapshots": "operations.contextWorkspace.section.renderSnapshots",
-  "Prompt Budget": "operations.contextWorkspace.section.promptBudget",
+  "Context Snapshots": "operations.contextWorkspace.section.contextSnapshots",
+  "Context Budget": "operations.contextWorkspace.section.contextBudget",
   "Diagnostics": "operations.contextWorkspace.section.diagnostics",
   "Health": "operations.contextWorkspace.metric.health",
   "Workspaces": "operations.contextWorkspace.metric.workspaces",
   "Pinned": "operations.contextWorkspace.metric.pinned",
   "Snapshot Tokens": "operations.contextWorkspace.metric.snapshotTokens",
-  "Provider Prompt Tokens": "operations.contextWorkspace.metric.providerPromptTokens",
+  "Provider Wire Tokens": "operations.contextWorkspace.metric.providerInputTokens",
   "context tree": "operations.contextWorkspace.delta.contextTree",
   "recent sessions": "operations.contextWorkspace.delta.recentSessions",
   "agent/user pinned nodes": "operations.contextWorkspace.delta.pinnedNodes",
   "browser no-gain signals": "operations.contextWorkspace.delta.browserNoGainSignals",
-  "recent prompt renders": "operations.contextWorkspace.delta.recentPromptRenders",
+  "recent context snapshots": "operations.contextWorkspace.delta.recentContextSnapshots",
   "recent estimated tokens": "operations.contextWorkspace.delta.estimatedTokens",
   "recent provider estimate": "operations.contextWorkspace.delta.providerEstimate",
   "Open Context Tree": "operations.contextWorkspace.action.openTree",
@@ -81,8 +80,8 @@ const contextTextKeys: Record<string, string> = {
 const tabs = computed<OperationsTab[]>(() => page.value?.tabs?.length ? page.value.tabs : [
   { id: "workspaces", label: t("operations.contextWorkspace.section.workspaces") },
   { id: "visible_nodes", label: t("operations.contextWorkspace.section.visibleNodes") },
-  { id: "render_snapshots", label: t("operations.contextWorkspace.section.renderSnapshots") },
-  { id: "prompt_budget", label: t("operations.contextWorkspace.section.promptBudget") },
+  { id: "snapshots", label: t("operations.contextWorkspace.section.contextSnapshots") },
+  { id: "context_budget", label: t("operations.contextWorkspace.section.contextBudget") },
   { id: "diagnostics", label: t("operations.contextWorkspace.section.diagnostics") },
 ]);
 
@@ -111,7 +110,7 @@ const filteredActiveSection = computed<UiTableSection>(() => {
 });
 
 const workspaceSection = computed(() => sectionsById.value.get("workspaces") ?? emptySection());
-const snapshotSection = computed(() => sectionsById.value.get("render_snapshots") ?? emptySection());
+const snapshotSection = computed(() => sectionsById.value.get("snapshots") ?? emptySection());
 const diagnosticSection = computed(() => sectionsById.value.get("diagnostics") ?? emptySection());
 const headlineMetrics = computed(() => (page.value?.metrics ?? []).slice(0, 6));
 
@@ -179,7 +178,7 @@ function emptySection(): UiTableSection {
           {{ contextText(page?.title ?? "Context Workspace") }}
           <span><StatusDot :tone="page?.health === 'error' ? 'danger' : page?.health === 'warning' ? 'warning' : 'success'" />{{ contextText(page?.health ?? "-") }}</span>
         </h2>
-        <p>{{ contextText(page?.subtitle ?? "观察会话绑定的 Prompt Tree、可见节点、估算体积与渲染快照。") }}</p>
+        <p>{{ contextText(page?.subtitle ?? "观察会话绑定的 Context Tree、可见节点、估算体积与上下文快照。") }}</p>
       </div>
       <div class="context-header__ops">
         <span>{{ t("common.updatedAt") }}: <strong>{{ lastLoadedAt ? formatLocalTime(lastLoadedAt) : "-" }}</strong></span>

@@ -13,7 +13,6 @@ from crxzipple.modules.session.application import (
 )
 from crxzipple.modules.session.domain import (
     SessionItemKind,
-    SessionItemVisibility,
 )
 from crxzipple.modules.session.domain.exceptions import SessionValidationError
 from crxzipple.modules.session.infrastructure import (
@@ -81,7 +80,6 @@ class SessionSegmentCompactionTestCase(unittest.TestCase):
                 role=role,
                 kind=kind,
                 content_payload={"text": text},
-                visibility=SessionItemVisibility(model_visible=True),
             ),
         )
 
@@ -95,7 +93,7 @@ class SessionSegmentCompactionTestCase(unittest.TestCase):
         answer = self._append_item("old assistant answer")
         summary = self._append_item(
             "Item summary",
-            kind=SessionItemKind.COMPACTION,
+            kind=SessionItemKind.CONTEXT_COMPACTION,
         )
 
         result = self.service.compact_active_segment(
@@ -188,7 +186,7 @@ class SessionSegmentCompactionTestCase(unittest.TestCase):
         session = self._start_session()
         old_session_id = session.active_session_id
         before = self._append_item("before summary")
-        summary = self._append_item("summary", kind=SessionItemKind.COMPACTION)
+        summary = self._append_item("summary", kind=SessionItemKind.CONTEXT_COMPACTION)
         after = self._append_item("after summary")
 
         self.service.compact_active_segment(
@@ -226,7 +224,7 @@ class SessionSegmentCompactionTestCase(unittest.TestCase):
     def test_compact_active_segment_rejects_non_active_session_id(self) -> None:
         session = self._start_session()
         old_session_id = session.active_session_id
-        summary = self._append_item("summary", kind=SessionItemKind.COMPACTION)
+        summary = self._append_item("summary", kind=SessionItemKind.CONTEXT_COMPACTION)
         reset = self.service.reset_session(
             ResetSessionInput(session_key=session.id),
         )

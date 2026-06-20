@@ -860,7 +860,9 @@ def _tool_surface_source_from_payload(payload: Mapping[str, object]) -> ToolSurf
         readiness=_dict_payload(payload.get("readiness")),
         authorization=_dict_payload(payload.get("authorization")),
         runtime_requirements=tuple(_mapping_list(payload.get("runtime_requirements"))),
-        prompt_metadata=_dict_payload(payload.get("prompt_metadata")),
+        runtime_request_metadata=_dict_payload(
+            payload.get("runtime_request_metadata"),
+        ),
         metadata=_dict_payload(payload.get("metadata")),
     )
 
@@ -1162,6 +1164,23 @@ class SqlAlchemyToolRunRepository:
         models = self.session.scalars(
             select(ToolRunModel)
             .where(ToolRunModel.tool_id == tool_id)
+            .order_by(ToolRunModel.created_at.desc()),
+        ).all()
+        for model in models:
+            self._loaded_models[model.id] = model
+        return [self._to_entity(model) for model in models]
+
+    def list_for_orchestration_runs(self, run_ids: tuple[str, ...]) -> list[ToolRun]:
+        ordered_ids = tuple(dict.fromkeys(run_id.strip() for run_id in run_ids if run_id.strip()))
+        if not ordered_ids:
+            return []
+        models = self.session.scalars(
+            select(ToolRunModel)
+            .where(
+                ToolRunModel.metadata_payload.op("->>")("orchestration_run_id").in_(
+                    ordered_ids,
+                )
+            )
             .order_by(ToolRunModel.created_at.desc()),
         ).all()
         for model in models:

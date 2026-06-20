@@ -33,10 +33,10 @@ import { dataMode } from "@/shared/api/client";
 import { formatBytes, formatDuration, formatLocalTime, formatNumber } from "@/shared/i18n/formatters";
 import { useI18n } from "@/shared/i18n";
 import {
-  promptPreviewContentText,
-  stringifyPromptPreviewJson,
-  type RunPromptInputPreview,
-} from "@/shared/runtime/promptPreview";
+  runtimeRequestPreviewContentText,
+  stringifyRuntimeRequestPreviewJson,
+  type RuntimeLlmRequestPreview,
+} from "@/shared/runtime/runtimeRequestPreview";
 import type {
   TraceContext,
   TurnStepView,
@@ -66,13 +66,14 @@ import {
   listWorkbenchAgents,
   listWorkbenchModels,
   listWorkbenchTools,
-  loadWorkbenchContextRenderSnapshot,
-  loadWorkbenchContextRenderSnapshotById,
+  loadWorkbenchContextSnapshot,
+  loadWorkbenchContextSnapshotById,
   loadWorkbenchContextTree,
   loadWorkbenchData,
-  loadWorkbenchInvocationPromptPreview,
+  loadWorkbenchInvocationRuntimeRequestPreview,
   loadWorkbenchLinkedEntityDetail,
-  loadWorkbenchPromptPreview,
+  loadWorkbenchRunSteps,
+  loadWorkbenchRuntimeRequestPreview,
   openEventStream,
   resolveWorkbenchApproval,
   uploadWorkbenchArtifact,
@@ -83,7 +84,7 @@ import {
   type WorkbenchArtifactUpload,
   type WorkbenchContentBlock,
   type WorkbenchContextNode,
-  type WorkbenchContextRenderSnapshot,
+  type WorkbenchContextSnapshot,
   type WorkbenchContextTree,
   type WorkbenchLlmProfile,
   type WorkbenchToolSummary,
@@ -128,10 +129,12 @@ const toolsLoaded = ref(false);
 const toolsError = ref<string | null>(null);
 const workbenchTools = ref<WorkbenchToolSummary[]>([]);
 const contextTree = ref<WorkbenchContextTree | null>(null);
-const contextRenderSnapshot = ref<WorkbenchContextRenderSnapshot | null>(null);
-const contextPromptPreview = ref<RunPromptInputPreview | null>(null);
+const contextSnapshot = ref<WorkbenchContextSnapshot | null>(null);
+const contextRuntimeRequestPreview = ref<RuntimeLlmRequestPreview | null>(null);
 const contextTreeLoading = ref(false);
 const contextTreeError = ref<string | null>(null);
+const contextDebugBodyLoading = ref(false);
+const contextDebugBodyError = ref<string | null>(null);
 const contextActionBusy = ref<string | null>(null);
 const contextActualRequestTab = ref<ContextActualRequestTabId>("xml");
 const contextMemoryLayerFilter = ref<ContextMemoryLayerFilter>("all");
@@ -171,7 +174,13 @@ interface LinkedWorkbenchAsset {
   key: string;
   id: string;
   label: string;
-  labelKey?: "workbench.asset.toolRun" | "workbench.asset.llmInvocation" | "workbench.asset.artifact";
+  labelKey?:
+    | "workbench.asset.toolRun"
+    | "workbench.asset.llmInvocation"
+    | "workbench.asset.llmResponseItem"
+    | "workbench.asset.sessionItem"
+    | "workbench.asset.providerItem"
+    | "workbench.asset.artifact";
   icon: Component;
   route: string;
 }
@@ -378,8 +387,8 @@ const contextEstimateRows = computed(() => {
   ];
 });
 const contextPreviewRenderReport = computed<Record<string, unknown>>(() => (
-  isRecord(contextPromptPreview.value?.context_render)
-    ? contextPromptPreview.value.context_render
+  isRecord(contextRuntimeRequestPreview.value?.request_render_snapshot)
+    ? contextRuntimeRequestPreview.value.request_render_snapshot
     : {}
 ));
 const contextPreviewRenderEstimate = computed<Record<string, unknown>>(() => {
@@ -392,36 +401,31 @@ const contextPreviewIncludedNodeIds = computed(() => (
 const contextPreviewMirroredNodeIds = computed(() => (
   stringArrayValue(contextPreviewRenderReport.value.mirrored_node_ids)
 ));
-const contextPreviewPromptBody = computed(() => {
-  const messages = contextPromptPreview.value?.messages ?? [];
-  for (const message of messages) {
-    if (message.metadata?.prompt_block_kind !== "context_workspace") continue;
-    const text = promptPreviewContentText(message.content).trim();
-    if (text) return text;
-  }
-  return "";
-});
 const contextRequestCardTitle = computed(() => (
-  contextRenderSnapshot.value
-    ? t("workbench.context.actualPromptSnapshot")
-    : t("workbench.context.livePromptPreview")
+  contextSnapshot.value
+    ? t("workbench.context.recordedContextSnapshot")
+    : contextRuntimeRequestPreview.value
+      ? t("workbench.context.liveRuntimeRequestPreview")
+      : ""
 ));
 const contextRequestCardSubtitle = computed(() => (
-  contextRenderSnapshot.value
-    ? t("workbench.context.actualPromptSnapshotSubtitle")
-    : t("workbench.context.livePromptPreviewSubtitle")
+  contextSnapshot.value
+    ? t("workbench.context.recordedContextSnapshotSubtitle")
+    : contextRuntimeRequestPreview.value
+      ? t("workbench.context.liveRuntimeRequestPreviewSubtitle")
+      : ""
 ));
 const contextSnapshotRows = computed(() => {
-  const snapshot = contextRenderSnapshot.value;
-  const preview = contextPromptPreview.value;
+  const snapshot = contextSnapshot.value;
+  const preview = contextRuntimeRequestPreview.value;
   if (!snapshot && !preview) return [];
   const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
   const estimate = snapshot?.estimate ?? contextPreviewRenderEstimate.value;
-  const metadata = snapshot?.metadata ?? preview?.context_render_metadata ?? {};
+  const metadata = snapshot?.metadata ?? preview?.request_render_snapshot_metadata ?? {};
   const budgetMetadata = { ...requestMetadata, ...metadata };
   const renderedTokens = (
-    metadataOptionalNumber(budgetMetadata.rendered_prompt_estimated_tokens)
-    ?? promptEstimateTokenTotal(estimate)
+    metadataOptionalNumber(budgetMetadata.debug_body_estimated_tokens)
+    ?? contextEstimateTokenTotal(estimate)
   );
   const includedCount = snapshot?.included_node_ids.length ?? contextPreviewIncludedNodeIds.value.length;
   const mirroredCount = snapshot?.mirrored_node_ids.length ?? contextPreviewMirroredNodeIds.value.length;
@@ -438,9 +442,9 @@ const contextSnapshotRows = computed(() => {
     { label: t("workbench.context.includedRefs"), value: formatNumber(includedRefCount) },
     { label: t("workbench.context.protocolRefs"), value: formatNumber(protocolRefCount) },
     { label: t("workbench.context.collapsedRefs"), value: formatNumber(collapsedRefCount) },
-    { label: t("workbench.context.renderedPromptTokens"), value: formatNumber(renderedTokens) },
-    { label: t("workbench.context.providerPromptTokens"), value: formatOptionalNumber(budgetMetadata.estimated_provider_prompt_tokens) },
-    { label: t("workbench.context.directTranscriptTokens"), value: formatOptionalNumber(budgetMetadata.direct_transcript_estimated_tokens) },
+    { label: t("workbench.context.debugBodyTokens"), value: formatNumber(renderedTokens) },
+    { label: t("workbench.context.providerInputTokens"), value: formatOptionalNumber(budgetMetadata.estimated_provider_input_tokens) },
+    { label: t("workbench.context.directTranscriptTokens"), value: formatOptionalNumber(budgetMetadata.draft_input_estimated_tokens) },
     { label: t("workbench.context.schemaMirrorTokens"), value: formatOptionalNumber(budgetMetadata.mirrored_tool_schema_estimated_tokens) },
     { label: t("workbench.context.schemaMirrorBudget"), value: schemaMirrorBudgetValue(budgetMetadata) },
     { label: t("workbench.context.schemaMirrorSkipped"), value: formatOptionalNumber(budgetMetadata.tool_schema_mirror_skipped_count) },
@@ -448,10 +452,10 @@ const contextSnapshotRows = computed(() => {
   ];
 });
 const contextSnapshotIncludedNodeIds = computed(() => (
-  new Set(contextRenderSnapshot.value?.included_node_ids ?? contextPreviewIncludedNodeIds.value)
+  new Set(contextSnapshot.value?.included_node_ids ?? contextPreviewIncludedNodeIds.value)
 ));
 const contextSnapshotRefRows = computed(() => {
-  const snapshot = contextRenderSnapshot.value;
+  const snapshot = contextSnapshot.value;
   if (!snapshot) return [];
   const refs = snapshot.protocol_required_refs.length
     ? snapshot.protocol_required_refs
@@ -468,8 +472,11 @@ const contextSnapshotRefRows = computed(() => {
     .filter((row) => row.id)
     .slice(0, 4);
 });
+const contextRequestCardVisible = computed(() => (
+  contextSnapshot.value !== null || contextRuntimeRequestPreview.value !== null
+));
 const contextSnapshotHiddenRefCount = computed(() => {
-  const snapshot = contextRenderSnapshot.value;
+  const snapshot = contextSnapshot.value;
   if (!snapshot) return 0;
   const sourceCount = snapshot.protocol_required_refs.length
     ? snapshot.protocol_required_refs.length
@@ -477,7 +484,7 @@ const contextSnapshotHiddenRefCount = computed(() => {
   return Math.max(sourceCount - contextSnapshotRefRows.value.length, 0);
 });
 const contextHasRenderInclusion = computed(() => (
-  contextRenderSnapshot.value !== null || Object.keys(contextPreviewRenderReport.value).length > 0
+  contextSnapshot.value !== null || Object.keys(contextPreviewRenderReport.value).length > 0
 ));
 const contextSnapshotRiskRows = computed<Array<{
   label: string;
@@ -485,10 +492,10 @@ const contextSnapshotRiskRows = computed<Array<{
   tone: "success" | "warning" | "danger";
   detail: string;
 }>>(() => {
-  const snapshot = contextRenderSnapshot.value;
-  const preview = contextPromptPreview.value;
+  const snapshot = contextSnapshot.value;
+  const preview = contextRuntimeRequestPreview.value;
   const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
-  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.request_render_snapshot_metadata ?? {}) };
   if (!metadata || Object.keys(metadata).length === 0) return [];
   const warnings = metadataNumber(metadata.session_range_warning_count);
   const blocked = metadataNumber(metadata.session_range_blocked_count);
@@ -528,18 +535,18 @@ const contextRouteDiagnosticRows = computed<Array<{
   tone: ContextRouteDiagnosticTone;
   detail: string;
 }>>(() => {
-  const snapshot = contextRenderSnapshot.value;
-  const preview = contextPromptPreview.value;
+  const snapshot = contextSnapshot.value;
+  const preview = contextRuntimeRequestPreview.value;
   if (!snapshot && !preview) return [];
   const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
-  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
-  const promptInput = snapshot ? snapshotRunPromptInputMetadata(snapshot) : previewRunPromptInputMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.request_render_snapshot_metadata ?? {}) };
+  const runtimeInput = snapshot ? snapshotRuntimeLlmRequestDraftMetadata(snapshot) : previewRuntimeLlmRequestDraftMetadata(preview);
   const messageCount = (
-    metadataOptionalNumber(promptInput.message_count)
+    metadataOptionalNumber(runtimeInput.message_count)
     ?? contextActualRequestMessages.value.length
   );
   const schemaCount = (
-    metadataOptionalNumber(promptInput.tool_schema_count)
+    metadataOptionalNumber(runtimeInput.tool_schema_count)
     ?? contextActualRequestToolSchemas.value.length
   );
   const mirroredCount = (
@@ -558,9 +565,7 @@ const contextRouteDiagnosticRows = computed<Array<{
   const skippedSummary = skippedSchemaSummary(metadata, skippedCount);
   const capabilityVisibility = capabilityVisibilityValue(metadata);
   const toolResultCompaction = toolResultTruncationSummary(contextActualRequestMessages.value);
-  const browserAffordance = browserInvestigationAffordanceSummary(metadata);
   const workPlanUpdates = workPlanUpdateSummary(metadata);
-  const finalEvidence = finalResponseEvidenceSummary(metadata);
   return [
     {
       label: t("workbench.context.routeProviderShape"),
@@ -581,18 +586,6 @@ const contextRouteDiagnosticRows = computed<Array<{
       detail: schemaReasonSummary(metadata),
     },
     {
-      label: t("workbench.context.routeBrowserAffordance"),
-      value: browserAffordance.value,
-      tone: browserAffordance.tone,
-      detail: browserAffordance.detail,
-    },
-    {
-      label: t("workbench.context.routeFinalEvidence"),
-      value: finalEvidence.value,
-      tone: finalEvidence.tone,
-      detail: finalEvidence.detail,
-    },
-    {
       label: t("workbench.context.routeSchemaMirror"),
       value: `${formatNumber(mirroredCount)}/${maxMirrorCount === null ? "-" : formatNumber(maxMirrorCount)} · ${formatNumber(skippedCount)} ${t("workbench.context.routeSkippedShort")}`,
       tone: budgetTone,
@@ -607,7 +600,7 @@ const contextRouteDiagnosticRows = computed<Array<{
     {
       label: t("workbench.context.routeBudgetSplit"),
       value: routeBudgetSplitValue(metadata),
-      tone: metadataNumber(metadata.estimated_provider_prompt_tokens) > 0 ? "info" : "warning",
+      tone: metadataNumber(metadata.estimated_provider_input_tokens) > 0 ? "info" : "warning",
       detail: t("workbench.context.routeBudgetSplitHelp"),
     },
     {
@@ -625,11 +618,10 @@ const contextRouteDiagnosticRows = computed<Array<{
   ];
 });
 const contextRouteGroupRows = computed<ContextRouteGroupRow[]>(() => {
-  const snapshot = contextRenderSnapshot.value;
-  const preview = contextPromptPreview.value;
-  if (!snapshot && !preview) return [];
-  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
-  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const snapshot = contextSnapshot.value;
+  if (!snapshot) return [];
+  const requestMetadata = snapshotLlmRequestMetadata(snapshot);
+  const metadata = { ...requestMetadata, ...snapshot.metadata };
   const groups = Array.isArray(metadata.tool_schema_mirror_groups)
     ? metadata.tool_schema_mirror_groups.filter(isRecord)
     : [];
@@ -658,11 +650,10 @@ const contextRouteGroupRows = computed<ContextRouteGroupRow[]>(() => {
   });
 });
 const contextRouteSchemaRows = computed<ContextRouteSchemaRow[]>(() => {
-  const snapshot = contextRenderSnapshot.value;
-  const preview = contextPromptPreview.value;
-  if (!snapshot && !preview) return [];
-  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
-  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const snapshot = contextSnapshot.value;
+  if (!snapshot) return [];
+  const requestMetadata = snapshotLlmRequestMetadata(snapshot);
+  const metadata = { ...requestMetadata, ...snapshot.metadata };
   const mirrored = Array.isArray(metadata.tool_schema_mirror_default_mirrored)
     ? metadata.tool_schema_mirror_default_mirrored.filter(isRecord)
     : [];
@@ -794,9 +785,8 @@ const contextSessionRangeRows = computed<ContextSessionRangeMapRow[]>(() => {
           { label: t("workbench.context.estimatedTokens"), value: formatNumber(estimatedTokens) },
           { label: t("workbench.context.estimatedChars"), value: formatNumber(estimatedChars) },
           { label: t("workbench.context.rangeSoftLimit"), value: formatOptionalNumber(node.metadata.range_budget_soft_limit) },
-          { label: t("workbench.context.promptInclusion"), value: hasSnapshot ? `${formatNumber(includedCount)}/${formatNumber(descendants.length + 1)}` : "-" },
+          { label: t("workbench.context.snapshotInclusion"), value: hasSnapshot ? `${formatNumber(includedCount)}/${formatNumber(descendants.length + 1)}` : "-" },
           { label: t("workbench.context.reason"), value: status.reason },
-          { label: t("workbench.context.visibility"), value: textValue(node.owner_ref.message_visibility ?? node.metadata.message_visibility) },
         ],
       };
     });
@@ -807,20 +797,20 @@ const selectedContextRangeRow = computed(() => (
   ?? null
 ));
 const contextSnapshotDiagnosticRows = computed(() => {
-  const snapshot = contextRenderSnapshot.value;
-  const preview = contextPromptPreview.value;
+  const snapshot = contextSnapshot.value;
+  const preview = contextRuntimeRequestPreview.value;
   if (!snapshot && !preview) return [];
   const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
-  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
-  const promptInput = snapshot ? snapshotRunPromptInputMetadata(snapshot) : previewRunPromptInputMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.request_render_snapshot_metadata ?? {}) };
+  const runtimeInput = snapshot ? snapshotRuntimeLlmRequestDraftMetadata(snapshot) : previewRuntimeLlmRequestDraftMetadata(preview);
   return [
     {
       label: t("table.invocationId"),
-      value: compactIdentifier(textValue(contextPromptPreview.value?.provider_request_options?.invocation_id, "")),
+      value: compactIdentifier(textValue(contextRuntimeRequestPreview.value?.provider_request_options?.invocation_id, "")),
     },
     {
       label: t("workbench.context.requestMetadataSnapshot"),
-      value: compactIdentifier(textValue(requestMetadata.context_render_snapshot_id, snapshot?.id ?? "")),
+      value: compactIdentifier(textValue(requestMetadata.request_render_snapshot_id, snapshot?.id ?? "")),
     },
     {
       label: t("workbench.context.treeSchemaVersion"),
@@ -860,11 +850,11 @@ const contextSnapshotDiagnosticRows = computed(() => {
     },
     {
       label: t("workbench.context.directTranscriptMessages"),
-      value: formatOptionalNumber(metadata.direct_transcript_message_count),
+      value: formatOptionalNumber(metadata.draft_input_message_count),
     },
     {
       label: t("workbench.context.directTranscriptRoles"),
-      value: textValue(metadata.direct_transcript_roles),
+      value: textValue(metadata.draft_input_roles),
     },
     {
       label: t("workbench.context.treeSessionMessages"),
@@ -904,19 +894,19 @@ const contextSnapshotDiagnosticRows = computed(() => {
     },
     {
       label: t("workbench.context.providerMessages"),
-      value: formatOptionalNumber(promptInput.message_count),
+      value: formatOptionalNumber(runtimeInput.message_count),
     },
     {
       label: t("workbench.context.providerToolSchemas"),
-      value: formatOptionalNumber(promptInput.tool_schema_count),
+      value: formatOptionalNumber(runtimeInput.tool_schema_count),
     },
     {
       label: t("workbench.context.llm"),
-      value: textValue(promptInput.llm_id),
+      value: textValue(runtimeInput.llm_id),
     },
     {
       label: t("workbench.context.llmCapabilities"),
-      value: textValue(promptInput.llm_capabilities, t("text.none")),
+      value: textValue(runtimeInput.llm_capabilities, t("text.none")),
     },
     {
       label: t("workbench.context.currentInbound"),
@@ -924,26 +914,23 @@ const contextSnapshotDiagnosticRows = computed(() => {
     },
   ];
 });
-const contextSnapshotPromptCharCount = computed(() => (
+const contextSnapshotDebugCharCount = computed(() => (
   contextActualRequestXmlSource.value.length
 ));
 const contextActualRequestXmlSource = computed(() => (
-  contextRenderSnapshot.value?.prompt_body ?? contextPreviewPromptBody.value
+  contextSnapshot.value?.debug_body ?? ""
 ));
 const contextActualRequestProviderAttachments = computed<Record<string, unknown>>(() => (
-  firstNonEmptyRecord(
-    contextPromptPreview.value?.provider_attachments,
-    contextRenderSnapshot.value?.provider_attachments,
-  )
+  firstNonEmptyRecord(contextSnapshot.value?.provider_attachments, undefined)
 ));
 const contextActualRequestProviderOptions = computed<Record<string, unknown>>(() => (
-  contextPromptPreview.value?.provider_request_options ?? {}
+  contextRuntimeRequestPreview.value?.provider_request_options ?? {}
 ));
 const contextActualRequestMessages = computed<unknown[]>(() => (
-  contextPromptPreview.value?.messages ?? []
+  contextRuntimeRequestPreview.value?.messages ?? []
 ));
 const contextActualRequestToolSchemas = computed<unknown[]>(() => {
-  const previewSchemas = contextPromptPreview.value?.tool_schemas ?? [];
+  const previewSchemas = contextRuntimeRequestPreview.value?.tool_schemas ?? [];
   if (previewSchemas.length > 0) return previewSchemas;
   const attachmentSchemas = contextActualRequestProviderAttachments.value.tool_schemas;
   return Array.isArray(attachmentSchemas) ? attachmentSchemas : [];
@@ -977,15 +964,15 @@ const contextActualRequestTabs = computed<Array<{ id: ContextActualRequestTabId;
 ]);
 const contextActualRequestJson = computed(() => {
   if (contextActualRequestTab.value === "messages") {
-    return stringifyPromptPreviewJson(contextActualRequestMessages.value);
+    return stringifyRuntimeRequestPreviewJson(contextActualRequestMessages.value);
   }
   if (contextActualRequestTab.value === "tool_schemas") {
-    return stringifyPromptPreviewJson(contextActualRequestToolSchemas.value);
+    return stringifyRuntimeRequestPreviewJson(contextActualRequestToolSchemas.value);
   }
   if (contextActualRequestTab.value === "options") {
-    return stringifyPromptPreviewJson(contextActualRequestProviderOptions.value);
+    return stringifyRuntimeRequestPreviewJson(contextActualRequestProviderOptions.value);
   }
-  return stringifyPromptPreviewJson(contextActualRequestProviderAttachments.value);
+  return stringifyRuntimeRequestPreviewJson(contextActualRequestProviderAttachments.value);
 });
 const selectedContextNode = computed(() => {
   const nodeId = selectedContextXmlNodeId.value;
@@ -1028,6 +1015,7 @@ const selectedContextNodeHasRefs = computed(() => (
 
 const draftRunId = "__workbench_draft__";
 let refreshSerial = 0;
+let stepRefreshSerial = 0;
 let closeRelayStream: (() => void) | null = null;
 let refreshTimer: ReturnType<typeof window.setTimeout> | null = null;
 let liveScrollFrame: number | null = null;
@@ -1099,12 +1087,15 @@ onUnmounted(() => {
 
 async function refreshWorkbench() {
   const serial = ++refreshSerial;
+  const previousRunId = run.value?.run_id ?? null;
+  const previousActiveTurnId = activeTurnId.value;
   loadingRun.value = true;
   loadError.value = null;
   try {
     const loaded = await loadWorkbenchData({
       runId: routeParam("runId"),
       sessionKey: routeParam("sessionKey"),
+      activeTurnId: activeTurnId.value,
     });
     if (serial !== refreshSerial) return;
     home.value = loaded.home;
@@ -1125,7 +1116,11 @@ async function refreshWorkbench() {
       activeTurnId.value = null;
       activeThreadId.value = null;
     } else {
-      activeTurnId.value = loaded.run?.current_turn_id ?? null;
+      activeTurnId.value = nextActiveTurnIdAfterRefresh(
+        loaded.run,
+        previousRunId,
+        previousActiveTurnId,
+      );
       activeThreadId.value = loaded.home.active_thread_id ?? loaded.run?.session_key ?? null;
     }
     void nextTick(scrollActiveTurnTab);
@@ -1139,63 +1134,124 @@ async function refreshWorkbench() {
   }
 }
 
+function nextActiveTurnIdAfterRefresh(
+  loadedRun: WorkbenchRunView | null,
+  previousRunId: string | null,
+  previousActiveTurnId: string | null,
+) {
+  if (!loadedRun) return null;
+  const currentTurnId = loadedRun.current_turn_id ?? null;
+  if (loadedRun.run_id !== previousRunId) {
+    return currentTurnId;
+  }
+  if (
+    previousActiveTurnId
+    && loadedRun.turns.some((turn) => turn.turn_id === previousActiveTurnId)
+  ) {
+    return previousActiveTurnId;
+  }
+  return currentTurnId;
+}
+
+async function refreshActiveTurnSteps() {
+  const currentRun = run.value;
+  const turnId = activeTurnId.value;
+  if (dataMode !== "api" || !currentRun || isNewSessionDraft.value || !turnId) {
+    return;
+  }
+  const serial = ++stepRefreshSerial;
+  try {
+    const steps = await loadWorkbenchRunSteps(currentRun.run_id, turnId);
+    if (serial !== stepRefreshSerial) return;
+    runSteps.value = steps;
+  } catch (error) {
+    if (serial !== stepRefreshSerial) return;
+    loadError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
 async function refreshContextTree() {
   const sessionKey = contextSessionKey.value;
   if (dataMode !== "api" || !sessionKey || isNewSessionDraft.value) {
     contextTree.value = null;
-    contextRenderSnapshot.value = null;
-    contextPromptPreview.value = null;
+    contextSnapshot.value = null;
+    contextRuntimeRequestPreview.value = null;
     contextTreeError.value = null;
+    contextDebugBodyError.value = null;
+    contextDebugBodyLoading.value = false;
     return;
   }
   contextTreeLoading.value = true;
   contextTreeError.value = null;
+  contextDebugBodyError.value = null;
+  contextDebugBodyLoading.value = false;
   try {
     const runId = run.value?.run_id ?? null;
     const invocationId = selectedStepLlmInvocationId.value;
-    const treePromise = loadWorkbenchContextTree(sessionKey);
     const previewPromise = runId && invocationId
-      ? loadWorkbenchInvocationPromptPreview(invocationId, runId)
+      ? loadWorkbenchInvocationRuntimeRequestPreview(invocationId, runId)
       : runId
-        ? loadWorkbenchPromptPreview(runId)
+        ? loadWorkbenchRuntimeRequestPreview(runId)
         : Promise.resolve(null);
-    const tree = await treePromise;
-    if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
-      return;
-    }
-    contextTree.value = tree;
-
+    const treePromise = loadWorkbenchContextTree(sessionKey);
     let preview = await previewPromise;
     if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
       return;
     }
     if (runId && invocationId && !preview) {
-      preview = await loadWorkbenchPromptPreview(runId);
+      preview = await loadWorkbenchRuntimeRequestPreview(runId);
     }
     if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
       return;
     }
-    const snapshotId = typeof preview?.context_render_snapshot_id === "string"
-      ? preview.context_render_snapshot_id.trim()
+    const snapshotId = typeof preview?.request_render_snapshot_id === "string"
+      ? preview.request_render_snapshot_id.trim()
       : "";
     const snapshotPromise = snapshotId.startsWith("ctxsnap_")
-      ? loadWorkbenchContextRenderSnapshotById(snapshotId)
+      ? loadWorkbenchContextSnapshotById(snapshotId)
       : !snapshotId && runId
-        ? loadWorkbenchContextRenderSnapshot(runId)
+        ? loadWorkbenchContextSnapshot(runId)
         : Promise.resolve(null);
     const snapshot = await snapshotPromise;
     if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
       return;
     }
-    contextRenderSnapshot.value = snapshot;
-    contextPromptPreview.value = preview;
+    contextSnapshot.value = snapshot;
+    contextRuntimeRequestPreview.value = preview;
+    const tree = await treePromise;
+    if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
+      return;
+    }
+    contextTree.value = tree;
   } catch (error) {
     contextTree.value = null;
-    contextRenderSnapshot.value = null;
-    contextPromptPreview.value = null;
+    contextSnapshot.value = null;
+    contextRuntimeRequestPreview.value = null;
     contextTreeError.value = commandErrorMessage(error);
   } finally {
     contextTreeLoading.value = false;
+  }
+}
+
+async function loadContextDebugBody() {
+  const snapshot = contextSnapshot.value;
+  const runId = run.value?.run_id ?? null;
+  if (dataMode !== "api" || contextDebugBodyLoading.value) return;
+  contextDebugBodyLoading.value = true;
+  contextDebugBodyError.value = null;
+  try {
+    const loaded = snapshot?.id
+      ? await loadWorkbenchContextSnapshotById(snapshot.id, { includeDebugBody: true })
+      : runId
+        ? await loadWorkbenchContextSnapshot(runId, { includeDebugBody: true })
+        : null;
+    if (loaded) {
+      contextSnapshot.value = loaded;
+    }
+  } catch (error) {
+    contextDebugBodyError.value = commandErrorMessage(error);
+  } finally {
+    contextDebugBodyLoading.value = false;
   }
 }
 
@@ -1342,8 +1398,8 @@ async function loadSkillApprovalDrafts(steps: TurnStepView[]) {
 
 function skillApprovalDraftId(step: TurnStepView): string | null {
   if (step.approval?.tool_name !== "skill_draft_apply") return null;
-  const direct = normalizeText(step.approval.draft_id);
-  if (direct) return direct;
+  const draftInput = normalizeText(step.approval.draft_id);
+  if (draftInput) return draftInput;
   const fromArgs = normalizeText(step.approval.tool_arguments?.draft_id);
   return fromArgs || null;
 }
@@ -1552,7 +1608,7 @@ function realRunAgentId(value: WorkbenchRunView | null): string | null {
 }
 
 function collectLinkedAssets(steps: TurnStepView[], traceId: string | null): LinkedWorkbenchAsset[] {
-  const route = traceId ? `/trace/${encodeURIComponent(traceId)}` : "/trace";
+  const route = traceId ? `/workbench/traces/${encodeURIComponent(traceId)}` : "/workbench/traces";
   const seen = new Set<string>();
   const assets: LinkedWorkbenchAsset[] = [];
 
@@ -1602,6 +1658,9 @@ function linkedAssetFromEntity(entity: UiLinkedEntity, fallbackRoute: string): O
 function linkedEntityLabelKey(type: string): LinkedWorkbenchAsset["labelKey"] | undefined {
   if (type === "tool_run") return "workbench.asset.toolRun";
   if (type === "llm_invocation") return "workbench.asset.llmInvocation";
+  if (type === "llm_response_item" || type === "llm_response_item_id") return "workbench.asset.llmResponseItem";
+  if (type === "session_item" || type === "session_item_id" || type === "session_message") return "workbench.asset.sessionItem";
+  if (type === "provider_item" || type === "provider_item_id") return "workbench.asset.providerItem";
   if (type === "artifact") return "workbench.asset.artifact";
   return undefined;
 }
@@ -1638,7 +1697,7 @@ async function loadWorkbenchToolCatalog() {
   }
 }
 
-function insertToolPrompt(tool: WorkbenchToolSummary) {
+function insertToolMention(tool: WorkbenchToolSummary) {
   const prefix = composerContent.value.trim() ? "\n" : "";
   composerContent.value = `${composerContent.value}${prefix}${t("workbench.composer.useTool", { tool: tool.id })}`;
   toolsOpen.value = false;
@@ -1701,9 +1760,11 @@ function linkedEntityDetailKey(entity: UiLinkedEntity) {
 function linkedEntitySupportsDetail(entity: UiLinkedEntity) {
   return (
     entity.type === "session_item"
+    || entity.type === "session_item_id"
     || entity.type === "session_message"
     || entity.type === "llm_response_item"
     || entity.type === "llm_response_item_id"
+    || entity.type === "tool_run"
   );
 }
 
@@ -1730,6 +1791,164 @@ function linkedEntityDetailSummary(detail: WorkbenchLinkedEntityDetail | null) {
   const text = detail.payload.content_payload;
   if (isRecord(text) && typeof text.text === "string") return text.text;
   return detail.label;
+}
+
+function linkedEntityDetailPayloadJson(detail: WorkbenchLinkedEntityDetail | null) {
+  if (!detail) return "";
+  return JSON.stringify(detail.payload, null, 2);
+}
+
+function linkedEntitySurfaceRows(detail: WorkbenchLinkedEntityDetail | null) {
+  const surface = isRecord(detail?.payload.provider_input_summary)
+    ? detail.payload.provider_input_summary
+    : null;
+  if (!surface) return [];
+  const rows = [
+    {
+      label: t("workbench.context.requestContextSource"),
+      value: textValue(surface.request_context_source),
+    },
+    {
+      label: t("workbench.context.requestMetadataSnapshot"),
+      value: compactIdentifier(textValue(surface.request_render_snapshot_id, "")),
+    },
+    {
+      label: t("workbench.context.contextSlice"),
+      value: compactIdentifier(textValue(surface.context_slice_id, "")),
+    },
+    {
+      label: t("workbench.context.contextSliceItems"),
+      value: formatOptionalNumber(surface.context_slice_item_count),
+    },
+    {
+      label: t("workbench.context.contextSliceProjectedItems"),
+      value: formatOptionalNumber(surface.context_slice_projected_input_item_count),
+    },
+    {
+      label: t("workbench.context.treeSchemaVersion"),
+      value: textValue(surface.request_render_snapshot_schema_version),
+    },
+    {
+      label: t("workbench.context.includedNodes"),
+      value: formatOptionalNumber(surface.request_render_snapshot_included_node_count),
+    },
+    {
+      label: t("workbench.context.omittedNodes"),
+      value: formatOptionalNumber(surface.context_slice_omitted_node_count),
+    },
+    {
+      label: t("workbench.context.unresolvedRefs"),
+      value: formatOptionalNumber(surface.context_slice_unresolved_ref_count),
+    },
+    {
+      label: t("workbench.entityDetail.contextFingerprint"),
+      value: compactIdentifier(textValue(surface.request_render_snapshot_fingerprint, "")),
+    },
+    {
+      label: t("workbench.entityDetail.toolSurface"),
+      value: compactIdentifier(textValue(surface.tool_surface_id ?? surface.tool_surface_snapshot_id, "")),
+    },
+    {
+      label: t("workbench.context.routeFunctions"),
+      value: formatOptionalNumber(surface.tool_surface_function_count),
+    },
+    {
+      label: t("workbench.context.requestMetadataMirroredSchemas"),
+      value: formatOptionalNumber(surface.tool_surface_mirrored_schema_count),
+    },
+    {
+      label: t("workbench.entityDetail.toolFingerprint"),
+      value: compactIdentifier(textValue(surface.tool_surface_fingerprint, "")),
+    },
+  ];
+  return rows.filter((row) => row.value && row.value !== "-");
+}
+
+function linkedEntityReplayInputRows(detail: WorkbenchLinkedEntityDetail | null) {
+  const replayInput = isRecord(detail?.payload.replay_input)
+    ? detail.payload.replay_input
+    : null;
+  if (!replayInput || Number(replayInput.count ?? 0) <= 0) return [];
+  const protocolCounts = isRecord(replayInput.protocol_counts)
+    ? replayInput.protocol_counts
+    : {};
+  const rows = [
+    {
+      label: t("workbench.entityDetail.replayInputCount"),
+      value: formatOptionalNumber(replayInput.count),
+    },
+    {
+      label: t("workbench.entityDetail.replayInputKinds"),
+      value: Array.isArray(replayInput.kinds)
+        ? replayInput.kinds.map((item) => textValue(item)).filter(Boolean).join(", ")
+        : "-",
+    },
+    {
+      label: t("workbench.entityDetail.replayInputSources"),
+      value: Array.isArray(replayInput.sources)
+        ? replayInput.sources.map((item) => textValue(item)).filter(Boolean).join(", ")
+        : "-",
+    },
+    {
+      label: t("workbench.entityDetail.replayProtocolItems"),
+      value: [
+        `reasoning=${formatOptionalNumber(protocolCounts.reasoning)}`,
+        `calls=${formatOptionalNumber(protocolCounts.function_call)}`,
+        `outputs=${formatOptionalNumber(protocolCounts.function_call_output)}`,
+        `provider_external=${formatOptionalNumber(protocolCounts.provider_external_item)}`,
+      ].join("; "),
+    },
+    {
+      label: t("workbench.entityDetail.toolResultExcerpts"),
+      value: formatOptionalNumber(replayInput.tool_result_excerpt_count),
+    },
+    {
+      label: t("workbench.entityDetail.toolResultExcerptSample"),
+      value: textValue(replayInput.tool_result_excerpt_sample),
+    },
+  ];
+  return rows.filter((row) => row.value && row.value !== "-");
+}
+
+function linkedEntityRuntimeHintRows(detail: WorkbenchLinkedEntityDetail | null) {
+  const runtimeObservations = isRecord(detail?.payload.runtime_observations)
+    ? detail.payload.runtime_observations
+    : null;
+  if (!runtimeObservations) return [];
+  const toolProtocol = isRecord(runtimeObservations.tool_protocol)
+    ? runtimeObservations.tool_protocol
+    : null;
+  const rows = [
+    {
+      label: t("workbench.entityDetail.runtimeObservationCount"),
+      value: formatOptionalNumber(runtimeObservations.observation_count),
+    },
+    {
+      label: t("workbench.entityDetail.runtimeObservationSummary"),
+      value: textValue(runtimeObservations.summary),
+    },
+  ];
+  if (toolProtocol?.present === true) {
+    rows.push(
+      {
+        label: t("workbench.entityDetail.toolProtocolReplay"),
+        value: toolProtocol.replay_has_protocol_breaks === true
+          ? t("workbench.entityDetail.protocolBreaks")
+          : t("workbench.entityDetail.protocolClean"),
+      },
+      {
+        label: t("workbench.entityDetail.toolProtocolSource"),
+        value: toolProtocol.source_had_protocol_breaks === true
+          ? t("workbench.entityDetail.protocolHadBreaks")
+          : t("workbench.entityDetail.protocolClean"),
+      },
+      {
+        label: t("workbench.entityDetail.toolProtocolFiltered"),
+        value: formatOptionalNumber(toolProtocol.filtered_count),
+      },
+    );
+  }
+  return rows.filter((row) => row.value && row.value !== "-");
 }
 
 function isStepExpanded(stepId: string) {
@@ -1794,6 +2013,7 @@ function exportActiveRun() {
 watch(activeTurnId, () => {
   selectedStepId.value = null;
   resetLinkedEntityDetail();
+  void refreshActiveTurnSteps();
   void nextTick(scrollActiveTurnTab);
 });
 
@@ -1971,12 +2191,14 @@ function timelineItemStepType(item: WorkbenchTimelineItem): TurnStepView["type"]
   if (item.kind === "user_input") return "user_input";
   if (item.kind === "assistant_commentary") return "agent_progress";
   if (item.kind === "assistant_final_answer" || item.kind === "final_answer") return "final_response";
-  if (item.kind === "reasoning_summary") return "agent_thinking";
+  if (item.kind === "reasoning_summary") return visibleReasoningSummary(item) ? "agent_progress" : "agent_thinking";
   if (item.kind === "tool_call") return "tool_call";
   if (item.kind === "tool_run") return "tool_call";
   if (item.kind === "tool_result") return "tool_result";
   if (item.kind === "continuation") return "continuation_decision";
   if (item.kind === "approval" || item.kind === "approval_required") return "approval_required";
+  if (item.kind === "wait_state") return "missing_access";
+  if (item.kind === "system_event") return "agent_thinking";
   if (item.kind === "error") return "error";
   return "llm";
 }
@@ -1999,7 +2221,19 @@ function timelineItemSummary(item: WorkbenchTimelineItem): string {
 
 function timelineItemMarkdown(item: WorkbenchTimelineItem): string | undefined {
   const markdown = textValue(item.content?.markdown, "");
-  return markdown || undefined;
+  if (markdown) return markdown;
+  if (visibleReasoningSummary(item)) {
+    const text = textValue(item.content?.text, "");
+    return text || undefined;
+  }
+  return undefined;
+}
+
+function visibleReasoningSummary(item: WorkbenchTimelineItem): boolean {
+  if (item.kind !== "reasoning_summary") return false;
+  const content = item.content ?? {};
+  if (content.reasoning_hidden === true) return false;
+  return Boolean(textValue(content.text, "") || textValue(content.markdown, ""));
 }
 
 function timelineItemBadges(
@@ -2010,18 +2244,43 @@ function timelineItemBadges(
   if (type === "tool_call") badges.push({ label: "Tool Call", tone: "info" });
   if (type === "tool_result") badges.push({ label: "Tool Result", tone: "success" });
   if (item.kind === "reasoning_summary") badges.push({ label: "Reasoning Summary", tone: "info" });
-  if (item.kind === "provider_external_item") badges.push({ label: "Provider Item", tone: "neutral" });
+  if (item.kind === "provider_external_activity") badges.push({ label: "Provider Activity", tone: "neutral" });
+  if (item.kind === "system_event") badges.push({ label: "System Event", tone: "neutral" });
   if (item.phase) badges.push({ label: item.phase, tone: "neutral" });
   return badges;
 }
 
 function linkedEntitiesFromTimelineItem(item: WorkbenchTimelineItem): UiLinkedEntity[] {
-  return Object.entries(item.source_refs ?? {}).map(([type, id]) => ({
-    type,
-    id,
-    owner: type,
-    label: type,
-  }));
+  return Object.entries(item.source_refs ?? [])
+    .map(([type, id]) => linkedEntityFromTimelineSourceRef(type, id, item.trace))
+    .filter((entity): entity is UiLinkedEntity => entity !== null);
+}
+
+function linkedEntityFromTimelineSourceRef(
+  type: string,
+  id: string,
+  trace: TraceContext,
+): UiLinkedEntity | null {
+  if (!id) return null;
+  if (type === "tool_run_id") {
+    return { type: "tool_run", id, owner: "tool", label: t("workbench.asset.toolRun"), trace };
+  }
+  if (type === "llm_invocation_id") {
+    return { type: "llm_invocation", id, owner: "llm", label: t("workbench.asset.llmInvocation"), trace };
+  }
+  if (type === "llm_response_item_id") {
+    return { type, id, owner: "llm", label: t("workbench.asset.llmResponseItem"), trace };
+  }
+  if (type === "session_item_id") {
+    return { type: "session_item", id, owner: "session", label: t("workbench.asset.sessionItem"), trace };
+  }
+  if (type === "provider_item_id") {
+    return { type, id, owner: "llm", label: t("workbench.asset.providerItem"), trace };
+  }
+  if (type === "artifact_id") {
+    return { type: "artifact", id, owner: "artifacts", label: t("workbench.asset.artifact"), trace };
+  }
+  return null;
 }
 
 function clearLiveFlow() {
@@ -2108,6 +2367,9 @@ function runTitle(currentRun: WorkbenchRunView) {
 }
 
 function stepTitle(step: TurnStepView) {
+  if (step.badges.some((badge) => badge.label === "Reasoning Summary")) {
+    return t("workbench.step.reasoningSummary.title");
+  }
   if (step.type === "tool_call" || step.type === "tool_result") {
     if (!step.title || step.title === "Tool Call" || step.title === "Tool Execution") {
       return t("workbench.badge.toolCall");
@@ -2486,7 +2748,7 @@ function contextNodeXmlAttributes(node: WorkbenchContextNodeRow) {
     { name: "owner", value: node.owner },
     { name: "state", value: contextNodeXmlState(node) },
   ];
-  if (!node.state.prompt_visible) attrs.push({ name: "prompt_visible", value: "false" });
+  if (!node.state.snapshot_visible) attrs.push({ name: "snapshot_visible", value: "false" });
   if (node.state.pinned) attrs.push({ name: "pinned", value: "true" });
   if (node.state.schema_enabled) attrs.push({ name: "schema_enabled", value: "true" });
   const memoryAccess = contextMemoryAccessCode(node);
@@ -2680,7 +2942,7 @@ function contextXmlLineCanFold(line: NumberedContextXmlLine) {
 
 function contextXmlLineClasses(line: NumberedContextXmlLine) {
   return {
-    "context-xml-line-row--hidden": !line.node.state.prompt_visible,
+    "context-xml-line-row--hidden": !line.node.state.snapshot_visible,
     "context-xml-line-row--summary": line.kind === "summary",
     "context-xml-line-row--close": line.kind === "close",
     "context-xml-line-row--folded": line.kind === "folded",
@@ -2865,8 +3127,21 @@ function linkedEntityRoute(entity: UiLinkedEntity) {
 
 function traceRoute(trace: TraceContext | null | undefined) {
   if (!trace?.trace_id) return null;
-  const route = `/trace/${encodeURIComponent(trace.trace_id)}`;
-  return trace.step_id ? `${route}?step_id=${encodeURIComponent(trace.step_id)}` : route;
+  const route = `/workbench/traces/${encodeURIComponent(trace.trace_id)}`;
+  const focusId = traceFocusId(trace);
+  return focusId ? `${route}?focus_id=${encodeURIComponent(focusId)}` : route;
+}
+
+function traceFocusId(trace: TraceContext) {
+  return [
+    trace.source_event_id,
+    trace.llm_invocation_id,
+    trace.tool_run_id,
+    trace.session_item_id,
+    trace.request_render_snapshot_id,
+    trace.artifact_id,
+    trace.approval_request_id,
+  ].find((value) => typeof value === "string" && value.trim());
 }
 
 function linkedEntityLabel(entity: UiLinkedEntity) {
@@ -3066,7 +3341,7 @@ function metadataStringList(value: unknown): string[] {
   return text ? [text] : [];
 }
 
-function promptEstimateTokenTotal(
+function contextEstimateTokenTotal(
   estimate: {
     text_tokens?: unknown;
     tool_schema_tokens?: unknown;
@@ -3123,34 +3398,6 @@ function schemaReasonSummary(metadata: Record<string, unknown>): string {
   return t("workbench.context.routeBrowserGroupsHelp");
 }
 
-function browserInvestigationAffordanceSummary(
-  metadata: Record<string, unknown>,
-): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
-  const status = textValue(metadata.browser_investigation_affordance_status, "");
-  const routeBias = textValue(metadata.browser_investigation_route_bias, "");
-  const present = metadataStringList(metadata.browser_investigation_present_paths);
-  const missing = metadataStringList(metadata.browser_investigation_missing_paths);
-  const schemaCount = metadataStringList(metadata.browser_investigation_schema_names).length;
-  const tone: ContextRouteDiagnosticTone = status === "ok"
-    ? "success"
-    : status === "dom_form_only" || status === "missing_browser_tools"
-      ? "danger"
-      : "warning";
-  const value = [status ? titleize(status) : "", routeBias && routeBias !== status ? titleize(routeBias) : ""]
-    .filter(Boolean)
-    .join(" · ");
-  const detail = [
-    `${t("workbench.context.routePresentPathsShort")} ${present.length ? present.join(", ") : "-"}`,
-    `${t("workbench.context.routeMissingPathsShort")} ${missing.length ? missing.join(", ") : "-"}`,
-    `${t("workbench.context.routeSchemasVisibleShort")} ${formatNumber(schemaCount)}`,
-  ].join(" · ");
-  return {
-    value: value || t("text.none"),
-    tone,
-    detail: value ? detail : t("workbench.context.routeBrowserAffordanceHelp"),
-  };
-}
-
 function workPlanUpdateSummary(
   metadata: Record<string, unknown>,
 ): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
@@ -3174,29 +3421,6 @@ function workPlanUpdateSummary(
     value: phase ? `${formatNumber(count)} · ${phase}` : formatNumber(count),
     tone,
     detail: detail || t("workbench.context.routePlanUpdatesHelp"),
-  };
-}
-
-function finalResponseEvidenceSummary(
-  metadata: Record<string, unknown>,
-): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
-  const required = metadata.final_response_requires_evidence_path === true;
-  const browserPaths = metadataStringList(metadata.browser_verified_evidence_paths);
-  const verifiedPaths = metadataStringList(metadata.verified_evidence_paths);
-  const paths = browserPaths.length ? browserPaths : verifiedPaths;
-  if (!required) {
-    return {
-      value: t("workbench.context.routeFinalEvidenceNotRequired"),
-      tone: "info",
-      detail: t("workbench.context.routeFinalEvidenceHelp"),
-    };
-  }
-  return {
-    value: paths.length
-      ? `${t("workbench.context.routeFinalEvidenceRequired")} · ${paths.join(", ")}`
-      : t("workbench.context.routeFinalEvidenceRequired"),
-    tone: paths.length ? "success" : "warning",
-    detail: t("workbench.context.routeFinalEvidenceRequiredHelp"),
   };
 }
 
@@ -3224,10 +3448,11 @@ function skippedSchemaSummary(
 }
 
 function routeBudgetSplitValue(metadata: Record<string, unknown>): string {
-  const direct = formatOptionalNumber(metadata.direct_transcript_estimated_tokens, "0");
-  const tree = formatOptionalNumber(metadata.rendered_prompt_estimated_tokens, "0");
+  const draftInput = formatOptionalNumber(metadata.draft_input_estimated_tokens, "0");
   const schemas = formatOptionalNumber(metadata.mirrored_tool_schema_estimated_tokens, "0");
-  return `${t("workbench.context.routeDirectShort")} ${direct} · ${t("workbench.context.routeTreeShort")} ${tree} · ${t("workbench.context.routeSchemasShort")} ${schemas}`;
+  const artifacts = formatOptionalNumber(metadata.artifact_content_estimated_tokens, "0");
+  const provider = formatOptionalNumber(metadata.estimated_provider_input_tokens, "0");
+  return `${t("workbench.context.routeDirectShort")} ${draftInput} · ${t("workbench.context.routeSchemasShort")} ${schemas} · ${t("workbench.context.routeArtifactsShort")} ${artifacts} · ${t("workbench.context.routeProviderInputShort")} ${provider}`;
 }
 
 function capabilityVisibilityValue(metadata: Record<string, unknown>): string {
@@ -3240,6 +3465,7 @@ function capabilityVisibilityValue(metadata: Record<string, unknown>): string {
 }
 
 function toolResultTruncationSummary(messages: unknown[]): { value: string; compactedCount: number } {
+  let visibleResultCount = 0;
   let compactedCount = 0;
   let omittedChars = 0;
   let omittedCount = 0;
@@ -3247,19 +3473,30 @@ function toolResultTruncationSummary(messages: unknown[]): { value: string; comp
     if (!isRecord(message)) continue;
     const role = textValue(message.role, "");
     if (role && role !== "tool") continue;
-    const text = promptPreviewContentText(message.content);
-    if (!text.includes("omitted_from_provider_transcript")) continue;
-    compactedCount += 1;
+    const text = runtimeRequestPreviewContentText(message.content);
+    const hasVisibleResult = text.includes("tool_result:");
+    const isCompacted = text.includes("omitted_from_provider_transcript")
+      || text.includes("body_excerpt_policy:")
+      || text.includes("read_handles:");
+    if (!hasVisibleResult && !isCompacted) continue;
+    if (hasVisibleResult) visibleResultCount += 1;
+    if (isCompacted) compactedCount += 1;
     omittedChars += sumLineNumbers(text, /omitted_chars:\s*(\d+)/g);
     omittedCount += sumLineNumbers(text, /omitted_count:\s*(\d+)/g);
   }
-  if (compactedCount <= 0) {
+  if (visibleResultCount <= 0 && compactedCount <= 0) {
     return {
       value: t("workbench.context.routeToolResultTruncationNone"),
       compactedCount,
     };
   }
-  const parts = [`${formatNumber(compactedCount)} ${t("workbench.context.routeCompactedShort")}`];
+  const parts = [];
+  if (visibleResultCount > 0) {
+    parts.push(`${formatNumber(visibleResultCount)} ${t("workbench.context.routeVisibleResultsShort")}`);
+  }
+  if (compactedCount > 0) {
+    parts.push(`${formatNumber(compactedCount)} ${t("workbench.context.routeCompactedShort")}`);
+  }
   if (omittedChars > 0) {
     parts.push(`${formatNumber(omittedChars)} ${t("workbench.context.routeOmittedCharsShort")}`);
   }
@@ -3295,22 +3532,22 @@ function topRenderedNodesValue(metadata: Record<string, unknown>): string {
   return labels.length ? labels.join(" · ") : "-";
 }
 
-function snapshotRunPromptInputMetadata(snapshot: WorkbenchContextRenderSnapshot): Record<string, unknown> {
-  const value = snapshot.provider_attachments.prompt_input;
+function snapshotRuntimeLlmRequestDraftMetadata(snapshot: WorkbenchContextSnapshot): Record<string, unknown> {
+  const value = snapshot.provider_attachments.runtime_request_draft;
   return isRecord(value) ? value : {};
 }
 
-function snapshotRuntimeContractMetadata(snapshot: WorkbenchContextRenderSnapshot): Record<string, unknown> {
+function snapshotRuntimeContractMetadata(snapshot: WorkbenchContextSnapshot): Record<string, unknown> {
   const value = snapshot.metadata.runtime_contract;
   return isRecord(value) ? value : {};
 }
 
-function snapshotLlmRequestMetadata(snapshot: WorkbenchContextRenderSnapshot): Record<string, unknown> {
+function snapshotLlmRequestMetadata(snapshot: WorkbenchContextSnapshot): Record<string, unknown> {
   const contract = snapshotRuntimeContractMetadata(snapshot);
   return {
-    prompt_input: snapshot.provider_attachments.prompt_input,
+    runtime_request_draft: snapshot.provider_attachments.runtime_request_draft,
     tree_schema_version: snapshot.metadata.tree_schema_version,
-    context_render_snapshot_id: snapshot.id,
+    request_render_snapshot_id: snapshot.id,
     context_history_delivery: snapshot.metadata.history_delivery,
     mirrored_tool_schema_count: snapshot.metadata.mirrored_tool_schema_count,
     mirrored_node_count: snapshot.metadata.mirrored_node_count,
@@ -3320,21 +3557,21 @@ function snapshotLlmRequestMetadata(snapshot: WorkbenchContextRenderSnapshot): R
   };
 }
 
-function previewRunPromptInputMetadata(preview: RunPromptInputPreview | null): Record<string, unknown> {
-  const value = preview?.provider_attachments.prompt_input;
+function previewRuntimeLlmRequestDraftMetadata(preview: RuntimeLlmRequestPreview | null): Record<string, unknown> {
+  const value = contextSnapshot.value?.provider_attachments.runtime_request_draft;
   return isRecord(value) ? value : {};
 }
 
-function previewLlmRequestMetadata(preview: RunPromptInputPreview | null): Record<string, unknown> {
-  const metadata = preview?.context_render_metadata ?? {};
+function previewLlmRequestMetadata(preview: RuntimeLlmRequestPreview | null): Record<string, unknown> {
+  const metadata = preview?.request_render_snapshot_metadata ?? {};
   const requestMetadata = isRecord(preview?.provider_request_options.request_metadata)
     ? preview.provider_request_options.request_metadata
     : {};
   const contract = isRecord(metadata.runtime_contract) ? metadata.runtime_contract : {};
   return {
-    prompt_input: preview?.provider_attachments.prompt_input,
+    runtime_request_draft: contextSnapshot.value?.provider_attachments.runtime_request_draft,
     tree_schema_version: metadata.tree_schema_version,
-    context_render_snapshot_id: preview?.context_render_snapshot_id,
+    request_render_snapshot_id: preview?.request_render_snapshot_id,
     context_history_delivery: metadata.history_delivery,
     mirrored_tool_schema_count: metadata.mirrored_tool_schema_count,
     mirrored_node_count: metadata.mirrored_node_count,
@@ -3812,7 +4049,7 @@ function handleTurnsWheel(event: WheelEvent) {
                           <dd>{{ row.value }}</dd>
                         </div>
                       </dl>
-                      <RouterLink :to="traceRoute(step.trace) ?? '/trace'">
+                      <RouterLink :to="traceRoute(step.trace) ?? '/workbench/traces'">
                         <PanelRightOpen :size="14" />
                         {{ t("common.viewTrace") }}
                       </RouterLink>
@@ -3835,7 +4072,7 @@ function handleTurnsWheel(event: WheelEvent) {
                         <PanelRightOpen :size="14" />
                         {{ t("common.viewImage") }}
                       </a>
-                      <RouterLink class="step-action-button" :to="traceRoute(step.trace) ?? '/trace'">
+                      <RouterLink class="step-action-button" :to="traceRoute(step.trace) ?? '/workbench/traces'">
                         <Loader2 :size="14" />
                         {{ t("common.viewTrace") }}
                       </RouterLink>
@@ -3843,7 +4080,7 @@ function handleTurnsWheel(event: WheelEvent) {
                     <RouterLink
                       v-else-if="step.type === 'final_response'"
                       class="step-action-button"
-                      :to="traceRoute(step.trace) ?? '/trace'"
+                      :to="traceRoute(step.trace) ?? '/workbench/traces'"
                     >
                       {{ t("common.viewDetails") }}
                     </RouterLink>
@@ -3882,7 +4119,7 @@ function handleTurnsWheel(event: WheelEvent) {
             <span>{{ t("workbench.queueWait", { duration: formatDuration(run.status_strip?.queue_wait_ms) }) }}</span>
           </template>
         </div>
-        <RouterLink v-if="!isNewSessionDraft" class="status-strip__action" :to="traceRoute(run.trace) ?? '/trace'">
+        <RouterLink v-if="!isNewSessionDraft" class="status-strip__action" :to="traceRoute(run.trace) ?? '/workbench/traces'">
           <PanelRightOpen :size="15" />
           {{ t("common.viewTrace") }}
         </RouterLink>
@@ -3960,7 +4197,7 @@ function handleTurnsWheel(event: WheelEvent) {
                     :key="tool.id"
                     type="button"
                     class="composer-tool-item"
-                    @click="insertToolPrompt(tool)"
+                    @click="insertToolMention(tool)"
                   >
                     <Wrench :size="15" />
                     <span>
@@ -4145,7 +4382,7 @@ function handleTurnsWheel(event: WheelEvent) {
               <ExternalLink :size="14" />
             </button>
           </template>
-          <RouterLink v-else-if="!isNewSessionDraft" :to="traceRoute(run.trace) ?? '/trace'">
+          <RouterLink v-else-if="!isNewSessionDraft" :to="traceRoute(run.trace) ?? '/workbench/traces'">
             <ShieldCheck :size="17" />
             <span>
               <strong>{{ t("workbench.quick.viewTrace") }}</strong>
@@ -4202,7 +4439,7 @@ function handleTurnsWheel(event: WheelEvent) {
             v-for="artifact in selectedStep.artifacts"
             :key="artifact.artifact_id"
             class="asset-link"
-            :to="traceRoute(selectedStep.trace) ?? '/trace'"
+            :to="traceRoute(selectedStep.trace) ?? '/workbench/traces'"
           >
             <FileImage :size="16" />
             <strong>{{ artifact.name }}</strong>
@@ -4270,6 +4507,55 @@ function handleTurnsWheel(event: WheelEvent) {
                   <dd :title="selectedEntityDetail.id">{{ selectedEntityDetail.id }}</dd>
                 </div>
               </dl>
+              <dl
+                v-if="linkedEntitySurfaceRows(selectedEntityDetail).length"
+                class="entity-detail-surface"
+              >
+                <div class="entity-detail-section-title">
+                  <dt>{{ t("workbench.entityDetail.modelVisibleSurface") }}</dt>
+                  <dd>{{ t("workbench.entityDetail.modelVisibleSurfaceHint") }}</dd>
+                </div>
+                <div
+                  v-for="row in linkedEntitySurfaceRows(selectedEntityDetail)"
+                  :key="row.label"
+                >
+                  <dt>{{ row.label }}</dt>
+                  <dd :title="row.value">{{ row.value }}</dd>
+                </div>
+              </dl>
+              <dl
+                v-if="linkedEntityReplayInputRows(selectedEntityDetail).length"
+                class="entity-detail-surface"
+              >
+                <div class="entity-detail-section-title">
+                  <dt>{{ t("workbench.entityDetail.replayInput") }}</dt>
+                  <dd>{{ t("workbench.entityDetail.replayInputHint") }}</dd>
+                </div>
+                <div
+                  v-for="row in linkedEntityReplayInputRows(selectedEntityDetail)"
+                  :key="row.label"
+                >
+                  <dt>{{ row.label }}</dt>
+                  <dd :title="row.value">{{ row.value }}</dd>
+                </div>
+              </dl>
+              <dl
+                v-if="linkedEntityRuntimeHintRows(selectedEntityDetail).length"
+                class="entity-detail-surface"
+              >
+                <div class="entity-detail-section-title">
+                  <dt>{{ t("workbench.entityDetail.runtimeObservations") }}</dt>
+                  <dd>{{ t("workbench.entityDetail.runtimeObservationsHint") }}</dd>
+                </div>
+                <div
+                  v-for="row in linkedEntityRuntimeHintRows(selectedEntityDetail)"
+                  :key="row.label"
+                >
+                  <dt>{{ row.label }}</dt>
+                  <dd :title="row.value">{{ row.value }}</dd>
+                </div>
+              </dl>
+              <pre class="entity-detail-payload">{{ linkedEntityDetailPayloadJson(selectedEntityDetail) }}</pre>
             </template>
             <p v-else>{{ entityDetailError }}</p>
           </div>
@@ -4422,7 +4708,7 @@ function handleTurnsWheel(event: WheelEvent) {
           </p>
         </UiCard>
 
-        <UiCard v-if="contextRenderSnapshot || contextPromptPreview" class="inspector-section context-tree-card context-snapshot-card context-snapshot-card--primary">
+        <UiCard v-if="contextRequestCardVisible" class="inspector-section context-tree-card context-snapshot-card context-snapshot-card--primary">
           <div class="context-tree-card__heading context-tree-card__heading--stacked">
             <h2>{{ contextRequestCardTitle }}</h2>
             <p>{{ contextRequestCardSubtitle }}</p>
@@ -4532,8 +4818,8 @@ function handleTurnsWheel(event: WheelEvent) {
           <div class="context-request-panel">
             <template v-if="contextActualRequestTab === 'xml'">
               <div class="context-snapshot-preview-head">
-                <span>{{ t("workbench.context.promptXml") }}</span>
-                <small>{{ t("workbench.context.promptChars", { count: formatNumber(contextSnapshotPromptCharCount) }) }}</small>
+                <span>{{ t("workbench.context.contextDebugXml") }}</span>
+                <small>{{ t("workbench.context.debugAuditChars", { count: formatNumber(contextSnapshotDebugCharCount) }) }}</small>
               </div>
               <XmlSourceViewer
                 v-if="contextActualRequestXmlSource"
@@ -4541,7 +4827,20 @@ function handleTurnsWheel(event: WheelEvent) {
                 :source="contextActualRequestXmlSource"
                 max-height="min(50vh, 620px)"
               />
-              <p v-else class="asset-empty context-request-empty">{{ t("workbench.context.requestEmpty") }}</p>
+              <div v-else class="asset-empty context-request-empty context-debug-body-loader">
+                <p>{{ t("workbench.context.debugBodyDeferred") }}</p>
+                <UiButton
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  :disabled="contextDebugBodyLoading || !contextSnapshot"
+                  @click="loadContextDebugBody"
+                >
+                  <Loader2 v-if="contextDebugBodyLoading" class="spin-icon" aria-hidden="true" />
+                  <span>{{ contextDebugBodyLoading ? t("common.loading") : t("workbench.context.loadDebugBody") }}</span>
+                </UiButton>
+                <small v-if="contextDebugBodyError">{{ contextDebugBodyError }}</small>
+              </div>
             </template>
             <pre v-else class="context-request-json">{{ contextActualRequestJson }}</pre>
           </div>
@@ -4569,7 +4868,7 @@ function handleTurnsWheel(event: WheelEvent) {
               <span role="columnheader">{{ t("workbench.context.messages") }}</span>
               <span role="columnheader">{{ t("workbench.context.ranges") }}</span>
               <span role="columnheader">{{ t("common.tokens") }}</span>
-              <span role="columnheader">{{ t("workbench.context.promptInclusion") }}</span>
+              <span role="columnheader">{{ t("workbench.context.snapshotInclusion") }}</span>
               <span role="columnheader">{{ t("workbench.context.risk") }}</span>
               <span role="columnheader">{{ t("common.actions") }}</span>
             </div>
@@ -4632,7 +4931,7 @@ function handleTurnsWheel(event: WheelEvent) {
                 <span role="columnheader">{{ t("workbench.context.sequence") }}</span>
                 <span role="columnheader">{{ t("workbench.context.messages") }}</span>
                 <span role="columnheader">{{ t("common.tokens") }}</span>
-                <span role="columnheader">{{ t("workbench.context.promptInclusion") }}</span>
+                <span role="columnheader">{{ t("workbench.context.snapshotInclusion") }}</span>
                 <span role="columnheader">{{ t("common.status") }}</span>
                 <span role="columnheader">{{ t("common.actions") }}</span>
               </div>
@@ -6950,6 +7249,97 @@ dd {
   text-overflow: ellipsis;
 }
 
+.context-slice-rows {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-panel-soft);
+}
+
+.context-slice-rows__head {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.context-slice-rows__head small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-slice-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-slice-table__head,
+.context-slice-table__row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(78px, 0.68fr) minmax(80px, 0.72fr) minmax(84px, 0.72fr) minmax(84px, 0.72fr);
+  min-width: 0;
+}
+
+.context-slice-table--tools .context-slice-table__head,
+.context-slice-table--tools .context-slice-table__row {
+  grid-template-columns: minmax(140px, 1.2fr) minmax(100px, 0.9fr) minmax(110px, 1fr);
+}
+
+.context-slice-table--report .context-slice-table__head,
+.context-slice-table--report .context-slice-table__row {
+  grid-template-columns: minmax(84px, 0.62fr) minmax(132px, 1.1fr) minmax(108px, 0.9fr) minmax(150px, 1.25fr);
+}
+
+.context-slice-table__head {
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.context-slice-table__row {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.context-slice-table__row--success span:first-child {
+  color: var(--color-success);
+}
+
+.context-slice-table__row--warning span:first-child {
+  color: var(--color-warning);
+}
+
+.context-slice-table__row--danger span:first-child {
+  color: var(--color-danger);
+}
+
+.context-slice-table__row + .context-slice-table__row {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+}
+
+.context-slice-table span {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .context-route-diagnostics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -7810,6 +8200,30 @@ dd {
   gap: 8px;
 }
 
+.entity-detail-card .entity-detail-surface {
+  gap: 5px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.entity-detail-card .entity-detail-surface div {
+  grid-template-columns: 104px minmax(0, 1fr);
+}
+
+.entity-detail-card .entity-detail-section-title {
+  padding-bottom: 2px;
+}
+
+.entity-detail-card .entity-detail-section-title dt,
+.entity-detail-card .entity-detail-section-title dd {
+  font-family: var(--font-sans);
+}
+
+.entity-detail-card .entity-detail-section-title dt {
+  color: var(--text-primary);
+  font-weight: 750;
+}
+
 .entity-detail-card dt,
 .entity-detail-card dd {
   font-size: 11px;
@@ -7826,6 +8240,22 @@ dd {
   overflow-wrap: anywhere;
   color: var(--text-secondary);
   font-family: var(--font-mono);
+}
+
+.entity-detail-payload {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .quick-actions a,

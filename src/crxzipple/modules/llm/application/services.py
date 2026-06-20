@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
@@ -12,6 +14,11 @@ from crxzipple.modules.llm.application.adapters import (
     LlmAdapterResponse,
 )
 from crxzipple.modules.llm.application.concurrency import LlmConcurrencyLimiter
+from crxzipple.modules.llm.application.runtime_request import (
+    RuntimeLlmRequest,
+    request_render_snapshot_preview_payload,
+    runtime_request_context_from_metadata,
+)
 from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
 from crxzipple.modules.llm.domain.exceptions import (
@@ -30,13 +37,15 @@ from crxzipple.modules.llm.domain.repositories import (
 from crxzipple.modules.llm.domain.value_objects import (
     LlmApiFamily,
     LlmCapability,
+    LlmContinuationSignal,
     LlmDefaults,
     LlmErrorPayload,
+    LlmInputItem,
     LlmMessage,
     LlmModelFamily,
     LlmProviderKind,
-    LlmContinuationSignal,
     LlmProviderContinuation,
+    LlmResponseEventRetentionPolicy,
     LlmResponseEvent,
     LlmResponseEventType,
     LlmResponseItem,
@@ -55,6 +64,12 @@ from crxzipple.shared.access import (
 _forbidden_credential_binding_prefixes = ("env:", "file:")
 _forbidden_credential_binding_ids = {"codex_auth_json", "codex-cli", "auth_ref"}
 _forbidden_credential_binding_id_prefixes = ("codex_auth_json:", "auth_ref:")
+DEFAULT_RESPONSE_EVENT_RETENTION_POLICY = LlmResponseEventRetentionPolicy(
+    full_event_window_seconds=86_400,
+    detail_event_limit=100,
+    durable_fact="completed_response_items",
+    overflow_action="prefer_response_items_and_request_preview",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,24 +116,114 @@ class CredentialBindingMetadataProvider(Protocol):
 class InvokeLlmInput:
     llm_id: str
     messages: tuple[LlmMessage, ...]
+    input_items: tuple[LlmInputItem, ...] = field(default_factory=tuple)
+    provider_context_messages: tuple[LlmMessage, ...] = field(default_factory=tuple)
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
+    request_policy: dict[str, Any] = field(default_factory=dict)
     overrides: dict[str, Any] = field(default_factory=dict)
     request_metadata: dict[str, Any] = field(default_factory=dict)
+    runtime_context: dict[str, Any] = field(default_factory=dict)
+    runtime_route: dict[str, Any] = field(default_factory=dict)
+    runtime_policy: dict[str, Any] = field(default_factory=dict)
     invocation_id: str | None = None
     continuation: LlmProviderContinuation | None = None
+
+    @classmethod
+    def from_runtime_request(
+        cls,
+        request: RuntimeLlmRequest,
+        *,
+        response_format: dict[str, Any] | None = None,
+        overrides: dict[str, Any] | None = None,
+        invocation_id: str | None = None,
+        continuation: LlmProviderContinuation | None = None,
+    ) -> "InvokeLlmInput":
+        return cls(
+            llm_id=request.llm_id,
+            messages=request.messages,
+            input_items=request.transcript.items,
+            provider_context_messages=request.provider_context_messages,
+            tool_schemas=request.tool_schemas,
+            response_format=(
+                dict(response_format)
+                if response_format is not None
+                else request.response_format()
+            ),
+            request_policy=dict(request.transcript.policy),
+            overrides=dict(
+                overrides if overrides is not None else request.provider_overrides(),
+            ),
+            request_metadata=request.request_metadata(),
+            runtime_context=request.renderer_context().to_payload(),
+            runtime_route=request.renderer_route().to_payload(),
+            runtime_policy=request.renderer_policy().to_payload(),
+            invocation_id=invocation_id,
+            continuation=continuation,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class StreamLlmInput:
     llm_id: str
     messages: tuple[LlmMessage, ...]
+    input_items: tuple[LlmInputItem, ...] = field(default_factory=tuple)
+    provider_context_messages: tuple[LlmMessage, ...] = field(default_factory=tuple)
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
+    request_policy: dict[str, Any] = field(default_factory=dict)
     overrides: dict[str, Any] = field(default_factory=dict)
     request_metadata: dict[str, Any] = field(default_factory=dict)
+    runtime_context: dict[str, Any] = field(default_factory=dict)
+    runtime_route: dict[str, Any] = field(default_factory=dict)
+    runtime_policy: dict[str, Any] = field(default_factory=dict)
     invocation_id: str | None = None
     continuation: LlmProviderContinuation | None = None
+
+    @classmethod
+    def from_runtime_request(
+        cls,
+        request: RuntimeLlmRequest,
+        *,
+        response_format: dict[str, Any] | None = None,
+        overrides: dict[str, Any] | None = None,
+        invocation_id: str | None = None,
+        continuation: LlmProviderContinuation | None = None,
+    ) -> "StreamLlmInput":
+        return cls(
+            llm_id=request.llm_id,
+            messages=request.messages,
+            input_items=request.transcript.items,
+            provider_context_messages=request.provider_context_messages,
+            tool_schemas=request.tool_schemas,
+            response_format=(
+                dict(response_format)
+                if response_format is not None
+                else request.response_format()
+            ),
+            request_policy=dict(request.transcript.policy),
+            overrides=dict(
+                overrides if overrides is not None else request.provider_overrides(),
+            ),
+            request_metadata=request.request_metadata(),
+            runtime_context=request.renderer_context().to_payload(),
+            runtime_route=request.renderer_route().to_payload(),
+            runtime_policy=request.renderer_policy().to_payload(),
+            invocation_id=invocation_id,
+            continuation=continuation,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WarmupLlmProfileInput:
+    llm_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class WarmupLlmProfileResult:
+    llm_id: str
+    status: str
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 def register_llm_profile_input_from_config(
@@ -362,6 +467,10 @@ class LlmApplicationService:
                 raise LlmNotFoundError(f"LLM profile '{llm_id}' was not found.")
             return profile
 
+    def get_profile_optional(self, llm_id: str) -> LlmProfile | None:
+        with self.uow_factory() as uow:
+            return uow.llm_profiles.get(llm_id)
+
     def list_profiles(self) -> list[LlmProfile]:
         with self.uow_factory() as uow:
             return uow.llm_profiles.list()
@@ -443,8 +552,11 @@ class LlmApplicationService:
             id=data.invocation_id or uuid4().hex,
             llm_id=profile.id,
             messages=data.messages,
+            input_items=data.input_items,
+            provider_context_messages=data.provider_context_messages,
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
+            request_policy=data.request_policy,
             request_overrides=data.overrides,
             request_metadata=data.request_metadata,
         )
@@ -470,6 +582,9 @@ class LlmApplicationService:
                 profile,
                 invocation,
                 continuation=data.continuation,
+                runtime_context=data.runtime_context,
+                runtime_route=data.runtime_route,
+                runtime_policy=data.runtime_policy,
             )
             self._record_provider_request_payload_preview(
                 invocation.id,
@@ -529,8 +644,11 @@ class LlmApplicationService:
             id=data.invocation_id or uuid4().hex,
             llm_id=profile.id,
             messages=data.messages,
+            input_items=data.input_items,
+            provider_context_messages=data.provider_context_messages,
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
+            request_policy=data.request_policy,
             request_overrides=data.overrides,
             request_metadata=data.request_metadata,
         )
@@ -541,6 +659,9 @@ class LlmApplicationService:
                 profile,
                 invocation,
                 continuation=data.continuation,
+                runtime_context=data.runtime_context,
+                runtime_route=data.runtime_route,
+                runtime_policy=data.runtime_policy,
             )
             invocation.record_provider_request_payload_preview(
                 self._provider_request_payload_preview(adapter, profile, request),
@@ -564,6 +685,88 @@ class LlmApplicationService:
         )
         return invocation
 
+    def warmup_profile(
+        self,
+        data: WarmupLlmProfileInput,
+    ) -> WarmupLlmProfileResult:
+        with self.uow_factory() as uow:
+            profile = uow.llm_profiles.get(data.llm_id)
+            if profile is None:
+                raise LlmNotFoundError(f"LLM profile '{data.llm_id}' was not found.")
+            if not profile.enabled:
+                raise LlmInvocationNotAllowedError(
+                    f"LLM profile '{profile.id}' is disabled.",
+                )
+
+        adapter = self.adapter_gateway.get(profile.api_family)
+        if adapter is None:
+            self._record_profile_warmup_event(
+                profile.id,
+                "llm.profile_warmup_failed",
+                _profile_warmup_event_payload(
+                    profile,
+                    status="failed",
+                    details={
+                        "reason": "adapter_not_configured",
+                        "api_family": profile.api_family.value,
+                    },
+                ),
+            )
+            raise LlmAdapterNotConfiguredError(
+                f"No llm adapter is configured for api family '{profile.api_family.value}'.",
+            )
+        warmup_websocket = getattr(adapter, "warmup_websocket", None)
+        if not callable(warmup_websocket):
+            details = {"reason": "adapter_warmup_not_supported"}
+            self._record_profile_warmup_event(
+                profile.id,
+                "llm.profile_warmup_skipped",
+                _profile_warmup_event_payload(
+                    profile,
+                    status="skipped",
+                    details=details,
+                ),
+            )
+            return WarmupLlmProfileResult(
+                llm_id=profile.id,
+                status="skipped",
+                details=details,
+            )
+        try:
+            details = warmup_websocket(
+                profile,
+                resolved_credential=self._resolve_profile_credential(profile),
+            )
+        except Exception as exc:
+            self._record_profile_warmup_event(
+                profile.id,
+                "llm.profile_warmup_failed",
+                _profile_warmup_event_payload(
+                    profile,
+                    status="failed",
+                    details={
+                        "reason": str(exc) or type(exc).__name__,
+                        "error_type": type(exc).__name__,
+                    },
+                ),
+            )
+            raise
+        detail_payload = dict(details) if isinstance(details, dict) else {}
+        self._record_profile_warmup_event(
+            profile.id,
+            "llm.profile_warmup_succeeded",
+            _profile_warmup_event_payload(
+                profile,
+                status="warmed",
+                details=detail_payload,
+            ),
+        )
+        return WarmupLlmProfileResult(
+            llm_id=profile.id,
+            status="warmed",
+            details=detail_payload,
+        )
+
     async def invoke_async(self, data: InvokeLlmInput) -> LlmInvocation:
         profile = await asyncio.to_thread(self._get_enabled_profile, data.llm_id)
 
@@ -577,8 +780,11 @@ class LlmApplicationService:
             id=data.invocation_id or uuid4().hex,
             llm_id=profile.id,
             messages=data.messages,
+            input_items=data.input_items,
+            provider_context_messages=data.provider_context_messages,
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
+            request_policy=data.request_policy,
             request_overrides=data.overrides,
             request_metadata=data.request_metadata,
         )
@@ -601,6 +807,9 @@ class LlmApplicationService:
                 profile,
                 invocation,
                 continuation=data.continuation,
+                runtime_context=data.runtime_context,
+                runtime_route=data.runtime_route,
+                runtime_policy=data.runtime_policy,
             )
             await asyncio.to_thread(
                 self._record_provider_request_payload_preview,
@@ -654,8 +863,11 @@ class LlmApplicationService:
             id=data.invocation_id or uuid4().hex,
             llm_id=profile.id,
             messages=data.messages,
+            input_items=data.input_items,
+            provider_context_messages=data.provider_context_messages,
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
+            request_policy=data.request_policy,
             request_overrides=data.overrides,
             request_metadata=data.request_metadata,
         )
@@ -705,6 +917,9 @@ class LlmApplicationService:
                         profile,
                         invocation,
                         continuation=data.continuation,
+                        runtime_context=data.runtime_context,
+                        runtime_route=data.runtime_route,
+                        runtime_policy=data.runtime_policy,
                     )
                     self._record_provider_request_payload_preview(
                         invocation.id,
@@ -836,8 +1051,11 @@ class LlmApplicationService:
             id=data.invocation_id or uuid4().hex,
             llm_id=profile.id,
             messages=data.messages,
+            input_items=data.input_items,
+            provider_context_messages=data.provider_context_messages,
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
+            request_policy=data.request_policy,
             request_overrides=data.overrides,
             request_metadata=data.request_metadata,
         )
@@ -884,6 +1102,9 @@ class LlmApplicationService:
                     profile,
                     invocation,
                     continuation=data.continuation,
+                    runtime_context=data.runtime_context,
+                    runtime_route=data.runtime_route,
+                    runtime_policy=data.runtime_policy,
                 )
                 await asyncio.to_thread(
                     self._record_provider_request_payload_preview,
@@ -1041,6 +1262,9 @@ class LlmApplicationService:
                 limit=limit,
                 after_sequence=after_sequence,
             )
+
+    def response_event_retention_policy(self) -> LlmResponseEventRetentionPolicy:
+        return DEFAULT_RESPONSE_EVENT_RETENTION_POLICY
 
     def _record_response_event(
         self,
@@ -1258,15 +1482,45 @@ class LlmApplicationService:
         invocation: LlmInvocation,
         *,
         continuation: LlmProviderContinuation | None = None,
+        runtime_context: Mapping[str, Any] | None = None,
+        runtime_route: Mapping[str, Any] | None = None,
+        runtime_policy: Mapping[str, Any] | None = None,
     ) -> LlmAdapterRequest:
+        effective_runtime_context = (
+            dict(runtime_context)
+            if isinstance(runtime_context, Mapping) and runtime_context
+            else runtime_request_context_from_metadata(invocation.request_metadata)
+        )
+        provider_transport = _provider_transport_for_request(
+            invocation.request_overrides,
+            continuation,
+        )
+        effective_runtime_route = (
+            dict(runtime_route)
+            if isinstance(runtime_route, Mapping) and runtime_route
+            else _runtime_route_from_invocation(invocation, provider_transport)
+        )
+        effective_runtime_policy = (
+            dict(runtime_policy)
+            if isinstance(runtime_policy, Mapping) and runtime_policy
+            else _runtime_policy_from_invocation(invocation)
+        )
         return LlmAdapterRequest(
             invocation_id=invocation.id,
             messages=invocation.messages,
+            input_items=invocation.input_items,
+            provider_context_messages=invocation.provider_context_messages,
             tool_schemas=invocation.tool_schemas,
             response_format=invocation.response_format,
+            request_policy=invocation.request_policy,
             overrides=invocation.request_overrides,
+            request_metadata=invocation.request_metadata,
+            runtime_context=effective_runtime_context,
+            runtime_route=effective_runtime_route,
+            runtime_policy=effective_runtime_policy,
             resolved_credential=self._resolve_profile_credential(profile),
             continuation=continuation,
+            provider_transport=provider_transport,
         )
 
     def _provider_request_payload_preview(
@@ -1296,9 +1550,12 @@ class LlmApplicationService:
             "model": profile.model_name,
             "message_count": len(request.messages),
             "message_roles": [message.role.value for message in request.messages],
+            "input_item_count": len(request.input_items),
+            "input_item_kinds": [item.kind.value for item in request.input_items],
             "tool_count": len(request.tool_schemas),
             "response_format_configured": request.response_format is not None,
             "override_keys": sorted(str(key) for key in request.overrides),
+            **_provider_input_preview_from_request_metadata(request.request_metadata),
         }
 
     def _record_provider_request_payload_preview(
@@ -1313,7 +1570,18 @@ class LlmApplicationService:
                     f"LLM invocation '{invocation_id}' was not found.",
                 )
             stored.record_provider_request_payload_preview(preview)
+            profile = uow.llm_profiles.get(stored.llm_id)
+            stored.record_event(
+                Event(
+                    name="llm.invocation_provider_request_prepared",
+                    payload=_invocation_provider_request_prepared_event_payload(
+                        stored,
+                        profile,
+                    ),
+                ),
+            )
             uow.llm_invocations.add(stored)
+            uow.collect(stored)
             uow.commit()
 
     def _resolve_profile_credential(self, profile: LlmProfile) -> str | None:
@@ -1335,6 +1603,21 @@ class LlmApplicationService:
                 },
             ),
         )
+
+    def _record_profile_warmup_event(
+        self,
+        llm_id: str,
+        event_name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        with self.uow_factory() as uow:
+            profile = uow.llm_profiles.get(llm_id)
+            if profile is None:
+                return
+            profile.record_event(Event(name=event_name, payload=payload))
+            uow.llm_profiles.add(profile)
+            uow.collect(profile)
+            uow.commit()
 
     def _build_profile(self, data: RegisterLlmProfileInput) -> LlmProfile:
         self._validate_credential_binding_compatibility(data)
@@ -1491,6 +1774,121 @@ def _capabilities_from_config_value(value: object) -> tuple[LlmCapability, ...]:
     )
 
 
+def _provider_transport_for_request(
+    overrides: Mapping[str, Any],
+    continuation: LlmProviderContinuation | None,
+) -> str:
+    if continuation is not None and continuation.transport is not None:
+        return continuation.transport
+    value = overrides.get("provider_transport")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "auto"
+
+
+def _runtime_route_from_invocation(
+    invocation: LlmInvocation,
+    provider_transport: str,
+) -> dict[str, Any]:
+    route: dict[str, Any] = {
+        "llm_id": invocation.llm_id,
+        "provider_transport": provider_transport or "auto",
+    }
+    metadata = invocation.request_metadata
+    for key in ("session_key", "active_session_id"):
+        value = metadata.get(key) if isinstance(metadata, Mapping) else None
+        if value not in (None, "", {}, []):
+            route[key] = value
+    return route
+
+
+def _runtime_policy_from_invocation(
+    invocation: LlmInvocation,
+) -> dict[str, Any]:
+    policy: dict[str, Any] = {}
+    if invocation.request_policy:
+        policy["transcript_policy"] = dict(invocation.request_policy)
+    reasoning = invocation.request_overrides.get("reasoning")
+    if isinstance(reasoning, Mapping) and reasoning:
+        policy["reasoning"] = dict(reasoning)
+    if invocation.response_format:
+        policy["response_format"] = dict(invocation.response_format)
+    if invocation.request_overrides:
+        policy["provider_option_keys"] = sorted(
+            str(key) for key in invocation.request_overrides
+        )
+    return policy
+
+
+def _provider_input_preview_from_request_metadata(
+    request_metadata: dict[str, Any] | None,
+) -> dict[str, object]:
+    if not isinstance(request_metadata, dict):
+        return {}
+    request_render_snapshot = request_metadata.get("request_render_snapshot")
+    tool_surface = request_metadata.get("tool_surface")
+    preview: dict[str, object] = {}
+    if isinstance(request_render_snapshot, dict):
+        preview_request_render_snapshot = request_render_snapshot_preview_payload(request_render_snapshot)
+        request_render_snapshot_id = _optional_preview_text(
+            request_render_snapshot.get("snapshot_id"),
+        )
+        if request_render_snapshot_id is not None:
+            preview["request_render_snapshot_id"] = request_render_snapshot_id
+        context_schema = _optional_preview_text(
+            request_render_snapshot.get("tree_schema_version"),
+        )
+        if context_schema is not None:
+            preview["request_render_snapshot_schema_version"] = context_schema
+        included_node_ids = request_render_snapshot.get("included_node_ids")
+        if isinstance(included_node_ids, list | tuple):
+            preview["request_render_snapshot_included_node_count"] = len(
+                included_node_ids,
+            )
+        preview["request_render_snapshot_fingerprint"] = _stable_preview_fingerprint(
+            preview_request_render_snapshot,
+        )
+    if isinstance(tool_surface, dict):
+        tool_surface_id = _optional_preview_text(tool_surface.get("id"))
+        if tool_surface_id is not None:
+            preview["tool_surface_id"] = tool_surface_id
+        functions = tool_surface.get("functions")
+        if isinstance(functions, list | tuple):
+            preview["tool_surface_function_count"] = len(functions)
+        mirrored_schema_names = tool_surface.get("mirrored_schema_names")
+        if isinstance(mirrored_schema_names, list | tuple):
+            preview["tool_surface_mirrored_schema_count"] = len(mirrored_schema_names)
+        preview["tool_surface_fingerprint"] = _stable_preview_fingerprint(tool_surface)
+    for key in (
+        "request_render_snapshot_id",
+        "tool_surface_snapshot_id",
+        "tool_surface_function_count",
+        "tool_surface_mirrored_schema_count",
+    ):
+        value = request_metadata.get(key)
+        if key not in preview and value not in (None, "", {}, []):
+            preview[key] = value
+    return preview
+
+
+def _stable_preview_fingerprint(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _optional_preview_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _capabilities_for_profile_config(
     config: LlmProfileImportLike | Mapping[str, Any],
 ) -> tuple[LlmCapability, ...]:
@@ -1499,11 +1897,14 @@ def _capabilities_for_profile_config(
     )
     api_family = _coerce_api_family(_config_value(config, "api_family"))
     if (
-        api_family
-        in {
-            LlmApiFamily.OPENAI_RESPONSES,
-            LlmApiFamily.OPENAI_CODEX_RESPONSES,
-        }
+        api_family is LlmApiFamily.OPENAI_RESPONSES
+        and LlmCapability.PROVIDER_NATIVE_CONTINUATION not in capabilities
+    ):
+        capabilities.append(LlmCapability.PROVIDER_NATIVE_CONTINUATION)
+    if (
+        api_family is LlmApiFamily.OPENAI_CODEX_RESPONSES
+        and LlmCapability.PROVIDER_WEBSOCKET_TRANSPORT in capabilities
+        and LlmCapability.PROVIDER_INCREMENTAL_INPUT in capabilities
         and LlmCapability.PROVIDER_NATIVE_CONTINUATION not in capabilities
     ):
         capabilities.append(LlmCapability.PROVIDER_NATIVE_CONTINUATION)
@@ -1625,10 +2026,159 @@ def _invocation_started_event_payload(
         "timeout_seconds": profile.timeout_seconds,
         "streaming": streaming,
         "message_count": len(invocation.messages),
+        "input_item_count": len(invocation.input_items),
+        "input_item_kinds": [item.kind.value for item in invocation.input_items],
+        "provider_context_message_count": len(invocation.provider_context_messages),
+        "provider_context_message_kinds": _provider_context_message_kinds(
+            invocation.provider_context_messages,
+        ),
         "tool_schema_count": len(invocation.tool_schemas),
         "response_format_configured": invocation.response_format is not None,
+        "runtime_request_summary": _runtime_request_summary(invocation),
         "request_metadata": dict(invocation.request_metadata),
     }
+
+
+def _invocation_provider_request_prepared_event_payload(
+    invocation: LlmInvocation,
+    profile: LlmProfile | None,
+) -> dict[str, Any]:
+    preview = dict(invocation.provider_request_payload_preview)
+    payload: dict[str, Any] = {
+        "invocation_id": invocation.id,
+        "llm_id": invocation.llm_id,
+        "runtime_request_summary": _runtime_request_summary(invocation),
+        "request_metadata": dict(invocation.request_metadata),
+        "provider_request_payload_preview": preview,
+    }
+    transport = preview.get("transport")
+    if transport is not None:
+        payload["transport"] = transport
+    has_previous_response_id = preview.get("has_previous_response_id")
+    if isinstance(has_previous_response_id, bool):
+        payload["has_previous_response_id"] = has_previous_response_id
+    input_delta_mode = preview.get("input_delta_mode")
+    if isinstance(input_delta_mode, bool):
+        payload["input_delta_mode"] = input_delta_mode
+    for key in ("input_baseline_count", "input_delta_count", "tool_count"):
+        value = preview.get(key)
+        if isinstance(value, int):
+            payload[key] = value
+    if profile is not None:
+        payload.update(
+            {
+                "provider": profile.provider.value,
+                "api_family": profile.api_family.value,
+                "model_name": profile.model_name,
+                "model_family": profile.model_family.value,
+                "concurrency_key": profile.concurrency_key or f"profile:{profile.id}",
+            },
+        )
+    return payload
+
+
+def _runtime_request_summary(invocation: LlmInvocation) -> dict[str, Any]:
+    metadata = dict(invocation.request_metadata)
+    summary: dict[str, Any] = {
+        "message_count": len(invocation.messages),
+        "input_item_count": len(invocation.input_items),
+        "input_item_kinds": [item.kind.value for item in invocation.input_items],
+        "provider_context_message_count": len(invocation.provider_context_messages),
+        "provider_context_message_kinds": _provider_context_message_kinds(
+            invocation.provider_context_messages,
+        ),
+        "tool_schema_count": len(invocation.tool_schemas),
+        "response_format_configured": invocation.response_format is not None,
+    }
+    for key in (
+        "request_render_snapshot_id",
+        "input_mode",
+        "runtime_contract_version",
+        "runtime_contract_hash",
+        "direct_session_item_count",
+        "tool_surface_id",
+        "tool_surface_snapshot_id",
+        "tool_surface_function_count",
+        "tool_surface_mirrored_schema_count",
+    ):
+        value = metadata.get(key)
+        if value not in (None, "", {}, []):
+            summary[key] = value
+    request_render_snapshot = metadata.get("request_render_snapshot")
+    if isinstance(request_render_snapshot, Mapping):
+        preview_request_render_snapshot = request_render_snapshot_preview_payload(
+            request_render_snapshot,
+        )
+        if preview_request_render_snapshot:
+            summary["request_render_snapshot"] = preview_request_render_snapshot
+    tool_surface = metadata.get("tool_surface")
+    if isinstance(tool_surface, Mapping):
+        tool_summary = _tool_surface_summary(tool_surface)
+        if tool_summary:
+            summary["tool_surface"] = tool_summary
+    return {
+        key: value
+        for key, value in summary.items()
+        if value not in (None, "", {}, [])
+    }
+
+
+def _tool_surface_summary(tool_surface: Mapping[str, object]) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    surface_id = _optional_preview_text(tool_surface.get("id"))
+    if surface_id is not None:
+        summary["id"] = surface_id
+    functions = tool_surface.get("functions")
+    if isinstance(functions, list | tuple):
+        summary["function_count"] = len(functions)
+    mirrored_schema_names = tool_surface.get("mirrored_schema_names")
+    if isinstance(mirrored_schema_names, list | tuple):
+        summary["mirrored_schema_count"] = len(mirrored_schema_names)
+    blocked_access_count = tool_surface.get("blocked_access_count")
+    if isinstance(blocked_access_count, int):
+        summary["blocked_access_count"] = blocked_access_count
+    return summary
+
+
+def _provider_context_message_kinds(
+    messages: tuple[LlmMessage, ...],
+) -> list[str]:
+    kinds: list[str] = []
+    for message in messages:
+        kind = str(message.metadata.get("provider_context_kind", "")).strip()
+        if kind and kind not in kinds:
+            kinds.append(kind)
+    return kinds
+
+
+def _profile_warmup_event_payload(
+    profile: LlmProfile,
+    *,
+    status: str,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "llm_id": profile.id,
+        "provider": profile.provider.value,
+        "api_family": profile.api_family.value,
+        "model_name": profile.model_name,
+        "model_family": profile.model_family.value,
+        "status": status,
+        "details": dict(details),
+    }
+    transport = details.get("transport")
+    if transport is not None:
+        payload["transport"] = transport
+    endpoint = details.get("endpoint")
+    if endpoint is not None:
+        payload["endpoint"] = endpoint
+    reused_connection = details.get("reused_connection")
+    if isinstance(reused_connection, bool):
+        payload["reused_connection"] = reused_connection
+    reason = details.get("reason")
+    if reason is not None:
+        payload["reason"] = str(reason)
+    return payload
 
 
 def _invocation_succeeded_event_payload(

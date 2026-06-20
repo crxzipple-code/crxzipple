@@ -52,7 +52,7 @@ class RunExecutionService:
     wait_for_confirmation: Callable[[WaitForConfirmationInput], OrchestrationRun]
     complete_assignment: Callable[[CompleteAssignmentInput], OrchestrationRun]
     fail_assignment: Callable[[FailAssignmentInput], OrchestrationRun]
-    clear_prompt_flow_hint: Callable[[str], None]
+    clear_runtime_request_flow_hint: Callable[[str], None]
     events_service: EventPublishManyPort | None = None
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
@@ -325,7 +325,7 @@ class RunExecutionService:
             worker_id=worker_id,
         ):
             return current_run
-        self.clear_prompt_flow_hint(run_id)
+        self.clear_runtime_request_flow_hint(run_id)
         self._publish_llm_step_completed_event(
             current_run,
             outcome,
@@ -338,7 +338,7 @@ class RunExecutionService:
                     run_id=run_id,
                     worker_id=worker_id,
                     stage=OrchestrationRunStage.TOOL,
-                    metadata=self._prompt_metadata_from_outcome(outcome),
+                    metadata=self._runtime_request_metadata_from_outcome(outcome),
                     execution_payload=self._execution_payload_from_outcome(outcome),
                 ),
             )
@@ -358,7 +358,7 @@ class RunExecutionService:
                     worker_id=worker_id,
                     request=outcome.pending_approval_request,
                     llm_invocation_id=outcome.llm_invocation_id,
-                    metadata=self._prompt_metadata_from_outcome(outcome),
+                    metadata=self._runtime_request_metadata_from_outcome(outcome),
                     execution_payload=self._execution_payload_from_outcome(outcome),
                     reason="approval_requested",
                 ),
@@ -370,30 +370,11 @@ class RunExecutionService:
                     run_id=run_id,
                     worker_id=worker_id,
                     stage=OrchestrationRunStage.TOOL,
-                    metadata=self._prompt_metadata_from_outcome(outcome),
+                    metadata=self._runtime_request_metadata_from_outcome(outcome),
                     execution_payload=self._execution_payload_from_outcome(outcome),
                 ),
             )
             return None
-
-        if (
-            self.maintenance_service.is_memory_flush_run(run)
-            and not outcome.completed_inline_tool_run_ids
-        ):
-            return self.fail_assignment(
-                FailAssignmentInput(
-                    run_id=run_id,
-                    worker_id=worker_id,
-                    message=(
-                        "Memory flush must complete by calling a maintenance tool."
-                    ),
-                    code="memory_flush_protocol_violation",
-                    details={
-                        "prompt_mode": "memory_flush",
-                        "output_text": outcome.response_text,
-                    },
-                ),
-            )
 
         if outcome.loop_diagnostic:
             return self.fail_assignment(
@@ -425,7 +406,7 @@ class RunExecutionService:
                 run_id=run_id,
                 worker_id=worker_id,
                 result_payload=self._result_payload_from_outcome(outcome),
-                metadata=self._prompt_metadata_from_outcome(outcome),
+                metadata=self._runtime_request_metadata_from_outcome(outcome),
                 execution_payload=self._execution_payload_from_outcome(outcome),
             ),
         )
@@ -452,13 +433,9 @@ class RunExecutionService:
             "text_present": bool(response_text.strip()),
             "text_chars": len(response_text),
         }
-        if (
-            outcome.context_render_snapshot_id is not None
-            and outcome.context_render_snapshot_id.strip()
-        ):
-            payload["context_render_snapshot_id"] = (
-                outcome.context_render_snapshot_id.strip()
-            )
+        snapshot_id = _request_render_snapshot_id(outcome)
+        if snapshot_id is not None:
+            payload["request_render_snapshot_id"] = snapshot_id
         if outcome.llm_response_item_ids:
             payload["llm_response_item_ids"] = list(outcome.llm_response_item_ids)
         if outcome.session_item_ids:
@@ -595,13 +572,9 @@ class RunExecutionService:
         }
         if outcome.llm_response_item_ids:
             payload["llm_response_item_ids"] = list(outcome.llm_response_item_ids)
-        if (
-            outcome.context_render_snapshot_id is not None
-            and outcome.context_render_snapshot_id.strip()
-        ):
-            payload["context_render_snapshot_id"] = (
-                outcome.context_render_snapshot_id.strip()
-            )
+        snapshot_id = _request_render_snapshot_id(outcome)
+        if snapshot_id is not None:
+            payload["request_render_snapshot_id"] = snapshot_id
         if outcome.session_item_ids:
             payload["session_item_ids"] = list(outcome.session_item_ids)
         if outcome.assistant_progress_item_ids:
@@ -639,33 +612,30 @@ class RunExecutionService:
         )
         if transcript_consumption:
             payload["llm_transcript_consumption"] = transcript_consumption
+        request_input = _request_input_summary_from_metadata(
+            outcome.llm_request_metadata,
+        )
+        if request_input:
+            payload["llm_request_input"] = request_input
         return payload
 
     @staticmethod
-    def _prompt_metadata_from_outcome(
+    def _runtime_request_metadata_from_outcome(
         outcome: EngineAdvanceOutcome,
     ) -> dict[str, object]:
         metadata: dict[str, object] = {}
         if outcome.user_session_item_id is not None:
             metadata["user_session_item_id"] = outcome.user_session_item_id
-        if outcome.prompt_report is not None:
-            metadata["prompt_mode"] = outcome.prompt_report.mode.value
-            metadata["prompt_report"] = outcome.prompt_report.to_payload()
-        if (
-            outcome.context_render_snapshot_id is not None
-            and outcome.context_render_snapshot_id.strip()
-        ):
-            metadata["context_render_snapshot_id"] = (
-                outcome.context_render_snapshot_id.strip()
-            )
+        if outcome.runtime_request_report is not None:
+            metadata["runtime_request_mode"] = outcome.runtime_request_report.mode.value
+            metadata["runtime_request_report"] = outcome.runtime_request_report.to_payload()
+        snapshot_id = _request_render_snapshot_id(outcome)
+        if snapshot_id is not None:
+            metadata["request_render_snapshot_id"] = snapshot_id
         if outcome.provider_continuation_state:
             metadata["provider_continuation_state"] = dict(
                 outcome.provider_continuation_state,
             )
-        if outcome.evidence_frontier:
-            metadata["evidence_frontier"] = [
-                dict(item) for item in outcome.evidence_frontier
-            ]
         return metadata
 
     @staticmethod
@@ -684,11 +654,36 @@ def _transcript_consumption_from_request_metadata(
 ) -> dict[str, object]:
     payload: dict[str, object] = {}
     for key in (
-        "direct_session_item_refs",
-        "direct_session_item_count",
-        "direct_tool_protocol_refs",
-        "direct_tool_protocol_call_ids",
+        "draft_input_session_item_refs",
+        "draft_input_session_item_count",
         "current_inbound_ref",
+    ):
+        value = request_metadata.get(key)
+        if value not in (None, "", {}, []):
+            payload[key] = value
+    return payload
+
+
+def _request_render_snapshot_id(
+    outcome: EngineAdvanceOutcome,
+) -> str | None:
+    for value in (
+        outcome.request_render_snapshot_id,
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _request_input_summary_from_metadata(
+    request_metadata: dict[str, object],
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key in (
+        "input_mode",
+        "input_item_count",
+        "input_item_kind_counts",
+        "input_item_source_counts",
     ):
         value = request_metadata.get(key)
         if value not in (None, "", {}, []):

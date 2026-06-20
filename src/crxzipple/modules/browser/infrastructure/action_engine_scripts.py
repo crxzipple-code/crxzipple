@@ -100,7 +100,7 @@ _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
   }};
   const actionableClassFor = (element) => {{
     const classes = `${{classTextFor(element)}} ${{ancestorClassTextFor(element)}}`;
-    return /(^|[-_\\s])(btn|button|link|tab|nav|option|select|picker|calendar|date|city|search|seg|segment|route|flight|from|to|origin|destination|choice|toggle)([-_\\s]|$)/i.test(classes);
+    return /(^|[-_\\s])(btn|button|link|tab|nav|option|select|picker|calendar|date|city|search|seg|segment|route|from|to|origin|destination|choice|toggle)([-_\\s]|$)/i.test(classes);
   }};
   const hasPickerAncestor = (element) => {{
     if (!(element instanceof Element)) return false;
