@@ -327,6 +327,10 @@ class DispatchTask(AggregateRoot[str]):
         )
 
     def complete(self, *, now: datetime | None = None) -> None:
+        if self.status is DispatchTaskStatus.COMPLETED:
+            return
+        if self._is_terminal():
+            raise DispatchValidationError("Terminal dispatch tasks cannot be completed.")
         timestamp = now or utcnow()
         self.status = DispatchTaskStatus.COMPLETED
         self.updated_at = timestamp
@@ -345,6 +349,10 @@ class DispatchTask(AggregateRoot[str]):
         )
 
     def cancel(self, *, reason: str | None = None, now: datetime | None = None) -> None:
+        if self.status is DispatchTaskStatus.CANCELLED:
+            return
+        if self._is_terminal():
+            raise DispatchValidationError("Terminal dispatch tasks cannot be cancelled.")
         timestamp = now or utcnow()
         self.status = DispatchTaskStatus.CANCELLED
         self.updated_at = timestamp
@@ -371,6 +379,10 @@ class DispatchTask(AggregateRoot[str]):
         details: dict[str, object] | None = None,
         now: datetime | None = None,
     ) -> None:
+        if self.status is DispatchTaskStatus.FAILED:
+            return
+        if self._is_terminal():
+            raise DispatchValidationError("Terminal dispatch tasks cannot be failed.")
         timestamp = now or utcnow()
         self.status = DispatchTaskStatus.FAILED
         self.error = DispatchErrorPayload(
@@ -391,6 +403,13 @@ class DispatchTask(AggregateRoot[str]):
                 },
             ),
         )
+
+    def _is_terminal(self) -> bool:
+        return self.status in {
+            DispatchTaskStatus.COMPLETED,
+            DispatchTaskStatus.CANCELLED,
+            DispatchTaskStatus.FAILED,
+        }
 
     def _clear_claim_state(self) -> None:
         self.claimed_by = None

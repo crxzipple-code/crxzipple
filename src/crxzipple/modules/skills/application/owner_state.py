@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-import hashlib
 from uuid import uuid4
 
 from crxzipple.modules.skills.application.events import (
@@ -17,23 +16,38 @@ from crxzipple.modules.skills.application.models import (
     SkillReadiness,
     SkillReadinessStatus,
 )
+from crxzipple.modules.skills.application.owner_package_index import (
+    DEFAULT_SOURCE_IDS,
+    domain_source_type,
+    package_id,
+    package_index,
+    package_root,
+    source_policy_id,
+    skill_policy_id,
+)
+from crxzipple.modules.skills.application.owner_readiness_projection import (
+    catalog_readiness_changed_payload,
+    prompt_readiness_snapshot,
+    readiness_changed_payload,
+    readiness_semantic,
+    readiness_snapshot,
+    removed_readiness_changed_payload,
+)
 from crxzipple.modules.skills.application.ports import (
     SkillOwnerCatalogRepositoryPort,
 )
 from crxzipple.modules.skills.application.runtime_request_resolver import (
-    ResolvedSkillReadiness,
     SkillRuntimeRequestResolution,
     SkillRuntimeRequestResolutionContext,
 )
 from crxzipple.modules.skills.domain import (
     SkillInstallation,
     SkillInstallationStatus,
-    SkillPackageIndex,
     SkillPackageStatus,
     SkillReadinessSnapshot,
+    SkillRuntimeVisibility,
     SkillSourceStatus,
     SkillSourceSyncStatus,
-    SkillSourceType,
     SkillSource as DomainSkillSource,
     SkillReadinessStatus as DomainSkillReadinessStatus,
 )
@@ -47,18 +61,23 @@ class SkillOwnerStateService:
     def package_enabled(self, package: SkillPackage) -> bool:
         if self.owner_catalog_repository is None:
             return True
+        source_policy = self.owner_catalog_repository.get_enablement_policy(
+            source_policy_id(package.source),
+        )
+        if not _runtime_visible(source_policy):
+            return False
         policy = self.owner_catalog_repository.get_enablement_policy(
             skill_policy_id(package.name),
         )
-        return True if policy is None else policy.enabled
+        return _runtime_visible(policy)
 
     def source_enabled(self, source_id: str) -> bool:
         if self.owner_catalog_repository is None:
             return True
         policy = self.owner_catalog_repository.get_enablement_policy(
-            f"source:{source_id}:enablement",
+            source_policy_id(source_id),
         )
-        return True if policy is None else policy.enabled
+        return _runtime_visible(policy)
 
     def domain_source(self, source_id: str) -> DomainSkillSource | None:
         if self.owner_catalog_repository is None:
@@ -124,7 +143,7 @@ class SkillOwnerStateService:
         for package in packages:
             grouped.setdefault(package.source, []).append(package)
         for current_source_id, source_packages in grouped.items():
-            roots = sorted({str(_package_root(package)) for package in source_packages})
+            roots = sorted({str(package_root(package)) for package in source_packages})
             existing_source = self.domain_source(current_source_id)
             if existing_source is not None and current_source_id not in DEFAULT_SOURCE_IDS:
                 self.owner_catalog_repository.upsert_source(
@@ -399,335 +418,13 @@ class SkillOwnerStateService:
             )
 
 
-DEFAULT_SOURCE_IDS = frozenset({"workspace", "global", "system"})
-
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def skill_policy_id(skill_name: str) -> str:
-    return f"skill:{skill_name}:enablement"
-
-
-def domain_source_type(source_id: str) -> SkillSourceType:
-    try:
-        return SkillSourceType(source_id)
-    except ValueError:
-        return SkillSourceType.EXTERNAL
-
-
-def package_id(package: SkillPackage) -> str:
-    return f"{package.source}:{package.name}"
-
-
-def package_index(package: SkillPackage, *, updated_at: datetime) -> SkillPackageIndex:
-    return SkillPackageIndex(
-        package_id=package_id(package),
-        skill_id=package.name,
-        name=package.name,
-        source_id=package.source,
-        root_uri=package.root_path,
-        manifest_uri=package.manifest_path,
-        instructions_uri=package.instructions_path,
-        version=package.version,
-        fingerprint=package.fingerprint or package_fingerprint(package),
-        status=SkillPackageStatus.ACTIVE,
-        requirements=package.requirements,
-        capability_requirements={
-            "required_tools": list(package.requirements.required_tools),
-            "required_effects": list(package.requirements.required_effects),
-            "required_access": list(package.requirements.required_access),
-            "supported_platforms": list(package.requirements.supported_platforms),
-        },
-        metadata={
-            "tags": list(package.tags),
-            "description": package.description,
-            "source": package.source,
-        },
-        indexed_at=updated_at,
-        updated_at=updated_at,
-    )
-
-
-def package_fingerprint(package: SkillPackage) -> str:
-    fingerprint_input = "|".join(
-        (
-            package.name,
-            package.version or "",
-            package.source,
-            package.root_path,
-            package.manifest_path,
-            package.instructions_path,
-        ),
-    )
-    return f"sha256:{hashlib.sha256(fingerprint_input.encode('utf-8')).hexdigest()}"
-
-
-def readiness_snapshot(
-    package: SkillPackage,
-    readiness: SkillReadiness,
-    *,
-    updated_at: datetime,
-) -> SkillReadinessSnapshot:
-    checks: list[dict[str, object]] = []
-    checks.extend(
-        {"kind": "tool", "id": item, "ok": False}
-        for item in readiness.missing_tools
-    )
-    checks.extend(
-        {"kind": "access", "id": item, "ok": False}
-        for item in readiness.missing_access
-    )
-    checks.extend(
-        {"kind": "authorization_effect", "id": item, "ok": False}
-        for item in readiness.missing_effects
-    )
-    checks.extend(
-        {"kind": "surface", "id": item, "ok": False, "status": "unsupported"}
-        for item in readiness.unsupported_surfaces
-    )
-    checks.extend(
-        {"kind": "platform", "id": item, "ok": False, "status": "unsupported"}
-        for item in readiness.unsupported_platforms
-    )
-    if not checks and readiness.ready:
-        checks.append({"kind": "manifest", "id": package.name, "ok": True})
-    return SkillReadinessSnapshot(
-        skill_id=package.name,
-        source_id=package.source,
-        status=domain_readiness_status(readiness.status),
-        checks=tuple(checks),
-        reason=None if readiness.ready else readiness.status.value,
-        metadata={
-            "setup_hints": list(readiness.setup_hints),
-            "validation_errors": list(readiness.validation_errors),
-            "missing_effects": list(readiness.missing_effects),
-            "unsupported_surfaces": list(readiness.unsupported_surfaces),
-            "unsupported_platforms": list(readiness.unsupported_platforms),
-        },
-        updated_at=updated_at,
-    )
-
-
-def domain_readiness_status(
-    status: SkillReadinessStatus,
-) -> DomainSkillReadinessStatus:
-    try:
-        return DomainSkillReadinessStatus(status.value)
-    except ValueError:
-        return DomainSkillReadinessStatus.UNSUPPORTED
-
-
-def prompt_readiness_snapshot(
-    package: SkillPackage,
-    readiness: ResolvedSkillReadiness,
-    *,
-    context: SkillRuntimeRequestResolutionContext,
-    updated_at: datetime,
-) -> SkillReadinessSnapshot:
-    checks = prompt_readiness_checks(package, readiness)
-    if not checks and readiness.ready:
-        checks = ({"kind": "manifest", "id": package.name, "ok": True},)
-    return SkillReadinessSnapshot(
-        skill_id=package.name,
-        source_id=package.source,
-        status=_prompt_snapshot_status(readiness),
-        checks=checks,
-        reason=None if readiness.ready else readiness.status,
-        metadata={
-            "source": package.source,
-            "surface": context.surface or "",
-            "agent_id": context.agent_id or "",
-            "setup_hints": list(package.requirements.setup_hints),
-            "access_checks": [
-                check.to_metadata()
-                for check in readiness.access_checks
-            ],
-            "authorization": (
-                readiness.authorization.to_metadata()
-                if readiness.authorization is not None
-                else None
-            ),
-        },
-        updated_at=updated_at,
-    )
-
-
-def prompt_readiness_checks(
-    package: SkillPackage,
-    readiness: ResolvedSkillReadiness,
-) -> tuple[dict[str, object], ...]:
-    checks: list[dict[str, object]] = []
-    missing_tools = set(readiness.missing_tools)
-    for tool_id in package.requirements.required_tools:
-        checks.append(
-            {
-                "kind": "tool",
-                "id": tool_id,
-                "ok": tool_id not in missing_tools,
-            },
-        )
-    for check in readiness.access_checks:
-        payload = check.to_metadata()
-        checks.append(
-            {
-                "kind": "access",
-                "id": check.requirement,
-                "ok": check.ready,
-                "status": check.status,
-                "setup_available": check.setup_available,
-                "reason": payload.get("reason", ""),
-            },
-        )
-    checked_access = {check.requirement for check in readiness.access_checks}
-    for requirement in readiness.missing_access:
-        if requirement in checked_access:
-            continue
-        checks.append(
-            {
-                "kind": "access",
-                "id": requirement,
-                "ok": False,
-                "status": "setup_needed",
-            },
-        )
-    missing_effects = set(readiness.missing_effects)
-    for effect_id in package.requirements.required_effects:
-        checks.append(
-            {
-                "kind": "authorization_effect",
-                "id": effect_id,
-                "ok": effect_id not in missing_effects,
-            },
-        )
-    for surface in readiness.unsupported_surfaces:
-        checks.append(
-            {
-                "kind": "surface",
-                "id": surface,
-                "ok": False,
-                "status": "unsupported",
-            },
-        )
-    for platform in readiness.unsupported_platforms:
-        checks.append(
-            {
-                "kind": "platform",
-                "id": platform,
-                "ok": False,
-                "status": "unsupported",
-            },
-        )
-    return tuple(checks)
-
-
-def readiness_semantic(
-    snapshot: SkillReadinessSnapshot | None,
-) -> tuple[object, ...] | None:
-    if snapshot is None:
-        return None
-    return (
-        snapshot.status.value,
-        snapshot.reason,
-        tuple(normalized_check(check) for check in snapshot.checks),
-    )
-
-
-def normalized_check(check: dict[str, object]) -> tuple[tuple[str, object], ...]:
-    return tuple(sorted(check.items(), key=lambda item: item[0]))
-
-
-def readiness_changed_payload(
-    *,
-    package: SkillPackage,
-    previous: SkillReadinessSnapshot | None,
-    current: SkillReadinessSnapshot,
-    context: SkillRuntimeRequestResolutionContext,
-    readiness: ResolvedSkillReadiness,
-) -> dict[str, object]:
-    return {
-        "skill": package.name,
-        "skill_name": package.name,
-        "source": package.source,
-        "previous_status": previous.status.value if previous is not None else "",
-        "status": current.status.value,
-        "ready": current.status is DomainSkillReadinessStatus.READY,
-        "run_id": context.run_id or "",
-        "agent_id": context.agent_id or "",
-        "session_key": context.session_key or "",
-        "active_session_id": context.active_session_id or "",
-        "surface": context.surface or "",
-        "workspace_dir": context.workspace_dir or "",
-        "missing_tools": list(readiness.missing_tools),
-        "missing_access": list(readiness.missing_access),
-        "missing_effects": list(readiness.missing_effects),
-        "unsupported_surfaces": list(readiness.unsupported_surfaces),
-        "unsupported_platforms": list(readiness.unsupported_platforms),
-        "checks": [dict(check) for check in current.checks],
-    }
-
-
-def catalog_readiness_changed_payload(
-    *,
-    package: SkillPackage,
-    previous: SkillReadinessSnapshot | None,
-    current: SkillReadinessSnapshot,
-    readiness: SkillReadiness,
-) -> dict[str, object]:
-    return {
-        "skill": package.name,
-        "skill_name": package.name,
-        "source": package.source,
-        "path": package.root_path,
-        "previous_status": previous.status.value if previous is not None else "",
-        "status": current.status.value,
-        "ready": current.status is DomainSkillReadinessStatus.READY,
-        "readiness_scope": "catalog",
-        "missing_tools": list(readiness.missing_tools),
-        "missing_access": list(readiness.missing_access),
-        "missing_effects": list(readiness.missing_effects),
-        "unsupported_surfaces": list(readiness.unsupported_surfaces),
-        "unsupported_platforms": list(readiness.unsupported_platforms),
-        "checks": [dict(check) for check in current.checks],
-    }
-
-
-def removed_readiness_changed_payload(
-    *,
-    package: SkillPackageIndex,
-    previous: SkillReadinessSnapshot | None,
-    current: SkillReadinessSnapshot,
-) -> dict[str, object]:
-    return {
-        "skill": package.skill_id,
-        "skill_name": package.name,
-        "source": package.source_id,
-        "path": package.root_uri,
-        "previous_status": previous.status.value if previous is not None else "",
-        "status": current.status.value,
-        "ready": False,
-        "readiness_scope": "catalog",
-        "reason": current.reason or "removed",
-        "missing_tools": [],
-        "missing_access": [],
-        "missing_effects": [],
-        "unsupported_surfaces": [],
-        "unsupported_platforms": [],
-        "checks": [dict(check) for check in current.checks],
-    }
-
-
-def _package_root(package: SkillPackage) -> str:
-    root_path = package.root_path.rstrip("/")
-    if not root_path:
-        return ""
-    return root_path.rsplit("/", 1)[0] if "/" in root_path else root_path
-
-
-def _prompt_snapshot_status(readiness: ResolvedSkillReadiness) -> DomainSkillReadinessStatus:
-    if readiness.ready:
-        return DomainSkillReadinessStatus.READY
-    if readiness.unsupported_platforms:
-        return DomainSkillReadinessStatus.UNSUPPORTED
-    return DomainSkillReadinessStatus.SETUP_NEEDED
+def _runtime_visible(policy: object | None) -> bool:
+    if policy is None:
+        return True
+    enabled = bool(getattr(policy, "enabled", False))
+    visibility = getattr(policy, "runtime_visibility", SkillRuntimeVisibility.VISIBLE)
+    return enabled and visibility is not SkillRuntimeVisibility.HIDDEN

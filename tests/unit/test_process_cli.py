@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from tests.unit.cli_test_support import *
+import json
+import tempfile
+import time
+import unittest
+
+from tests.unit.cli_test_support import CliModuleTestCase
 
 
 class ProcessCliTestCase(CliModuleTestCase):
@@ -75,7 +80,7 @@ class ProcessCliTestCase(CliModuleTestCase):
             )
             self.assertEqual(get_result.exit_code, 0)
             get_payload = json.loads(get_result.stdout)
-            self.assertIn(get_payload["status"], {"running", "killed"})
+            self.assertIn(get_payload["status"], {"exited", "failed", "killed"})
 
 
 if __name__ == "__main__":

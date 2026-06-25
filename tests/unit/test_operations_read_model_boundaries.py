@@ -3,7 +3,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import crxzipple.modules.operations.application.read_models.ports as operations_ports
+import crxzipple.modules.operations.application.read_models.ports_access_settings as access_settings_ports
+import crxzipple.modules.operations.application.read_models.ports_context as context_ports
+import crxzipple.modules.operations.application.read_models.ports_llm_agent as llm_agent_ports
+import crxzipple.modules.operations.application.read_models.ports_runtime as runtime_ports
+import crxzipple.modules.operations.application.read_models.ports_runtime_sources as runtime_source_ports
+import crxzipple.modules.operations.application.read_models.ports_tooling as tooling_ports
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 READ_MODELS_ROOT = (
@@ -18,36 +23,60 @@ READ_MODELS_ROOT = (
 
 
 def test_operations_read_model_ports_define_cross_module_read_contracts() -> None:
-    expected_ports = (
-        "OperationsAccessReadinessPort",
-        "OperationsAgentProfilePort",
-        "OperationsArtifactReadPort",
-        "OperationsChannelInteractionPort",
-        "OperationsChannelProfilePort",
-        "OperationsChannelRuntimePort",
-        "OperationsDaemonManagerPort",
-        "OperationsDaemonRegistryPort",
-        "OperationsEventContractRegistryPort",
-        "OperationsEventDefinitionRegistryPort",
-        "OperationsEventPublishPort",
-        "OperationsEventStreamPort",
-        "OperationsLlmQueryPort",
-        "OperationsMemoryQueryPort",
-        "OperationsObservationReadPort",
-        "OperationsProcessQueryPort",
-        "OperationsRemoteToolRuntimeRegistryPort",
-        "OperationsRuntimeBootstrapConfigPort",
-        "OperationsSettingsQueryPort",
-        "OperationsSkillCatalogPort",
-        "OperationsToolQueryPort",
-    )
+    expected_ports = {
+        access_settings_ports: (
+            "OperationsAccessReadinessPort",
+            "OperationsSettingsQueryPort",
+        ),
+        context_ports: (
+            "OperationsContextObservationSnapshotPort",
+            "OperationsContextSliceBuilderPort",
+            "OperationsContextTreePort",
+            "OperationsContextWorkspacePort",
+            "OperationsMemoryQueryPort",
+            "OperationsMemoryWatchRegistryPort",
+            "OperationsSkillCatalogPort",
+        ),
+        llm_agent_ports: (
+            "OperationsAgentProfilePort",
+            "OperationsLlmQueryPort",
+        ),
+        runtime_ports: (
+            "OperationsEventContractRegistryPort",
+            "OperationsEventDefinitionRegistryPort",
+            "OperationsEventPublishPort",
+            "OperationsEventStreamPort",
+            "OperationsObservationReadPort",
+            "OperationsObserverRuntimePort",
+            "OperationsRuntimeBootstrapConfigPort",
+            "OperationsRuntimeMetricsPort",
+        ),
+        runtime_source_ports: (
+            "OperationsBrowserProfilePort",
+            "OperationsChannelInteractionPort",
+            "OperationsChannelProfilePort",
+            "OperationsChannelRuntimePort",
+            "OperationsDaemonManagerPort",
+            "OperationsDaemonRegistryPort",
+            "OperationsProcessQueryPort",
+        ),
+        tooling_ports: (
+            "OperationsArtifactReadPort",
+            "OperationsRemoteToolRuntimeRegistryPort",
+            "OperationsToolQueryPort",
+        ),
+    }
 
-    for name in expected_ports:
-        assert hasattr(operations_ports, name)
+    for module, names in expected_ports.items():
+        for name in names:
+            assert hasattr(module, name)
 
 
 def test_operations_read_model_factory_does_not_type_against_owner_services() -> None:
-    text = (READ_MODELS_ROOT / "factory.py").read_text(encoding="utf-8")
+    texts = (
+        (READ_MODELS_ROOT / "factory.py").read_text(encoding="utf-8"),
+        (READ_MODELS_ROOT / "factory_context.py").read_text(encoding="utf-8"),
+    )
     forbidden = (
         "AccessApplicationService",
         "AgentApplicationService",
@@ -67,8 +96,9 @@ def test_operations_read_model_factory_does_not_type_against_owner_services() ->
         "ToolRuntimeRegistry",
     )
 
-    for name in forbidden:
-        assert re.search(rf"\b{re.escape(name)}\b", text) is None
+    for text in texts:
+        for name in forbidden:
+            assert re.search(rf"\b{re.escape(name)}\b", text) is None
 
 
 def test_operations_tool_read_model_uses_operations_owned_tool_port() -> None:

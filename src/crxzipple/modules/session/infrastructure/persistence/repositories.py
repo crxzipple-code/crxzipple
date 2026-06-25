@@ -152,6 +152,21 @@ class SqlAlchemySessionItemRepository:
             return None
         return self._to_entity(model)
 
+    def get_many(self, item_ids: tuple[str, ...]) -> list[SessionItem]:
+        normalized_ids = tuple(dict.fromkeys(item_id.strip() for item_id in item_ids if item_id.strip()))
+        if not normalized_ids:
+            return []
+        models = self.session.scalars(
+            select(SessionItemModel).where(SessionItemModel.id.in_(normalized_ids)),
+        ).all()
+        by_id = {model.id: model for model in models}
+        return [
+            self._to_entity(model)
+            for item_id in normalized_ids
+            for model in (by_id.get(item_id),)
+            if model is not None
+        ]
+
     def get_by_source(
         self,
         *,

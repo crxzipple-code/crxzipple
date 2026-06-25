@@ -42,7 +42,7 @@ def test_cross_module_application_dependencies_use_ports() -> None:
         "src/crxzipple/modules/operations/application/projections.py": (
             "EventsApplicationService",
         ),
-        "src/crxzipple/modules/operations/application/runtime.py": (
+        "src/crxzipple/modules/operations/application/observer_runtime_service.py": (
             "EventsApplicationService",
         ),
         "src/crxzipple/modules/daemon/application/manager.py": (

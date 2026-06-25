@@ -34,7 +34,7 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0085_context_request_render_snapshots"
+HEAD_REVISION = "0087_llm_invocation_runtime_refs"
 
 
 class _FakeCdpSocket:
@@ -107,6 +107,7 @@ class CliModuleTestCase(unittest.TestCase):
                 Path(self.harness._tempdir.name) / "operations",
             ),
             "APP_ALLOW_SQLITE_RUNTIME_FALLBACK": "1",
+            "APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK": "1",
         }
 
     def tearDown(self) -> None:

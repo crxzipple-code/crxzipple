@@ -195,6 +195,43 @@ def test_llm_request_provider_overrides_merge_reasoning_config() -> None:
     assert "provider_options" not in envelope.request_metadata()
 
 
+def test_llm_request_keeps_provider_wire_fields_inside_provider_options() -> None:
+    envelope = RuntimeLlmRequest(
+        llm_id="openai.gpt-5",
+        session_key="session-key",
+        active_session_id="session-1",
+        messages=(LlmMessage(role=LlmMessageRole.USER, content="hello"),),
+        tool_schemas=(),
+        request_render_snapshot=RuntimeLlmRequestRenderSnapshot(),
+        tool_surface=RuntimeToolSurface(id="tool_surface:empty"),
+        provider_options={
+            "tool_choice": "required",
+            "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
+            "max_tokens": 128,
+            "previous_response_id": "resp-provider-only",
+        },
+    )
+
+    payload = envelope.to_payload()
+    metadata = envelope.request_metadata()
+    renderer_policy = envelope.renderer_policy().to_payload()
+
+    for provider_wire_key in (
+        "tool_choice",
+        "toolConfig",
+        "max_tokens",
+        "previous_response_id",
+    ):
+        assert provider_wire_key not in metadata
+        assert provider_wire_key not in renderer_policy
+        assert payload["provider_options"][provider_wire_key] == (
+            envelope.provider_options[provider_wire_key]
+        )
+        assert provider_wire_key not in {
+            key for key in payload if key != "provider_options"
+        }
+
+
 def test_build_runtime_request_render_snapshot_projects_diagnostics() -> None:
     snapshot = build_runtime_request_render_snapshot(
         snapshot_id="ctxsnap-1",
@@ -721,6 +758,7 @@ def test_request_metadata_preview_payload_sanitizes_nested_runtime_payloads() ->
             "request_render_snapshot_id": "ctxsnap-1",
             "context_slice": {"items": [{"text": "top level slice text"}]},
             "debug_body": "<context_tree>top level body</context_tree>",
+            "debug_trace_log": {"events": ["internal"]},
             "provider_attachment_mirror": {
                 "tool_schemas": [{"description": "top level mirror schema"}],
             },
@@ -771,6 +809,7 @@ def test_request_metadata_preview_payload_sanitizes_nested_runtime_payloads() ->
     assert preview["request_render_snapshot_id"] == "ctxsnap-1"
     assert "context_slice" not in preview
     assert "debug_body" not in preview
+    assert "debug_trace_log" not in preview
     assert "provider_attachment_mirror" not in preview
     assert "provider_attachments" not in preview
     assert preview["request_render_snapshot"] == {

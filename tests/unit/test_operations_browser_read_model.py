@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from crxzipple.modules.operations.application.read_models.browser import (
     BrowserOperationsReadModelProvider,
 )
-from crxzipple.modules.operations.application.observation import OperationsObservedEvent
+from crxzipple.modules.operations.application.observation_models import OperationsObservedEvent
 from crxzipple.modules.operations.application.projections import (
     OPERATIONS_PROJECTION_MODULES,
 )

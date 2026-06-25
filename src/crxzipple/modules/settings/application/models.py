@@ -42,6 +42,7 @@ class UpdateSettingsResourceInput:
     reason: str = "update settings resource"
     publish: bool = False
     source: str = "manual"
+    expected_active_version_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     trace_context: Mapping[str, Any] = field(default_factory=dict)
 
@@ -52,6 +53,7 @@ class PublishSettingsVersionInput:
     version_id: str | None = None
     actor: str | None = None
     reason: str = "publish settings version"
+    expected_active_version_id: str | None = None
     environment: str | None = None
     trace_context: Mapping[str, Any] = field(default_factory=dict)
 
@@ -62,6 +64,7 @@ class RollbackSettingsResourceInput:
     target_version_id: str
     actor: str | None = None
     reason: str = "rollback settings resource"
+    expected_active_version_id: str | None = None
     environment: str | None = None
     trace_context: Mapping[str, Any] = field(default_factory=dict)
 

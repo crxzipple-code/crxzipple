@@ -10,9 +10,11 @@ from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ApplicationFactory
 from crxzipple.modules.access import AccessApplicationService
 from crxzipple.modules.access.application.oauth import AccessOAuthService
+from crxzipple.modules.access.application.settings_config_views import (
+    AccessSettingsConfigProvider,
+)
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsActionAdapter,
-    AccessSettingsConfigProvider,
 )
 from crxzipple.modules.access.infrastructure import (
     FileBackedAccessOAuthTokenStore,

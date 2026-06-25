@@ -6,6 +6,7 @@ from .ports import (
     MobileCapabilitiesResolver,
     MobileControlCommandAssembler,
     MobileControlEngine,
+    MobileDeviceLeaseStore,
     MobileEngineRegistry,
     MobileExecutionCoordinator,
     MobileExecutionPlanner,
@@ -34,6 +35,7 @@ __all__ = [
     "MobileCapabilitiesResolver",
     "MobileControlCommandAssembler",
     "MobileControlEngine",
+    "MobileDeviceLeaseStore",
     "MobileDeviceResolver",
     "MobileEngineRegistry",
     "MobileExecutionCoordinator",
@@ -43,4 +45,3 @@ __all__ = [
     "MobileRuntimeStateStore",
     "MobileSystemConfigStore",
 ]
-

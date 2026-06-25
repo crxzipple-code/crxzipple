@@ -28,6 +28,12 @@ def _normalize_text_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in values if isinstance(item, str) and item.strip())
 
 
+def _normalize_version(value: int) -> int:
+    if not isinstance(value, int) or value < 1:
+        raise ValueError("event contract version must be a positive integer.")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class EventDefinitionField:
     field_path: str
@@ -79,6 +85,7 @@ class EventDefinition:
     publication_mode: EventDefinitionPublicationMode = "direct"
     source_event_names: tuple[str, ...] = field(default_factory=tuple)
     notes: tuple[str, ...] = field(default_factory=tuple)
+    version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -106,10 +113,12 @@ class EventDefinition:
             _normalize_text_tuple(self.source_event_names),
         )
         object.__setattr__(self, "notes", _normalize_text_tuple(self.notes))
+        object.__setattr__(self, "version", _normalize_version(self.version))
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "definition_id": self.definition_id,
+            "version": self.version,
             "owner": self.owner,
             "event_name": self.event_name,
             "description": self.description,
@@ -134,6 +143,7 @@ class EventSurface:
     topics: tuple[str, ...] = field(default_factory=tuple)
     consumers: tuple[str, ...] = field(default_factory=tuple)
     notes: tuple[str, ...] = field(default_factory=tuple)
+    version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -151,10 +161,12 @@ class EventSurface:
         object.__setattr__(self, "topics", _normalize_text_tuple(self.topics))
         object.__setattr__(self, "consumers", _normalize_text_tuple(self.consumers))
         object.__setattr__(self, "notes", _normalize_text_tuple(self.notes))
+        object.__setattr__(self, "version", _normalize_version(self.version))
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "surface_id": self.surface_id,
+            "version": self.version,
             "owner": self.owner,
             "description": self.description,
             "definition_ids": list(self.definition_ids),
@@ -173,6 +185,7 @@ class EventObserver:
     output_definition_ids: tuple[str, ...] = field(default_factory=tuple)
     handlers: tuple[str, ...] = field(default_factory=tuple)
     notes: tuple[str, ...] = field(default_factory=tuple)
+    version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -198,10 +211,12 @@ class EventObserver:
         )
         object.__setattr__(self, "handlers", _normalize_text_tuple(self.handlers))
         object.__setattr__(self, "notes", _normalize_text_tuple(self.notes))
+        object.__setattr__(self, "version", _normalize_version(self.version))
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "observer_id": self.observer_id,
+            "version": self.version,
             "owner": self.owner,
             "description": self.description,
             "source_event_names": list(self.source_event_names),

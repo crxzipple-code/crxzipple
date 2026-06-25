@@ -4,7 +4,7 @@ import pytest
 
 from crxzipple.modules.llm.application.adapters import LlmAdapterRequest as _LlmAdapterRequest
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmProviderContinuation,
     LlmMessage,
@@ -12,7 +12,7 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmModelFamily,
     LlmProviderKind,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_common import (
     projected_input_items_from_messages,
 )
 from crxzipple.modules.llm.infrastructure.adapters.provider_router import (

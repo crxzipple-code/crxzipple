@@ -4,6 +4,7 @@ from crxzipple.app.integration.context_workspace_skills import SkillContextNodeP
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
     ContextOwnerRegistry,
+    ContextSliceBuilderService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
@@ -14,7 +15,12 @@ from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextOperationRepository,
     InMemoryContextWorkspaceRepository,
 )
-from crxzipple.modules.skills.application import SkillPackage, SkillReadResult
+from crxzipple.modules.skills.application import (
+    SkillPackage,
+    SkillReadResult,
+    SkillRuntimeRequestResolutionContext,
+    SkillRuntimeRequestResolver,
+)
 from crxzipple.modules.skills.domain import SkillManifest, SkillNotFoundError
 
 
@@ -49,6 +55,77 @@ def test_skill_adapter_expands_available_ready_skill_nodes() -> None:
     assert [node.title for node in skill_nodes] == ["skill-a"]
     assert skill_nodes[0].owner_ref["workspace_dir"] == "/workspace"
     assert "Useful for focused work." in skill_nodes[0].summary
+
+
+def test_runtime_resolution_ready_names_drive_context_tree_llm_slice() -> None:
+    skill_service = _FakeSkillService(
+        _package("skill-a", description="Ready workflow."),
+        _package("skill-b", description="Requires missing tool."),
+    )
+    packages = skill_service.list_available(
+        workspace_dir="/workspace",
+        surface="interactive",
+    )
+    resolution = SkillRuntimeRequestResolver().resolve(
+        packages,
+        available_tool_ids=(),
+        context=SkillRuntimeRequestResolutionContext(
+            workspace_dir="/workspace",
+            surface="interactive",
+        ),
+    )
+    catalog = resolution.runtime_request_catalog
+
+    assert catalog is not None
+    assert catalog.metadata["available_skill_names"] == ["skill-a"]
+    assert "skill-a" in catalog.content
+    assert "skill-b" not in catalog.content
+
+    services = _context_services(skill_service)
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:skills-runtime",
+            agent_id="assistant",
+            metadata={
+                "workspace_dir": "/workspace",
+                "runtime_request_surface": "interactive",
+                "available_skill_names": catalog.metadata["available_skill_names"],
+            },
+        ),
+    )
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:skills-runtime",
+            node_id="skills.available",
+            action=ContextAction.EXPAND,
+        ),
+    )
+    tree = services["tree"].list_tree("session:skills-runtime")
+    skill_nodes = [node for node in tree.nodes if node.parent_id == "skills.available"]
+
+    assert [node.title for node in skill_nodes] == ["skill-a"]
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:skills-runtime",
+            node_id="skills.skill.skill-a",
+            action=ContextAction.PIN,
+        ),
+    )
+
+    context_slice = services["slice"].build_slice(
+        session_key="session:skills-runtime",
+        run_id="run-skills-runtime",
+        provider_profile="codex",
+    )
+    slice_items = {item.item_id: item for item in context_slice.items}
+
+    assert "skills.skill.skill-a" in slice_items
+    assert "skills.skill.skill-b" not in slice_items
+    ready_item = slice_items["skills.skill.skill-a"]
+    assert ready_item.metadata["owner_resolution"] == "handle_only"
+    assert ready_item.text == ""
+    assert ready_item.owner_ref["skill_name"] == "skill-a"
+    assert skill_service.read_calls == []
 
 
 def test_skill_adapter_expands_skill_instructions_node() -> None:
@@ -110,6 +187,10 @@ def _context_services(skill_service: "_FakeSkillService"):
             node_repository=nodes,
             operation_repository=operations,
             owner_registry=registry,
+        ),
+        "slice": ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
         ),
     }
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmContinuationSignal,
     LlmInputItem,

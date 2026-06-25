@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmResponseEvent, LlmResponseItem
+from crxzipple.modules.llm.domain import LlmResponseEvent, LlmResponseItem
 
 
 class InMemoryLlmProfileRepository:
@@ -36,6 +36,7 @@ class InMemoryLlmInvocationRepository:
         self,
         *,
         llm_id: str | None = None,
+        run_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[LlmInvocation]:
@@ -46,6 +47,8 @@ class InMemoryLlmInvocationRepository:
         )
         if llm_id is not None:
             items = [item for item in items if item.llm_id == llm_id]
+        if run_id is not None:
+            items = [item for item in items if item.run_id == run_id]
         start = max(int(offset), 0)
         if limit is None:
             return items[start:]

@@ -5,7 +5,7 @@ from typing import Any
 
 from crxzipple.modules.agent.domain.value_objects import AgentLlmRoutingPolicy
 from crxzipple.modules.llm.domain.exceptions import LlmNotFoundError
-from crxzipple.modules.llm.domain.value_objects import LlmCapability
+from crxzipple.modules.llm.domain import LlmCapability
 from crxzipple.modules.orchestration.application.ports import (
     AccessReadinessPort,
     LlmPort,

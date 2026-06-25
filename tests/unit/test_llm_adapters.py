@@ -35,9 +35,11 @@ from crxzipple.modules.llm.infrastructure import (
     OpenAICodexResponsesAdapter,
     OpenAIResponsesAdapter,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
-    openai_response_projected_input_items,
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_common import (
     projected_input_items_from_messages,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_openai_message_projection import (
+    openai_response_projected_input_items,
 )
 from crxzipple.modules.llm.infrastructure.adapters.openai_response_projection import (
     build_openai_response_items,
@@ -1614,6 +1616,8 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.response_items[1].call_id, "call_chat_1")
         self.assertEqual(response.response_items[1].tool_name, "echo_tool")
         self.assertFalse(response.response_items[1].user_timeline_candidate)
+        self.assertEqual(response.continuation.reason, LlmContinuationReason.TOOL_CALL)
+        self.assertTrue(response.continuation.needs_follow_up)
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
@@ -1892,6 +1896,116 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertTrue(kwargs["stream"])
         self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
         self.assertTrue(kwargs["json"]["stream"])
+
+    def test_openai_chat_compatible_stream_and_non_stream_emit_equivalent_response_items(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="local-chat-equivalent",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            base_url="http://localhost:8010/v1",
+            credential_binding_id="inline-vllm-token",
+        )
+        request = _adapter_request(
+            messages=(LlmMessage(role=LlmMessageRole.USER, content="Say hello"),),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "chatcmpl_equiv_1",
+                    "model": "qwen3.5-35b",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": "hello"},
+                        },
+                    ],
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                    },
+                },
+            ),
+        ):
+            non_stream_response = OpenAIChatCompatibleAdapter().invoke(
+                profile,
+                request,
+            )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "chat.completion.chunk",
+                        {
+                            "id": "chatcmpl_equiv_1",
+                            "model": "qwen3.5-35b",
+                            "choices": [
+                                {
+                                    "delta": {"content": "he"},
+                                    "finish_reason": None,
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        "chat.completion.chunk",
+                        {
+                            "id": "chatcmpl_equiv_1",
+                            "model": "qwen3.5-35b",
+                            "choices": [
+                                {
+                                    "delta": {"content": "llo"},
+                                    "finish_reason": None,
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        "chat.completion.chunk",
+                        {
+                            "id": "chatcmpl_equiv_1",
+                            "model": "qwen3.5-35b",
+                            "choices": [
+                                {
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                },
+                            ],
+                            "usage": {
+                                "prompt_tokens": 4,
+                                "completion_tokens": 2,
+                                "total_tokens": 6,
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ):
+            stream_events = list(
+                OpenAIChatCompatibleAdapter().stream_invoke(profile, request),
+            )
+
+        stream_completed = stream_events[-1].data
+        self.assertEqual(non_stream_response.result.text, stream_completed["result"]["text"])
+        self.assertEqual(
+            non_stream_response.result.finish_reason,
+            stream_completed["result"]["finish_reason"],
+        )
+        non_stream_item = non_stream_response.response_items[0]
+        stream_item = stream_completed["response_items"][0]
+        self.assertEqual(non_stream_item.kind.value, stream_item["kind"])
+        self.assertEqual(non_stream_item.content_payload, stream_item["content_payload"])
+        self.assertEqual(
+            non_stream_item.user_timeline_candidate,
+            stream_item["user_timeline_candidate"],
+        )
 
     def test_openai_chat_compatible_adapter_stream_invoke_async_handles_json_fallback(
         self,
@@ -2443,7 +2557,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             )
 
             with patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
                 return_value=_FakeStreamResponse(
                     events=(
                         (
@@ -2733,7 +2847,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
             return_value=_FakeStreamResponse(
                 events=(
                     (
@@ -2814,7 +2928,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
             return_value=_FakeStreamResponse(
                 events=(
                     (
@@ -2960,7 +3074,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
         adapter = OpenAICodexResponsesAdapter()
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ) as create_connection:
             response = adapter.invoke(profile, request)
@@ -3120,7 +3234,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
         adapter = OpenAICodexResponsesAdapter()
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ) as create_connection:
             first = adapter.invoke(profile, request)
@@ -3180,7 +3294,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
         adapter = OpenAICodexResponsesAdapter()
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ) as create_connection:
             warmup = adapter.warmup_websocket(
@@ -3264,7 +3378,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             ),
         )
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ):
             response = OpenAICodexResponsesAdapter().invoke(profile, request)
@@ -3340,7 +3454,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             ),
         )
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ):
             response = OpenAICodexResponsesAdapter().invoke(profile, request)
@@ -3493,7 +3607,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ):
             response = OpenAICodexResponsesAdapter().invoke(profile, request)
@@ -3593,7 +3707,7 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         adapter = OpenAICodexResponsesAdapter()
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             side_effect=[rejected_delta_ws, full_request_ws],
         ) as create_connection:
             response = adapter.invoke(profile, request)
@@ -3619,10 +3733,26 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.provider_request_id, "resp_full_retry")
         self.assertEqual(response.result.text, "full request worked")
         self.assertEqual(response.result.metadata["transport"], "websocket")
+        self.assertEqual(
+            [item.kind for item in response.response_items],
+            [LlmResponseItemKind.ASSISTANT_MESSAGE],
+        )
+        self.assertEqual(
+            response.response_items[0].content_payload["text"],
+            "full request worked",
+        )
+        self.assertEqual(response.continuation.reason, LlmContinuationReason.NONE)
+        self.assertFalse(response.continuation.needs_follow_up)
         self.assertTrue(response.result.metadata["provider_continuation_fallback"])
         self.assertEqual(
             response.result.metadata["provider_continuation_fallback_reason"],
             "websocket_continuation_failed_before_output",
+        )
+        fallback_error = response.result.metadata["provider_continuation_fallback_error"]
+        self.assertEqual(fallback_error["type"], "RuntimeError")
+        self.assertIn(
+            "delta did not match previous response",
+            fallback_error["message"],
         )
         adapter.close_websocket_pool()
         self.assertTrue(full_request_ws.closed)
@@ -3675,7 +3805,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             return await OpenAICodexResponsesAdapter().invoke_async(profile, request)
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ):
             response = asyncio.run(_invoke())
@@ -3740,7 +3870,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             ]
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ):
             events = asyncio.run(_collect_events())
@@ -3809,7 +3939,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
             return_value=fake_ws,
         ):
             events = list(OpenAICodexResponsesAdapter().stream_invoke(profile, request))
@@ -3871,7 +4001,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
         with (
             patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
                 side_effect=[requests.Timeout("temporary websocket timeout"), fake_ws],
             ) as create_connection,
             patch(
@@ -3934,7 +4064,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         adapter = OpenAICodexResponsesAdapter()
         with (
             patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
                 side_effect=[broken_ws, healthy_ws],
             ) as create_connection,
             patch(
@@ -4032,7 +4162,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
             return_value=_FakeStreamResponse(
                 events=(
                     (
@@ -4086,7 +4216,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
             return_value=_FakeStreamResponse(
                 events=(
                     (
@@ -4197,7 +4327,7 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         async def collect_events():
             with patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.httpx.AsyncClient",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.httpx.AsyncClient",
                 _FakeAsyncClient,
             ):
                 return [
@@ -4287,7 +4417,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
             return_value=stream_response,
         ):
             events = list(OpenAICodexResponsesAdapter().stream_invoke(profile, request))
@@ -4320,7 +4450,7 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         with (
             patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
                 side_effect=[
                     _FakeStreamResponse(
                         events=(
@@ -4376,7 +4506,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 ],
             ) as post,
             patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.sleep_before_openai_stream_retry",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_dispatch.sleep_before_openai_stream_retry",
             ),
         ):
             response = OpenAICodexResponsesAdapter().invoke(profile, request)

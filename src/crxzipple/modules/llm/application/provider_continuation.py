@@ -32,6 +32,8 @@ def build_provider_continuation_state_from_invocation(
         transport=transport,
     ):
         return {}
+    if api_family == LlmApiFamily.OPENAI_CODEX_RESPONSES.value:
+        return {}
     state: dict[str, object] = {
         "mode": "provider_native",
         "provider_family": api_family,
@@ -88,11 +90,7 @@ def profile_supports_provider_continuation(
     ):
         return False
     if profile.api_family is LlmApiFamily.OPENAI_CODEX_RESPONSES:
-        return (
-            transport == "websocket"
-            and LlmCapability.PROVIDER_WEBSOCKET_TRANSPORT in capabilities
-            and LlmCapability.PROVIDER_INCREMENTAL_INPUT in capabilities
-        )
+        return False
     return True
 
 
@@ -102,6 +100,8 @@ def provider_continuation_from_state(
     if not isinstance(state, dict):
         return None
     if state.get("mode") != "provider_native":
+        return None
+    if state.get("fallback") is True:
         return None
     previous_response_id = _optional_text(state.get("previous_response_id"))
     if previous_response_id is None:

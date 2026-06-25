@@ -4,7 +4,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmInputItem,
     LlmInputItemKind,
     LlmMessage,

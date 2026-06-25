@@ -11,6 +11,7 @@ from crxzipple.modules.browser.infrastructure.action_trace import (
     _trace_action_envelope,
     _trace_recommendation,
     _trace_snapshot_limit_for_action_ref,
+    _trace_snapshot_payload,
 )
 from tests.unit.browser_playwright_action_support import BrowserPlaywrightActionEngineTestCase
 
@@ -265,6 +266,23 @@ class BrowserPlaywrightCoreActionsTestCase(BrowserPlaywrightActionEngineTestCase
             ("click", "#item-19", {"timeout": 2000.0}, ()),
             page.operations,
         )
+
+    def test_action_trace_bounds_snapshot_preview_size(self) -> None:
+        payload = _trace_snapshot_payload(
+            {
+                "kind": "snapshot",
+                "format": "interactive",
+                "generation": 1,
+                "ref_count": 1,
+                "frame_count": 1,
+                "mode": "efficient",
+                "compact": True,
+                "value": {"snapshot": "x" * 6000},
+            },
+        )
+
+        self.assertEqual(len(payload["snapshot_preview"]), 4000)
+        self.assertTrue(payload["snapshot_preview"].endswith("..."))
 
     def test_action_trace_preserves_precise_ref_locator_when_before_snapshot_is_role_only(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")

@@ -375,6 +375,47 @@ class SettingsHttpTestCase(HttpModuleTestCase):
         self.assertIn("unknown top-level field: unit_test_marker", detail["errors"])
         self.assertEqual(detail["audit"]["status"], "failed")
 
+    def test_runtime_defaults_update_rejects_stale_active_version(self) -> None:
+        current = self.client.get("/settings/runtime-defaults/defaults").json()
+        current_active_version_id = current["versions"][-1]["id"]
+        first_update = self.client.post(
+            "/settings/runtime-defaults/defaults/actions/update",
+            json={
+                "actor": "unit-test",
+                "reason": "first operator update",
+                "expected_active_version_id": current_active_version_id,
+                "payload": {
+                    "orchestration": {
+                        "run_lease_seconds": 33,
+                    },
+                },
+            },
+        )
+        self.assertEqual(first_update.status_code, 202)
+
+        stale_update = self.client.post(
+            "/settings/runtime-defaults/defaults/actions/update",
+            json={
+                "actor": "unit-test",
+                "reason": "second operator stale update",
+                "expected_active_version_id": current_active_version_id,
+                "payload": {
+                    "orchestration": {
+                        "run_lease_seconds": 44,
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(stale_update.status_code, 409)
+        self.assertIn("active version conflict", stale_update.json()["detail"])
+
+        audits_response = self.client.get("/settings/audit-logs")
+        self.assertEqual(audits_response.status_code, 200)
+        latest_audit = audits_response.json()["resources"][0]
+        self.assertEqual(latest_audit["status"], "failed")
+        self.assertEqual(latest_audit["error"]["code"], "settings_active_version_conflict")
+
     def test_settings_write_action_requires_reason_but_still_audits_failure(self) -> None:
         response = self.client.post(
             "/settings/runtime-defaults/defaults/actions/update",

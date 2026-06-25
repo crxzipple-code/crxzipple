@@ -175,6 +175,22 @@ export interface WorkbenchRunView {
   actions?: UiRuntimeAction[];
   inspector?: WorkbenchInspectorView | null;
   trace: TraceContext;
+  projection_diagnostics?: WorkbenchProjectionDiagnostics | null;
+}
+
+export interface WorkbenchProjectionDiagnostics {
+  owner_sources: WorkbenchOwnerFactSource[];
+  owner_call_sources: string[];
+  owner_call_count: number;
+  processed_item_count: number;
+  timeline_item_count: number;
+  elapsed_ms: number;
+}
+
+export interface WorkbenchOwnerFactSource {
+  module: string;
+  facts: string[];
+  read_path: string;
 }
 
 export interface WorkbenchTimelineItem {

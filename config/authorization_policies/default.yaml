@@ -8,6 +8,14 @@
   resource:
     kind: llm_profile
 
+- id: allow_artifact_read
+  description: Allow reading artifact metadata, previews, originals, and downloads.
+  effect: allow
+  actions:
+    - artifact.read
+  resource:
+    kind: artifact
+
 - id: allow_safe_tool_execution
   description: Allow executing non-mutating tools through the tool subsystem.
   effect: allow

@@ -5,28 +5,23 @@ import hashlib
 import re
 from typing import Mapping, Protocol
 
+from crxzipple.modules.access.application.inventory_redaction import (
+    sanitize_access_metadata,
+)
+from crxzipple.modules.access.application.inventory_requirement_rules import (
+    AccessReadinessCheckSpec,
+    access_check_label,
+    credential_asset_kind,
+    credential_binding_check_spec,
+    credential_binding_for_requirement,
+    is_credential_binding,
+    masked_inventory_requirement,
+)
 from crxzipple.modules.access.application.read_models import (
     AccessAssetDetailReadModel,
     AccessConsumerBindingReadModel,
     CredentialBindingReadModel,
 )
-from crxzipple.modules.access.application.services import (
-    canonical_credential_binding,
-    is_credential_binding,
-    parse_access_requirement,
-)
-
-
-AccessReadinessCheckSpec = tuple[str, str, bool]
-_CREDENTIAL_REQUIREMENT_KINDS = {"api_key", "bearer", "basic", "credential"}
-_SENSITIVE_METADATA_KEYS = {
-    "api_key",
-    "authorization",
-    "password",
-    "secret",
-    "token",
-    "value",
-}
 
 
 class AccessInventoryReadinessChecker(Protocol):
@@ -80,69 +75,6 @@ def collect_access_inventory_from_read_models(
             "blocked": len(targets) - len(ready_targets),
         },
     }
-
-
-def credential_binding_for_requirement(requirement: str) -> str | None:
-    normalized = requirement.strip()
-    if is_credential_binding(normalized):
-        return normalized
-    parsed = parse_access_requirement(normalized)
-    if parsed.kind not in _CREDENTIAL_REQUIREMENT_KINDS or len(parsed.scopes) != 1:
-        return None
-    candidate = parsed.scopes[0].strip()
-    if is_credential_binding(candidate):
-        return candidate
-    return None
-
-
-def credential_asset_kind(binding: str) -> str:
-    normalized = binding.strip()
-    if normalized.startswith("env:"):
-        return "env"
-    if normalized.startswith("file:"):
-        return "file"
-    return "inline_credential"
-
-
-def credential_binding_check_spec(
-    binding: str,
-    *,
-    allow_literal: bool,
-) -> AccessReadinessCheckSpec:
-    canonical = canonical_credential_binding(binding)
-    return (
-        "credential_binding",
-        _masked_requirement(canonical, allow_literal=allow_literal),
-        allow_literal and not is_credential_binding(canonical),
-    )
-
-
-def access_check_label(target_type: str, raw: str) -> str:
-    normalized = raw.strip()
-    if normalized.startswith("env:"):
-        env_name = normalized.removeprefix("env:").strip()
-        return env_name or "env"
-    if normalized.startswith("file:"):
-        path = normalized.removeprefix("file:").strip()
-        return f"file:{path}" if path else "file credential"
-    if target_type == "credential_binding":
-        return _credential_binding_label(normalized)
-    return normalized
-
-
-def sanitize_access_metadata(value: object) -> object:
-    if isinstance(value, Mapping):
-        sanitized: dict[str, object] = {}
-        for key, item in value.items():
-            key_string = str(key)
-            if _is_sensitive_metadata_key(key_string):
-                sanitized[key_string] = _masked_metadata_value(item)
-            else:
-                sanitized[key_string] = sanitize_access_metadata(item)
-        return sanitized
-    if isinstance(value, (list, tuple)):
-        return [sanitize_access_metadata(item) for item in value]
-    return value
 
 
 def _collect_access_requirement_groups_from_read_models(
@@ -367,7 +299,9 @@ def _declared_access_values(usages: list[dict[str, object]]) -> list[str]:
     for usage in usages:
         binding = usage.get("credential_binding")
         if isinstance(binding, str) and binding.strip():
-            values.add(_masked_requirement(binding.strip(), allow_literal=False))
+            values.add(
+                masked_inventory_requirement(binding.strip(), allow_literal=False),
+            )
         for field in (
             "access_requirement_set",
             "access_requirement_sets",
@@ -379,13 +313,16 @@ def _declared_access_values(usages: list[dict[str, object]]) -> list[str]:
             for raw_value in raw_values:
                 if isinstance(raw_value, str) and raw_value.strip():
                     values.add(
-                        _masked_requirement(raw_value.strip(), allow_literal=False),
+                        masked_inventory_requirement(
+                            raw_value.strip(),
+                            allow_literal=False,
+                        ),
                     )
                 if isinstance(raw_value, (list, tuple)):
                     for nested_value in raw_value:
                         if isinstance(nested_value, str) and nested_value.strip():
                             values.add(
-                                _masked_requirement(
+                                masked_inventory_requirement(
                                     nested_value.strip(),
                                     allow_literal=False,
                                 ),
@@ -423,16 +360,6 @@ def _usage_values(
             if usage.get("usage_type") == usage_type and usage.get(field)
         },
     )
-
-
-def _credential_binding_label(binding: str) -> str:
-    normalized = binding.strip()
-    if normalized.startswith("env:"):
-        env_name = normalized.removeprefix("env:").strip()
-        return f"env:{env_name}" if env_name else "env"
-    if normalized.startswith("file:"):
-        return "file credential"
-    return "inline credential"
 
 
 def _slugify(value: str) -> str:
@@ -485,48 +412,15 @@ def _safe_check_payload(check: Mapping[str, object]) -> dict[str, object]:
     allow_literal = bool(payload.get("allow_literal"))
     if isinstance(raw_requirement, str):
         if target_type == "credential_binding":
-            payload["requirement"] = _masked_requirement(
+            payload["requirement"] = masked_inventory_requirement(
                 raw_requirement,
                 allow_literal=allow_literal,
             )
         else:
             binding = credential_binding_for_requirement(raw_requirement)
             if binding is not None:
-                payload["requirement"] = _masked_requirement(
+                payload["requirement"] = masked_inventory_requirement(
                     binding,
                     allow_literal=False,
                 )
     return payload
-
-
-def _masked_requirement(value: str, *, allow_literal: bool) -> str:
-    normalized = value.strip()
-    if is_credential_binding(normalized):
-        return canonical_credential_binding(normalized)
-    if allow_literal:
-        return "literal:***"
-    return normalized
-
-
-def _is_sensitive_metadata_key(key: str) -> bool:
-    normalized = key.strip().lower()
-    return any(part in normalized for part in _SENSITIVE_METADATA_KEYS)
-
-
-def _masked_metadata_value(value: object) -> object:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        if not value:
-            return value
-        if is_credential_binding(value):
-            return canonical_credential_binding(value)
-        return "***"
-    if isinstance(value, (list, tuple)):
-        return ["***" if item else item for item in value]
-    if isinstance(value, Mapping):
-        return {
-            str(key): _masked_metadata_value(item)
-            for key, item in value.items()
-        }
-    return "***"

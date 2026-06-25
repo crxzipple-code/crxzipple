@@ -22,6 +22,7 @@ from crxzipple.modules.settings.domain.entities import (
 )
 from crxzipple.modules.settings.domain.exceptions import (
     SettingsAlreadyExistsError,
+    SettingsConflictError,
     SettingsNotFoundError,
     SettingsPublishError,
 )
@@ -372,6 +373,12 @@ class SettingsActionService:
                 "trace_context": dict(data.trace_context),
             },
         )
+        _ensure_active_version_matches(
+            resource,
+            expected_active_version_id=data.expected_active_version_id,
+            audit_repository=self._audits,
+            audit_id=audit.id,
+        )
         validation = validate_settings_payload(data.payload)
         if not validation.ok:
             self._audits.mark_failed(audit.id, error={"validation": validation.to_payload()})
@@ -433,9 +440,16 @@ class SettingsActionService:
             risk="configuration_change",
             request_metadata={
                 "version_id": data.version_id,
+                "expected_active_version_id": data.expected_active_version_id,
                 "environment": data.environment,
                 "trace_context": dict(data.trace_context),
             },
+        )
+        _ensure_active_version_matches(
+            resource,
+            expected_active_version_id=data.expected_active_version_id,
+            audit_repository=self._audits,
+            audit_id=audit.id,
         )
         version = (
             self._versions.get(data.version_id)
@@ -498,9 +512,16 @@ class SettingsActionService:
             risk="configuration_rollback",
             request_metadata={
                 "target_version_id": data.target_version_id,
+                "expected_active_version_id": data.expected_active_version_id,
                 "environment": data.environment,
                 "trace_context": dict(data.trace_context),
             },
+        )
+        _ensure_active_version_matches(
+            resource,
+            expected_active_version_id=data.expected_active_version_id,
+            audit_repository=self._audits,
+            audit_id=audit.id,
         )
         target = self._versions.get(data.target_version_id)
         if target is None or target.resource_id != resource.id:
@@ -810,6 +831,32 @@ class SettingsActionService:
             risk=risk,
             request_metadata=request_metadata or {},
         )
+
+
+def _ensure_active_version_matches(
+    resource: SettingsResource,
+    *,
+    expected_active_version_id: str | None,
+    audit_repository: SettingsActionAuditRepository,
+    audit_id: str,
+) -> None:
+    expected = _optional_text(expected_active_version_id)
+    if expected is None:
+        return
+    actual = resource.active_version_id
+    if actual == expected:
+        return
+    error: JsonObject = {
+        "code": "settings_active_version_conflict",
+        "resource_id": resource.id,
+        "expected_active_version_id": expected,
+        "actual_active_version_id": actual,
+    }
+    audit_repository.mark_failed(audit_id, error=error)
+    raise SettingsConflictError(
+        "settings resource active version conflict: "
+        f"expected {expected!r}, found {actual!r}.",
+    )
 
 
 def _next_version_number(versions: tuple[SettingsResourceVersion, ...]) -> int:

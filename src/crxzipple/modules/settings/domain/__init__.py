@@ -9,6 +9,7 @@ from crxzipple.modules.settings.domain.entities import (
 )
 from crxzipple.modules.settings.domain.exceptions import (
     SettingsAlreadyExistsError,
+    SettingsConflictError,
     SettingsError,
     SettingsNotFoundError,
     SettingsPublishError,
@@ -34,6 +35,7 @@ __all__ = [
     "SettingsActionAuditRepository",
     "SettingsActionStatus",
     "SettingsAlreadyExistsError",
+    "SettingsConflictError",
     "SettingsEffectiveSnapshot",
     "SettingsEffectiveSnapshotRepository",
     "SettingsError",

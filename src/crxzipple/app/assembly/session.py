@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
+
 from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ApplicationFactory
 from crxzipple.modules.agent.domain import AgentNotFoundError
@@ -9,6 +11,29 @@ from crxzipple.modules.session.application import (
     SessionApplicationService,
     SessionResolutionService,
 )
+
+
+def _is_session_append_sequence_conflict(exc: Exception) -> bool:
+    if not isinstance(exc, IntegrityError):
+        return False
+    text = " ".join(
+        part
+        for part in (
+            str(exc),
+            str(getattr(exc, "orig", "")),
+        )
+        if part
+    )
+    if "ix_session_items_session_sequence" in text:
+        return True
+    if "session_items_session_sequence" in text:
+        return True
+    return (
+        "session_items" in text
+        and "session_key" in text
+        and "session_id" in text
+        and "sequence_no" in text
+    )
 
 
 def session_factories() -> tuple[ApplicationFactory, ...]:
@@ -40,6 +65,7 @@ def _build_session_services(ctx):
     service = SessionApplicationService(
         ctx.require(AppKey.UNIT_OF_WORK_FACTORY),
         workspace_defaults_resolver=_default_workspace_for_agent,
+        append_sequence_conflict_detector=_is_session_append_sequence_conflict,
     )
     return {
         AppKey.SESSION_SERVICE: service,

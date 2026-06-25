@@ -150,6 +150,24 @@ def _empty_table_section(section_id: str, title: str) -> dict[str, Any]:
     }
 
 
+def _table_section_with_rows(section_id: str, *, row_prefix: str) -> dict[str, Any]:
+    return {
+        "id": section_id,
+        "title": section_id.replace("_", " ").title(),
+        "columns": [{"key": "name", "label": "Name"}],
+        "rows": [
+            {
+                "id": f"{row_prefix}-{index}",
+                "cells": {"name": f"{row_prefix}-{index}"},
+                "status": "succeeded",
+                "tone": "success",
+            }
+            for index in range(6)
+        ],
+        "total": 6,
+    }
+
+
 def _minimal_tool_detail_payload(
     *,
     run_id: str,
@@ -525,6 +543,83 @@ class UiHttpTestCase(HttpModuleTestCase):
         assert llm_page is not None
         self.assertEqual(tool_page.payload["tool_run_details"], [])
         self.assertEqual(llm_page.payload["invocation_details"], [])
+
+    def test_operations_endpoints_apply_projection_table_query_budgets(self) -> None:
+        self._materialize_operations("tool", "llm", "orchestration")
+        store = self.client.app.state.container.require(AppKey.OPERATIONS_PROJECTION_STORE)
+        store.record_projection(
+            module="tool",
+            kind="table",
+            query_key="tool_runs",
+            payload=_table_section_with_rows("tool_runs", row_prefix="tool-run"),
+        )
+        store.record_projection(
+            module="llm",
+            kind="table",
+            query_key="recent_invocations",
+            payload=_table_section_with_rows(
+                "recent_invocations",
+                row_prefix="llm-invocation",
+            ),
+        )
+        store.record_projection(
+            module="orchestration",
+            kind="table",
+            query_key="run_queue",
+            payload=_table_section_with_rows("run_queue", row_prefix="run"),
+        )
+
+        tool_payload = self.client.get("/operations/tool?limit=2&offset=1").json()
+        llm_payload = self.client.get("/operations/llm?limit=2&offset=2").json()
+        orchestration_payload = self.client.get(
+            "/operations/orchestration?limit=3&offset=1",
+        ).json()
+
+        self.assertEqual(
+            [row["id"] for row in tool_payload["tool_runs"]["rows"]],
+            ["tool-run-1", "tool-run-2"],
+        )
+        self.assertEqual(tool_payload["tool_runs"]["total"], 6)
+        self.assertEqual(
+            [row["id"] for row in llm_payload["recent_invocations"]["rows"]],
+            ["llm-invocation-2", "llm-invocation-3"],
+        )
+        self.assertEqual(llm_payload["recent_invocations"]["total"], 6)
+        self.assertEqual(
+            [row["id"] for row in orchestration_payload["run_queue"]["rows"]],
+            ["run-1", "run-2", "run-3"],
+        )
+        self.assertEqual(orchestration_payload["run_queue"]["total"], 6)
+
+    def test_operations_page_responses_expose_projection_freshness(self) -> None:
+        module_routes = (
+            "/operations/orchestration",
+            "/operations/tool",
+            "/operations/llm",
+            "/operations/access",
+            "/operations/channels",
+            "/operations/memory",
+            "/operations/skills",
+            "/operations/events",
+            "/operations/daemon",
+            "/operations/browser",
+        )
+        self._materialize_operations(
+            *(route.rsplit("/", 1)[-1] for route in module_routes),
+        )
+
+        for route in module_routes:
+            response = self.client.get(route)
+            self.assertEqual(response.status_code, 200, route)
+            payload = response.json()
+            freshness = payload.get("projection_freshness")
+            self.assertIsInstance(freshness, dict, route)
+            assert isinstance(freshness, dict)
+            self.assertEqual(freshness["module"], route.rsplit("/", 1)[-1])
+            self.assertEqual(freshness["kind"], "page")
+            self.assertEqual(freshness["query_key"], "default")
+            self.assertIsInstance(freshness["updated_at"], str)
+            self.assertTrue(freshness["updated_at"], route)
 
     def test_ui_bootstrap_exposes_console_routes(self) -> None:
         response = self.client.get("/ui/bootstrap")
@@ -1678,6 +1773,27 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["metrics"]["tokens"], 13)
         self.assertEqual(payload["metrics"]["llm_calls"], 1)
         self.assertEqual(payload["model"]["id"], "openai.gpt-5.4-mini")
+        projection_diagnostics = payload["projection_diagnostics"]
+        self.assertGreaterEqual(projection_diagnostics["owner_call_count"], 1)
+        owner_sources = projection_diagnostics["owner_sources"]
+        self.assertIn("orchestration", {item["module"] for item in owner_sources})
+        orchestration_source = next(
+            item for item in owner_sources if item["module"] == "orchestration"
+        )
+        self.assertIn("execution_step_items", orchestration_source["facts"])
+        self.assertIn(
+            "orchestration.get_run",
+            projection_diagnostics["owner_call_sources"],
+        )
+        self.assertGreaterEqual(
+            projection_diagnostics["processed_item_count"],
+            len(payload["timeline"]),
+        )
+        self.assertEqual(
+            projection_diagnostics["timeline_item_count"],
+            len(payload["timeline"]),
+        )
+        self.assertGreaterEqual(projection_diagnostics["elapsed_ms"], 0)
         self.assertEqual(
             [item["kind"] for item in payload["timeline"]],
             [
@@ -1739,7 +1855,6 @@ class UiHttpTestCase(HttpModuleTestCase):
             (
                 "provider_end_turn_false; end_turn=false; follow_up=true; "
                 "provider=provider_native; transport=http; "
-                "previous_response_id=resp_ui_1; "
                 "fallback=websocket_continuation_failed_before_output"
             ),
         )
@@ -1848,10 +1963,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             (
                 "provider_end_turn_false; end_turn=false; follow_up=true; "
                 "provider=provider_native; transport=http; "
-                "previous_response_id=resp_ui_1; "
                 "fallback=websocket_continuation_failed_before_output"
             ),
         )
+        self.assertNotIn("previous_response_id", continuation_steps[0]["summary"])
         self.assertIn(
             "provider_native",
             {badge["label"] for badge in continuation_steps[0]["badges"]},
@@ -2226,7 +2341,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             llm_steps[0]["summary"],
         )
 
-    def test_ui_workbench_reads_tool_runs_from_execution_chain_without_run_metadata(
+    def test_ui_workbench_reads_tool_runs_from_tool_owner_metadata(
         self,
     ) -> None:
         container = self.client.app.state.container
@@ -2256,7 +2371,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             run_id="tool-run-ui-chain-only",
             tool_id="browser.snapshot",
             input_payload={"format": "text"},
-            metadata={},
+            metadata={"orchestration_run_id": run.id},
             invocation_context_payload={},
             target=ToolExecutionTarget(mode=ToolMode.INLINE),
         )

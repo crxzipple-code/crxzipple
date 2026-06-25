@@ -37,6 +37,9 @@
 - [reports/llm-provider-protocol-rendering-boundary-refactor-plan-20260615.md](reports/llm-provider-protocol-rendering-boundary-refactor-plan-20260615.md)：LLM Provider Protocol Rendering 边界重构入口；把 provider/transport/model request rendering 与 response parsing 对称收归 LLM adapter / renderer，Context Tree 只作为 runtime canonical context，Orchestration 不再拼 provider prompt。施工硬约束：不兼容旧结构、不双轨并行、无法形成准确结论的内容不进入 LLM input、Codex 适配以抓包 trace 和源码事实为准、内核保持通用。
 - [reports/session-runtime-projection-and-provider-request-renderer-plan-20260616.md](reports/session-runtime-projection-and-provider-request-renderer-plan-20260616.md)：Session Runtime Projection / Provider Request Renderer 详细开发方案；基于 Codex 源码确认 `ResponseItem -> TurnItem` 与 `Runtime transcript -> provider input` 的双向分层，定义 LLM response 保真、Session runtime transcript、tool result 入库、request renderer、Workbench/Operations 投影和 breaking migration 清单。
 - [reports/runtime-request-render-snapshot-hot-path-refactor-plan-20260618.md](reports/runtime-request-render-snapshot-hot-path-refactor-plan-20260618.md)：Runtime Request Render Snapshot 热路径整改方案；把 LLM 调用前置链路从完整 Context Tree/debug snapshot 重建收敛为轻量 request render snapshot，完整树观察退出热路径，改由 Operations/Trace/Workbench 按需或异步生成。
+- [reports/runtime-code-structure-convergence-plan-20260620.md](reports/runtime-code-structure-convergence-plan-20260620.md)：Runtime 代码结构治理方案；在已完成长链能力收口后，继续拆清 runtime request draft、LLM application service、tool execution observation、Context Workspace orchestration adapter 和 provider request preview 的职责边界，不引入兼容双轨或任务特化逻辑。
+- [reports/runtime-code-quality-audit-20260621.md](reports/runtime-code-quality-audit-20260621.md)：Runtime 代码质量审查报告；基于当前大重构 diff 检查临时结构、边界漂移、大文件热点、provider/render/session/workbench 投影职责和下一轮收口优先级。
+- [reports/system-readiness-code-quality-audit-20260621/README.md](reports/system-readiness-code-quality-audit-20260621/README.md)：上线前系统级代码质量审查；按模块分别评估边界清洁度、耦合、分层、生命周期、持久化、并发扩展和外部系统接入风险。
 - [reports/provider-transcript-evidence-rendering-remediation-plan-20260615.md](reports/provider-transcript-evidence-rendering-remediation-plan-20260615.md)：Provider transcript / evidence rendering 历史整改记录；当前最新决策是不新增通用 EvidenceGate / EvidenceOutcomeClassifier，无法准确形成通用结论的证据裁判不进入 LLM input；browser path ladder / `evidence_path_*` 字段已退场，browser 只保留可验证 facts，是否完成由 LLM 基于 transcript 判断。
 - [reports/browser-tool-source-profile-runtime-redesign-plan-20260525.md](reports/browser-tool-source-profile-runtime-redesign-plan-20260525.md)：Browser Tool Source / Profile Runtime 重构计划；退役 per-profile Browser MCP Source，把 browser capability 收成一个 Tool Source，profile 作为运行上下文。
 - [reports/browser-profile-pool-multi-ip-collection-plan-20260526.md](reports/browser-profile-pool-multi-ip-collection-plan-20260526.md)：Browser Profile Pool / 多 IP 采集开发计划；补 Browser Profile CRUD、Access 代理凭证、Profile Pool、Allocator、Operations 观察和端到端验收。
@@ -60,6 +63,8 @@ Browser MCP 旧路径清单放在
 - [session-semantics-design.md](session-semantics-design.md)：session / segment / turn / execution chain / lane 语义和边界；memory 不参与当前 session 调度模型。
 - [memory-space-design.md](memory-space-design.md)：memory space 和 durable knowledge 模型。
 - [memory-rewrite-cutover.md](memory-rewrite-cutover.md)：memory 重构后的当前状态。
+- [artifact-storage-policy.md](artifact-storage-policy.md)：Artifact 大 payload、下载、授权、保留期和 LLM raw request/response 外置策略。
+- [ocr-capability-runtime-policy.md](ocr-capability-runtime-policy.md)：OCR engine capability metadata、capacity/concurrency owner 和大输出 artifact/ref 策略。
 - [instruction-assets-memory-auth-design.md](instruction-assets-memory-auth-design.md)：skill、memory、access、authorization 的关系。
 - [context-workspace-prompt-tree-design.md](context-workspace-prompt-tree-design.md)：树化 Prompt / Context Workspace 目标设计；把 tool、skill、memory、session、artifact、workspace 收成 agent 和本地 runtime 共治的上下文树。
 - [context-workspace-prompt-tree-development.md](context-workspace-prompt-tree-development.md)：树化 Prompt / Context Workspace 详细开发文档；定义 domain、ports、storage、API、owner adapter、迁移阶段和验收清单。当前树结构以 2026-06-07 schema v2 为准；关于 session history 压缩与 skill 深入阅读边界，以 Session 历史压缩方案和 session 语义文档为准。
@@ -67,6 +72,7 @@ Browser MCP 旧路径清单放在
 - [tool-credential-requirements-guide.md](tool-credential-requirements-guide.md)：Tool 外部凭证 requirement/slot 开发约束。
 - [../tools/README.md](../tools/README.md)：内置 Tool source authoring contract。
 - [channel-credential-requirements-guide.md](channel-credential-requirements-guide.md)：Channel 账号凭证 slot 与 Access binding 开发约束。
+- [skill-source-trust-policy.md](skill-source-trust-policy.md)：Skill 外部 source、package provenance、signature 和 runtime visibility 信任边界。
 
 ## Channels
 

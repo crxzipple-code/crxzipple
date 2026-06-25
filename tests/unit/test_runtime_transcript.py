@@ -630,12 +630,14 @@ class RuntimeTranscriptTestCase(unittest.TestCase):
                         },
                         "metadata": {
                             "artifact_ids": ["artifact-body"],
-                            "browser_evidence": {},
                             TOOL_RESULT_ENVELOPE_METADATA_KEY: {
                                 "truncated": True,
                                 "summary": "large response captured",
                                 "omitted_chars": 1000,
                             },
+                        },
+                        "trace": {
+                            "raw_body": "TRACE_ONLY_BODY_" + ("y" * 1000),
                         },
                     },
                 ),
@@ -652,6 +654,8 @@ class RuntimeTranscriptTestCase(unittest.TestCase):
         self.assertIn("body_excerpt_policy: truncated, body_removed", text)
         self.assertIn("full_result_refs: use artifact refs or read handles when needed", text)
         self.assertNotIn("BODY_SECRET_", text)
+        self.assertNotIn("TRACE_ONLY_BODY_", text)
+        self.assertNotIn("TRACE_ONLY_BODY_", str(transcript.input_items[1].payload))
         self.assertEqual(transcript.report.tool_result_stats["tool_result_item_count"], 1)
         self.assertEqual(transcript.report.tool_result_stats["compacted_result_count"], 1)
         self.assertEqual(transcript.report.tool_result_stats["artifact_ref_count"], 1)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
-from crxzipple.modules.mobile.domain.entities import MobileDeviceRuntimeState
+from crxzipple.modules.mobile.domain.entities import MobileDeviceLease, MobileDeviceRuntimeState
 from crxzipple.modules.mobile.domain.value_objects import (
     MobileActionCommand,
     MobileActionResult,
@@ -48,6 +48,24 @@ class MobileRuntimeStateStore(Protocol):
         ...
 
     def delete(self, *, device_name: str) -> None:
+        ...
+
+
+class MobileDeviceLeaseStore(Protocol):
+    def acquire(
+        self,
+        *,
+        device_name: str,
+        owner_kind: str,
+        owner_id: str,
+        ttl_seconds: int,
+    ) -> MobileDeviceLease:
+        ...
+
+    def release(self, *, lease_id: str, reason: str = "released") -> None:
+        ...
+
+    def list_active(self, *, device_name: str | None = None) -> tuple[MobileDeviceLease, ...]:
         ...
 
 

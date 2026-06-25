@@ -480,7 +480,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
             self.assertEqual(create_response.status_code, 201)
 
             with patch(
-                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
                 return_value=_FakeStreamResponse(
                     events=(
                         (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
@@ -147,6 +148,132 @@ class MobileDomainTestCase(unittest.TestCase):
             saved_refs = store.get_refs(device_name="pixel", generation=1)
             self.assertEqual(len(saved_refs), 1)
             self.assertEqual(saved_refs[0].ref, "g1-m1")
+
+    def test_adb_snapshot_prunes_previous_generation_refs(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            store = FileBackedMobileRefStore(Path(tmpdir))
+            engine = AdbBackedMobileActionEngine(ref_store=store)
+            runtime_state = MobileDeviceRuntimeState(device_name="pixel")
+            plan = MobileExecutionPlan(
+                system=MobileSystemConfig(adb_binary="adb"),
+                device=ResolvedMobileDevice(
+                    name="pixel",
+                    platform="android",
+                    udid="serial-1",
+                    app_package="com.android.launcher",
+                    app_activity=".Launcher",
+                ),
+                capabilities=MobileDeviceCapabilities(
+                    mode="adb-android",
+                    control_family="adb-control",
+                    action_family="adb-backed",
+                ),
+                command=MobileActionCommand(
+                    device_name="pixel",
+                    kind="snapshot",
+                    payload={"format": "interactive_text"},
+                    timeout_ms=15_000,
+                ),
+            )
+
+            class _FakeClient:
+                call_count = 0
+
+                def capture_ui_xml(self) -> AndroidUiDump:
+                    self.call_count += 1
+                    text = f"Send {self.call_count}"
+                    return AndroidUiDump(
+                        xml=(
+                            "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                            "<hierarchy>"
+                            "<node class='android.widget.FrameLayout' text='' clickable='false' bounds='[0,0][100,100]'>"
+                            f"<node class='android.widget.Button' text='{text}' clickable='true' bounds='[10,10][90,40]' />"
+                            "</node>"
+                            "</hierarchy>"
+                        ),
+                        root_package="com.android.launcher",
+                        current_package="com.android.launcher",
+                        current_activity=".Launcher",
+                        mitigations_applied=(),
+                    )
+
+            fake_client = _FakeClient()
+            with patch(
+                "crxzipple.modules.mobile.infrastructure.engines._make_client",
+                return_value=fake_client,
+            ):
+                first_result, runtime_state = engine.execute(
+                    plan=plan,
+                    runtime_state=runtime_state,
+                )
+                second_result, runtime_state = engine.execute(
+                    plan=plan,
+                    runtime_state=runtime_state,
+                )
+
+            self.assertEqual(first_result.value["generation"], 1)
+            self.assertEqual(second_result.value["generation"], 2)
+            self.assertEqual(store.get_refs(device_name="pixel", generation=1), ())
+            second_refs = store.get_refs(device_name="pixel", generation=2)
+            self.assertEqual(len(second_refs), 1)
+            self.assertEqual(second_refs[0].ref, "g2-m1")
+
+    def test_adb_screenshot_returns_artifact_ref_without_inline_image_bytes(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            store = FileBackedMobileRefStore(Path(tmpdir))
+
+            class _FakeArtifactService:
+                def create_artifact(self, **kwargs):  # noqa: ANN003, ANN202
+                    self.last_payload = dict(kwargs)
+                    return SimpleNamespace(
+                        id="artifact-screenshot-1",
+                        mime_type="image/png",
+                        name="pixel-screenshot.png",
+                        width=100,
+                        height=200,
+                    )
+
+            artifact_service = _FakeArtifactService()
+            engine = AdbBackedMobileActionEngine(
+                ref_store=store,
+                artifact_service=artifact_service,
+            )
+            runtime_state = MobileDeviceRuntimeState(device_name="pixel")
+            plan = MobileExecutionPlan(
+                system=MobileSystemConfig(adb_binary="adb"),
+                device=ResolvedMobileDevice(
+                    name="pixel",
+                    platform="android",
+                    udid="serial-1",
+                ),
+                capabilities=MobileDeviceCapabilities(
+                    mode="adb-android",
+                    control_family="adb-control",
+                    action_family="adb-backed",
+                ),
+                command=MobileActionCommand(
+                    device_name="pixel",
+                    kind="screenshot",
+                    timeout_ms=15_000,
+                ),
+            )
+
+            class _FakeClient:
+                def take_screenshot(self) -> bytes:
+                    return b"fake-png-bytes"
+
+            with patch(
+                "crxzipple.modules.mobile.infrastructure.engines._make_client",
+                return_value=_FakeClient(),
+            ):
+                result, _ = engine.execute(plan=plan, runtime_state=runtime_state)
+
+            self.assertTrue(result.ok)
+            self.assertEqual(artifact_service.last_payload["data"], b"fake-png-bytes")
+            self.assertEqual(result.value["artifact_id"], "artifact-screenshot-1")
+            self.assertEqual(result.value["mime_type"], "image/png")
+            self.assertNotIn("data", result.value)
+            self.assertNotIn("image_bytes", result.value)
 
     def test_adb_snapshot_falls_back_to_ocr_and_returns_generation_scoped_refs(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -629,6 +756,56 @@ class MobileDomainTestCase(unittest.TestCase):
                 ["shell", "ime", "set", "com.baidu.input_vivo/.ImeVivoService"],
             ],
         )
+
+    def test_adb_client_truncates_large_command_failure_output(self) -> None:
+        client = AndroidAdbClient(adb_binary="adb", device_serial="serial-1")
+        stderr = "x" * 3_000
+
+        with patch(
+            "crxzipple.modules.mobile.infrastructure.adb_client.subprocess.run",
+            side_effect=subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["adb", "-s", "serial-1", "shell", "bad"],
+                stderr=stderr,
+            ),
+        ):
+            with self.assertRaises(MobileExecutionError) as context:
+                client._run(["shell", "bad"])
+
+        message = str(context.exception)
+        self.assertIn("[truncated", message)
+        self.assertLess(len(message), 2_100)
+
+    def test_adb_client_reports_command_timeout(self) -> None:
+        client = AndroidAdbClient(adb_binary="adb", device_serial="serial-1")
+
+        with patch(
+            "crxzipple.modules.mobile.infrastructure.adb_client.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["adb", "-s", "serial-1", "shell", "sleep"],
+                timeout=0.5,
+            ),
+        ):
+            with self.assertRaisesRegex(MobileExecutionError, "timed out after 0.5"):
+                client._run(["shell", "sleep"], timeout_seconds=0.5)
+
+    def test_adb_device_probe_truncates_large_failure_output(self) -> None:
+        stderr = "device-error\n" + ("x" * 3_000)
+
+        with patch(
+            "crxzipple.modules.mobile.infrastructure.adb_client.subprocess.run",
+            side_effect=subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["adb", "devices", "-l"],
+                stderr=stderr,
+            ),
+        ):
+            result = AndroidAdbClient.probe_adb_devices(adb_binary="adb")
+
+        self.assertTrue(result["adb_available"])
+        self.assertFalse(result["probe_ok"])
+        self.assertIn("[truncated", str(result["adb_error"]))
+        self.assertLess(len(str(result["adb_error"])), 2_100)
 
     def test_adb_client_press_key_combination_uses_input_keycombination(self) -> None:
         calls: list[list[str]] = []

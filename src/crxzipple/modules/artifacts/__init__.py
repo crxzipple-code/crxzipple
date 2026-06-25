@@ -1,6 +1,8 @@
 from crxzipple.modules.artifacts.application.services import (
     ArtifactApplicationService,
     ArtifactBinary,
+    ArtifactCleanupResult,
+    ArtifactStorageUsage,
 )
 from crxzipple.modules.artifacts.domain.entities import (
     Artifact,
@@ -18,9 +20,11 @@ __all__ = [
     "Artifact",
     "ArtifactApplicationService",
     "ArtifactBinary",
+    "ArtifactCleanupResult",
     "ArtifactError",
     "ArtifactKind",
     "ArtifactNotFoundError",
+    "ArtifactStorageUsage",
     "ArtifactValidationError",
     "ArtifactVariant",
     "FilesystemArtifactStore",

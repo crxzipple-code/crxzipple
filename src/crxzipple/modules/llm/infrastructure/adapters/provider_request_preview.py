@@ -1,19 +1,25 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
-from crxzipple.modules.llm.application.runtime_request import (
-    request_render_snapshot_preview_payload,
+from crxzipple.modules.llm.application.provider_request_input_preview import (
+    provider_input_preview_from_request_metadata,
 )
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmInputItem,
     LlmInputItemKind,
 )
-from crxzipple.modules.llm.infrastructure.adapters.tool_schemas import (
-    normalize_openai_tool_name,
+from crxzipple.modules.llm.infrastructure.adapters.provider_request_preview_utils import (
+    openai_provider_payload_fingerprint,
+    openai_response_input_fingerprints,
+    payload_fingerprint_or_none,
+    payload_item_type,
+    safe_preview_value,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_request_tool_preview import (
+    provider_tool_protocol_render_report,
+    provider_tool_render_report,
 )
 from crxzipple.modules.llm.infrastructure.rendering.input_projection import (
     provider_safe_input_metadata,
@@ -82,7 +88,7 @@ def openai_provider_request_preview(
         "payload_keys": sorted(str(key) for key in payload),
         "input_item_count": len(input_items),
         "input_item_types": tuple(
-            _payload_item_type(item) for item in input_items[:40]
+            payload_item_type(item) for item in input_items[:40]
         ),
         "input_delta_mode": bool(delta_mode),
         "input_baseline_count": input_baseline_count,
@@ -93,14 +99,14 @@ def openai_provider_request_preview(
             else input_fingerprints
         ),
         "input_delta_count": len(input_items) if delta_mode else 0,
-        "instructions_fingerprint": _payload_fingerprint_or_none(
+        "instructions_fingerprint": payload_fingerprint_or_none(
             payload.get("instructions"),
         ),
         "tool_count": len(tools),
         "tool_fingerprints": tuple(
             openai_provider_payload_fingerprint(tool) for tool in tools
         ),
-        "tool_types": tuple(_payload_item_type(item) for item in tools[:80]),
+        "tool_types": tuple(payload_item_type(item) for item in tools[:80]),
         "has_previous_response_id": has_previous_response_id,
         "previous_response_id": (
             str(payload.get("previous_response_id"))
@@ -114,15 +120,15 @@ def openai_provider_request_preview(
             "prompt_cache_key": payload.get("prompt_cache_key"),
             "stream": payload.get("stream"),
             "store": payload.get("store"),
-            "reasoning": _safe_preview_value(payload.get("reasoning")),
-            "text": _safe_preview_value(payload.get("text")),
-            "include": _safe_preview_value(payload.get("include")),
+            "reasoning": safe_preview_value(payload.get("reasoning")),
+            "text": safe_preview_value(payload.get("text")),
+            "include": safe_preview_value(payload.get("include")),
         },
         **provider_runtime_preview(
             runtime_route=runtime_route,
             runtime_policy=runtime_policy,
         ),
-        "payload_preview": _safe_preview_value(payload),
+        "payload_preview": safe_preview_value(payload),
         **provider_input_preview(
             runtime_context=runtime_context,
             request_metadata=request_metadata,
@@ -212,15 +218,15 @@ def provider_wire_request_preview(
                 if isinstance(payload.get("generationConfig"), dict)
                 else None
             ),
-            "response_format": _safe_preview_value(payload.get("response_format")),
-            "generationConfig": _safe_preview_value(payload.get("generationConfig")),
-            "toolConfig": _safe_preview_value(payload.get("toolConfig")),
+            "response_format": safe_preview_value(payload.get("response_format")),
+            "generationConfig": safe_preview_value(payload.get("generationConfig")),
+            "toolConfig": safe_preview_value(payload.get("toolConfig")),
         },
         **provider_runtime_preview(
             runtime_route=runtime_route,
             runtime_policy=runtime_policy,
         ),
-        "payload_preview": _safe_preview_value(payload),
+        "payload_preview": safe_preview_value(payload),
         **provider_input_preview(
             runtime_context=runtime_context,
             request_metadata=request_metadata,
@@ -235,9 +241,9 @@ def provider_runtime_preview(
 ) -> dict[str, object]:
     preview: dict[str, object] = {}
     if isinstance(runtime_route, dict) and runtime_route:
-        preview["runtime_route"] = _safe_preview_value(runtime_route)
+        preview["runtime_route"] = safe_preview_value(runtime_route)
     if isinstance(runtime_policy, dict) and runtime_policy:
-        preview["runtime_policy"] = _safe_preview_value(runtime_policy)
+        preview["runtime_policy"] = safe_preview_value(runtime_policy)
     return preview
 
 
@@ -325,353 +331,3 @@ def provider_input_preview(
     if runtime_context:
         preview["runtime_context_source"] = "adapter_request"
     return preview
-
-
-def provider_input_preview_from_request_metadata(
-    request_metadata: dict[str, Any] | None,
-) -> dict[str, object]:
-    if not isinstance(request_metadata, dict):
-        return {}
-    request_render_snapshot = request_metadata.get("request_render_snapshot")
-    tool_surface = request_metadata.get("tool_surface")
-    preview: dict[str, object] = {}
-    if isinstance(request_render_snapshot, dict):
-        preview_request_render_snapshot = request_render_snapshot_preview_payload(
-            request_render_snapshot,
-        )
-        request_render_snapshot_id = _optional_preview_text(
-            request_render_snapshot.get("snapshot_id"),
-        )
-        if request_render_snapshot_id is not None:
-            preview["request_render_snapshot_id"] = request_render_snapshot_id
-        context_schema = _optional_preview_text(
-            request_render_snapshot.get("tree_schema_version"),
-        )
-        if context_schema is not None:
-            preview["request_render_snapshot_schema_version"] = context_schema
-        included_node_ids = request_render_snapshot.get("included_node_ids")
-        if isinstance(included_node_ids, list | tuple):
-            preview["request_render_snapshot_included_node_count"] = len(
-                included_node_ids,
-            )
-        preview["request_render_snapshot_fingerprint"] = _stable_payload_fingerprint(
-            preview_request_render_snapshot,
-        )
-    if isinstance(tool_surface, dict):
-        tool_surface_id = _optional_preview_text(tool_surface.get("id"))
-        if tool_surface_id is not None:
-            preview["tool_surface_id"] = tool_surface_id
-        functions = tool_surface.get("functions")
-        if isinstance(functions, list | tuple):
-            preview["tool_surface_function_count"] = len(functions)
-        mirrored_schema_names = tool_surface.get("mirrored_schema_names")
-        if isinstance(mirrored_schema_names, list | tuple):
-            preview["tool_surface_mirrored_schema_count"] = len(mirrored_schema_names)
-        preview["tool_surface_fingerprint"] = _stable_payload_fingerprint(tool_surface)
-    for key in (
-        "request_context_source",
-        "context_slice_id",
-        "context_slice_item_count",
-        "context_slice_included_node_count",
-        "context_slice_omitted_node_count",
-        "context_slice_active_tool_count",
-        "context_slice_projected_input_item_count",
-        "context_slice_archived_ref_count",
-        "context_slice_redacted_ref_count",
-        "context_slice_unresolved_ref_count",
-        "context_slice_loss",
-        "request_render_snapshot_id",
-        "tool_surface_snapshot_id",
-        "tool_surface_function_count",
-        "tool_surface_mirrored_schema_count",
-    ):
-        value = request_metadata.get(key)
-        if key not in preview and value not in (None, "", {}, []):
-            preview[key] = value
-    return preview
-
-
-def provider_tool_render_report(
-    *,
-    payload: dict[str, Any],
-    request_metadata: dict[str, Any] | None,
-) -> dict[str, object]:
-    provider_visible_tool_names = _provider_visible_tool_names(payload.get("tools"))
-    provider_count = len(provider_visible_tool_names)
-    source_count = _source_tool_count_from_request_metadata(request_metadata)
-    if source_count is None:
-        source_count = provider_count
-    provider_tool_mapping = _provider_tool_surface_mapping(
-        provider_visible_tool_names,
-        request_metadata=request_metadata,
-    )
-    return {
-        "source_tool_schema_count": source_count,
-        "provider_visible_tool_count": provider_count,
-        "provider_visible_tool_names": tuple(provider_visible_tool_names),
-        "dropped_tool_schema_count": max(source_count - provider_count, 0),
-        "provider_tool_mapping": provider_tool_mapping,
-    }
-
-
-def provider_tool_protocol_render_report(
-    *,
-    request_metadata: dict[str, Any] | None,
-) -> dict[str, object]:
-    if not isinstance(request_metadata, dict):
-        return _empty_tool_protocol_render_report()
-    payload = request_metadata.get("runtime_input_filter")
-    if not isinstance(payload, dict):
-        return _empty_tool_protocol_render_report()
-    dropped_orphan_function_call_count = _int_preview_value(
-        payload.get("dropped_orphan_function_call_count"),
-    )
-    return {
-        "schema_version": "2026-06-19.runtime_input_filter.v1",
-        "source_had_protocol_breaks": False,
-        "replay_has_protocol_breaks": False,
-        "replay_orphan_tool_output_count": _int_preview_value(
-            payload.get("replay_orphan_tool_output_count"),
-        ),
-        "replay_missing_tool_output_count": _int_preview_value(
-            payload.get("replay_missing_tool_output_count"),
-        ),
-        "replay_duplicate_tool_call_id_count": _int_preview_value(
-            payload.get("replay_duplicate_tool_call_id_count"),
-        ),
-        "replay_duplicate_tool_output_id_count": _int_preview_value(
-            payload.get("replay_duplicate_tool_output_id_count"),
-        ),
-        "dropped_orphan_tool_output_count": 0,
-        "dropped_missing_tool_output_count": dropped_orphan_function_call_count,
-        "dropped_duplicate_tool_call_id_count": 0,
-        "dropped_duplicate_tool_output_id_count": _int_preview_value(
-            payload.get("dropped_duplicate_tool_output_id_count"),
-        ),
-    }
-
-
-def openai_response_input_fingerprints(
-    payloads: list[dict[str, Any]],
-) -> tuple[str, ...]:
-    return tuple(openai_provider_payload_fingerprint(payload) for payload in payloads)
-
-
-def openai_provider_payload_fingerprint(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _empty_tool_protocol_render_report() -> dict[str, object]:
-    return {
-        "schema_version": None,
-        "source_had_protocol_breaks": False,
-        "replay_has_protocol_breaks": False,
-        "replay_orphan_tool_output_count": 0,
-        "replay_missing_tool_output_count": 0,
-        "replay_duplicate_tool_call_id_count": 0,
-        "replay_duplicate_tool_output_id_count": 0,
-        "dropped_orphan_tool_output_count": 0,
-        "dropped_missing_tool_output_count": 0,
-        "dropped_duplicate_tool_call_id_count": 0,
-        "dropped_duplicate_tool_output_id_count": 0,
-    }
-
-
-def _int_preview_value(value: object) -> int:
-    return value if isinstance(value, int) else 0
-
-
-def _source_tool_count_from_request_metadata(
-    request_metadata: dict[str, Any] | None,
-) -> int | None:
-    if not isinstance(request_metadata, dict):
-        return None
-    tool_surface = request_metadata.get("tool_surface")
-    if isinstance(tool_surface, dict):
-        functions = tool_surface.get("functions")
-        if isinstance(functions, list | tuple):
-            return len(functions)
-        mirrored_schema_names = tool_surface.get("mirrored_schema_names")
-        if isinstance(mirrored_schema_names, list | tuple):
-            return len(mirrored_schema_names)
-    value = request_metadata.get("tool_surface_function_count")
-    if isinstance(value, int):
-        return value
-    return None
-
-
-def _provider_tool_surface_mapping(
-    provider_visible_tool_names: list[str],
-    *,
-    request_metadata: dict[str, Any] | None,
-) -> list[dict[str, object]]:
-    functions = _tool_surface_functions_from_request_metadata(request_metadata)
-    if not provider_visible_tool_names or not functions:
-        return []
-    function_by_provider_name: dict[str, dict[str, object]] = {}
-    for function in functions:
-        for name in _provider_name_candidates_for_tool_surface_function(function):
-            function_by_provider_name.setdefault(name, function)
-    rows: list[dict[str, object]] = []
-    for provider_name in provider_visible_tool_names:
-        function = function_by_provider_name.get(provider_name)
-        if function is None:
-            rows.append(
-                {
-                    "provider_name": provider_name,
-                    "trace_status": "provider_tool_unattributed",
-                },
-            )
-            continue
-        row: dict[str, object] = {
-            "provider_name": provider_name,
-            "runtime_tool_name": str(function.get("name") or ""),
-            "tool_id": str(function.get("tool_id") or ""),
-            "trace_status": "runtime_tool_surface",
-        }
-        for key in ("source_id", "group_key", "source", "node_id", "tool_ref_id"):
-            value = _tool_surface_function_metadata_value(function, key)
-            if value is not None:
-                row[key] = value
-        rows.append(
-            {
-                key: value
-                for key, value in row.items()
-                if value not in (None, "", {}, [])
-            },
-        )
-    return rows
-
-
-def _tool_surface_functions_from_request_metadata(
-    request_metadata: dict[str, Any] | None,
-) -> tuple[dict[str, object], ...]:
-    if not isinstance(request_metadata, dict):
-        return ()
-    tool_surface = request_metadata.get("tool_surface")
-    if not isinstance(tool_surface, dict):
-        return ()
-    functions = tool_surface.get("functions")
-    if not isinstance(functions, (list, tuple)):
-        return ()
-    return tuple(dict(item) for item in functions if isinstance(item, dict))
-
-
-def _provider_name_candidates_for_tool_surface_function(
-    function: dict[str, object],
-) -> tuple[str, ...]:
-    raw_name = _optional_preview_text(function.get("name"))
-    if raw_name is None:
-        return ()
-    names = [raw_name]
-    normalized = normalize_openai_tool_name(raw_name)
-    if normalized not in names:
-        names.append(normalized)
-    return tuple(names)
-
-
-def _tool_surface_function_metadata_value(
-    function: dict[str, object],
-    key: str,
-) -> str | None:
-    value = _optional_preview_text(function.get(key))
-    if value is not None:
-        return value
-    metadata = function.get("metadata")
-    if isinstance(metadata, dict):
-        return _optional_preview_text(metadata.get(key))
-    return None
-
-
-def _provider_visible_tool_names(tools: object) -> list[str]:
-    if not isinstance(tools, list | tuple):
-        return []
-    names: list[str] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        direct_name = tool.get("name")
-        if direct_name not in (None, ""):
-            names.append(str(direct_name))
-            continue
-        function_payload = tool.get("function")
-        if isinstance(function_payload, dict) and function_payload.get("name") not in (
-            None,
-            "",
-        ):
-            names.append(str(function_payload["name"]))
-            continue
-        declarations = tool.get("functionDeclarations")
-        if isinstance(declarations, list | tuple):
-            for declaration in declarations:
-                if isinstance(declaration, dict) and declaration.get("name") not in (
-                    None,
-                    "",
-                ):
-                    names.append(str(declaration["name"]))
-    return names
-
-
-def _stable_payload_fingerprint(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-def _optional_preview_text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _payload_item_type(item: object) -> str:
-    if isinstance(item, dict):
-        item_type = item.get("type")
-        if item_type is not None:
-            return str(item_type)
-        role = item.get("role")
-        if role is not None:
-            return str(role)
-    return type(item).__name__
-
-
-def _safe_preview_value(value: object, *, depth: int = 0) -> object:
-    if depth >= 5:
-        return _truncate_preview(value, 240)
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return _truncate_preview(value, 512)
-    if isinstance(value, dict):
-        return {
-            str(key): _safe_preview_value(item, depth=depth + 1)
-            for key, item in list(value.items())[:60]
-        }
-    if isinstance(value, (list, tuple)):
-        return [_safe_preview_value(item, depth=depth + 1) for item in value[:80]]
-    return _truncate_preview(value, 240)
-
-
-def _truncate_preview(value: object, limit: int) -> str:
-    text = str(value)
-    if len(text) <= limit:
-        return text
-    return text[: max(limit - 3, 0)] + "..."
-
-
-def _payload_fingerprint_or_none(payload: Any) -> str | None:
-    if payload is None:
-        return None
-    return openai_provider_payload_fingerprint(payload)

@@ -14,9 +14,11 @@ from crxzipple.modules.access.application.actions import (
 )
 from crxzipple.modules.access.application.oauth import AccessOAuthService
 from crxzipple.modules.access.application.setup import AccessSetupSessionService
+from crxzipple.modules.access.application.settings_config_views import (
+    AccessSettingsConfigProvider,
+)
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsActionAdapter,
-    AccessSettingsConfigProvider,
 )
 from crxzipple.modules.access.interfaces.inventory import collect_access_inventory
 from crxzipple.modules.access.interfaces.presenters import (

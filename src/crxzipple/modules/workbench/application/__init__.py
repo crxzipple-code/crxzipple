@@ -5,7 +5,13 @@ from crxzipple.modules.workbench.application.entity_details import (
     session_item_detail,
     tool_run_detail,
 )
+from crxzipple.modules.workbench.application.projection_diagnostics import (
+    WorkbenchOwnerFactSource,
+)
 from crxzipple.modules.workbench.application.read_models import (
+    WorkbenchReadModelProvider,
+)
+from crxzipple.modules.workbench.application.view_models import (
     ApprovalRequestDetail,
     ArtifactPreview,
     RunMetrics,
@@ -22,7 +28,7 @@ from crxzipple.modules.workbench.application.read_models import (
     WorkbenchKeyValueItem,
     WorkbenchKeyValueSection,
     WorkbenchLinkedEntity,
-    WorkbenchReadModelProvider,
+    WorkbenchProjectionDiagnostics,
     WorkbenchRunView,
     WorkbenchTimelineItem,
     WorkbenchThreadSummary,
@@ -50,6 +56,8 @@ __all__ = [
     "WorkbenchKeyValueItem",
     "WorkbenchKeyValueSection",
     "WorkbenchLinkedEntity",
+    "WorkbenchOwnerFactSource",
+    "WorkbenchProjectionDiagnostics",
     "WorkbenchReadModelProvider",
     "WorkbenchRunView",
     "WorkbenchTimelineItem",

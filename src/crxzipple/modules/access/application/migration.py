@@ -1,13 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
-import re
-from typing import Any, Mapping
+from typing import Mapping
 
-from crxzipple.modules.access.application.inventory import (
-    credential_binding_for_requirement,
+from crxzipple.modules.access.application.migration_requirement_payloads import (
+    channel_metadata_requirements as _channel_metadata_requirements,
+    credential_binding_for_migration_requirement as _credential_binding_for_migration_requirement,
+    credential_source as _credential_source,
+    digest as _digest,
+    masked_requirement_sets as _masked_requirement_sets,
+    normalize_requirement_sets as _normalize_requirement_sets,
+    redaction_policy as _redaction_policy,
+    requirement_display as _requirement_display,
+    requirement_sets_from_tool as _requirement_sets_from_tool,
+    slugify as _slugify,
+)
+from crxzipple.modules.access.application.inventory_redaction import (
     sanitize_access_metadata,
+)
+from crxzipple.modules.access.application.migration_value_helpers import (
+    bool_value as _bool_value,
+    dedupe_legacy_items as _dedupe_legacy_items,
+    get_value as _get_value,
+    legacy_list as _legacy_list,
+    mapping_value as _mapping_value,
+    optional_string as _optional_string,
+    safe_public_string as _safe_public_string,
+    string_value as _string_value,
 )
 from crxzipple.modules.access.application.read_models import (
     AccessConsumerBindingReadModel,
@@ -16,24 +35,7 @@ from crxzipple.modules.access.application.repositories import (
     AccessAssetRecord,
     AccessCredentialBindingRecord,
 )
-from crxzipple.modules.access.application.services import (
-    canonical_credential_binding,
-    is_credential_binding,
-)
 from crxzipple.modules.access.domain.resources import AccessResourceKind
-
-
-JsonObject = dict[str, Any]
-_SENSITIVE_CHANNEL_KEYS = (
-    "api_key",
-    "auth",
-    "credential",
-    "password",
-    "secret",
-    "signing",
-    "token",
-    "webhook",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,246 +461,3 @@ class _AccessMigrationPlanBuilder:
             created_at=existing.created_at,
             updated_at=existing.updated_at,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _CredentialSource:
-    identity: str
-    binding_kind: str
-    source_kind: str
-    source_ref: str
-    canonical_ref: str
-    masked_preview: str
-    display_name: str
-
-
-def _credential_source(binding: str) -> _CredentialSource:
-    normalized = binding.strip()
-    if is_credential_binding(normalized):
-        canonical = canonical_credential_binding(normalized)
-        if canonical.startswith("env:"):
-            env_name = canonical.removeprefix("env:").strip()
-            identity = f"env:{_digest(env_name)}"
-            return _CredentialSource(
-                identity=identity,
-                binding_kind="credential_binding",
-                source_kind="env",
-                source_ref=env_name,
-                canonical_ref=canonical,
-                masked_preview=f"env:{env_name}",
-                display_name=f"Environment credential {env_name}",
-            )
-        if canonical.startswith("file:"):
-            path_ref = canonical.removeprefix("file:").strip()
-            identity = f"file:{_digest(path_ref)}"
-            return _CredentialSource(
-                identity=identity,
-                binding_kind="credential_binding",
-                source_kind="file",
-                source_ref=path_ref,
-                canonical_ref=canonical,
-                masked_preview="file:***",
-                display_name="File credential",
-            )
-    literal_hash = _digest(normalized, length=16)
-    return _CredentialSource(
-        identity=f"literal:{literal_hash}",
-        binding_kind="literal_ref",
-        source_kind="literal",
-        source_ref=f"sha256:{literal_hash}",
-        canonical_ref=f"literal:sha256:{literal_hash}",
-        masked_preview="literal:***",
-        display_name="Inline literal credential",
-    )
-
-
-def _channel_metadata_requirements(metadata: Mapping[str, object]) -> tuple[str, ...]:
-    requirements: list[str] = []
-    raw_requirements = metadata.get("access_requirements")
-    if isinstance(raw_requirements, (list, tuple)):
-        for item in raw_requirements:
-            _append_requirement(requirements, item)
-    for key, value in metadata.items():
-        if not isinstance(key, str):
-            continue
-        normalized_key = key.strip()
-        if normalized_key == "access_requirements":
-            continue
-        if normalized_key.endswith("_binding"):
-            _append_requirement(requirements, value)
-            continue
-        if not _is_sensitive_channel_key(normalized_key):
-            continue
-        if isinstance(value, str) and value.strip():
-            if is_credential_binding(value):
-                _append_requirement(requirements, value)
-            else:
-                _append_requirement(requirements, _literal_ref(value))
-    return tuple(requirements)
-
-
-def _requirement_sets_from_tool(tool: object) -> tuple[tuple[str, ...], ...]:
-    raw_sets = _get_value(tool, "access_requirement_sets", ()) or ()
-    sets = _normalize_requirement_sets(
-        tuple(
-            tuple(item) if isinstance(item, (list, tuple)) else (str(item),)
-            for item in raw_sets
-        ),
-    )
-    if sets:
-        return sets
-    raw_requirements = _get_value(tool, "access_requirements", ()) or ()
-    return _normalize_requirement_sets((tuple(raw_requirements),))
-
-
-def _normalize_requirement_sets(
-    requirement_sets: tuple[tuple[str, ...], ...],
-) -> tuple[tuple[str, ...], ...]:
-    resolved: list[tuple[str, ...]] = []
-    for requirement_set in requirement_sets:
-        normalized = tuple(
-            dict.fromkeys(
-                item.strip()
-                for item in requirement_set
-                if isinstance(item, str) and item.strip()
-            ),
-        )
-        if normalized and normalized not in resolved:
-            resolved.append(normalized)
-    return tuple(resolved)
-
-
-def _masked_requirement_sets(
-    requirement_sets: tuple[tuple[str, ...], ...],
-) -> tuple[tuple[str, ...], ...]:
-    return tuple(
-        tuple(_masked_requirement(item) for item in requirement_set)
-        for requirement_set in requirement_sets
-    )
-
-
-def _masked_requirement(requirement: str) -> str:
-    binding = _credential_binding_for_migration_requirement(requirement)
-    if binding is None:
-        return requirement.strip()
-    if is_credential_binding(binding):
-        normalized = requirement.strip()
-        if normalized == binding.strip():
-            return canonical_credential_binding(binding)
-        return normalized
-    return "literal:***"
-
-
-def _credential_binding_for_migration_requirement(requirement: str) -> str | None:
-    normalized = requirement.strip()
-    if normalized.startswith("literal:sha256:"):
-        return normalized
-    return credential_binding_for_requirement(normalized)
-
-
-def _literal_ref(value: str) -> str:
-    return f"literal:sha256:{_digest(value.strip(), length=16)}"
-
-
-def _append_requirement(resolved: list[str], value: object) -> None:
-    if not isinstance(value, str):
-        return
-    normalized = value.strip()
-    if normalized and normalized not in resolved:
-        resolved.append(normalized)
-
-
-def _get_value(obj: object, name: str, default: object = None) -> object:
-    if obj is None:
-        return default
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _string_value(obj: object, name: str) -> str:
-    value = _get_value(obj, name)
-    normalized = _optional_string(value)
-    return normalized or ""
-
-
-def _optional_string(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
-def _safe_public_string(value: object) -> str | None:
-    if value is None:
-        return None
-    return str(value).strip() or None
-
-
-def _mapping_value(value: object) -> Mapping[str, object]:
-    if isinstance(value, Mapping):
-        return value
-    return {}
-
-
-def _bool_value(obj: object, name: str, *, default: bool) -> bool:
-    value = _get_value(obj, name, default)
-    return bool(value)
-
-
-def _legacy_list(service: object, method_names: tuple[str, ...]) -> tuple[object, ...]:
-    if service is None:
-        return ()
-    for method_name in method_names:
-        method = getattr(service, method_name, None)
-        if callable(method):
-            try:
-                return tuple(method())
-            except TypeError:
-                continue
-    return ()
-
-
-def _dedupe_legacy_items(
-    items: tuple[object, ...],
-    *,
-    identity_name: str,
-) -> tuple[object, ...]:
-    resolved: dict[str, object] = {}
-    anonymous: list[object] = []
-    for item in items:
-        identity = _optional_string(_get_value(item, identity_name))
-        if not identity:
-            anonymous.append(item)
-            continue
-        resolved.setdefault(identity, item)
-    return (*tuple(resolved.values()), *tuple(anonymous))
-
-
-def _is_sensitive_channel_key(key: str) -> bool:
-    normalized = key.lower()
-    return any(part in normalized for part in _SENSITIVE_CHANNEL_KEYS)
-
-
-def _requirement_display(requirement_sets: tuple[tuple[str, ...], ...]) -> str:
-    labels = [
-        " + ".join(_masked_requirement(item) for item in requirement_set)
-        for requirement_set in requirement_sets
-    ]
-    return " / ".join(label for label in labels if label) or "Access requirement"
-
-
-def _slugify(value: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", value.strip())
-    return normalized.strip("-") or "default"
-
-
-def _digest(value: str, *, length: int = 12) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
-
-
-def _redaction_policy() -> JsonObject:
-    return {
-        "secret_material_allowed": False,
-        "sensitive_metadata_keys": ("api_key", "password", "secret", "token", "value"),
-    }

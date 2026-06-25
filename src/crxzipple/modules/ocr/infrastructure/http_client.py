@@ -12,6 +12,20 @@ from crxzipple.modules.ocr.domain import (
 from crxzipple.shared.infrastructure.http import request_url
 
 
+def _json_payload(response, *, invalid_message: str) -> object:  # noqa: ANN001
+    try:
+        return response.json()
+    except Exception as exc:  # noqa: BLE001
+        raise OcrExecutionError(invalid_message) from exc
+
+
+def _optional_json_payload(response) -> object:  # noqa: ANN001
+    try:
+        return response.json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _parse_blocks_payload(value: object) -> tuple[OcrTextBlock, ...]:
     raw_blocks = value
     blocks: list[OcrTextBlock] = []
@@ -108,7 +122,10 @@ class OcrHostClient:
             response.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             raise OcrExecutionError(f"OCR host healthcheck failed: {exc}") from exc
-        payload = response.json()
+        payload = _json_payload(
+            response,
+            invalid_message="OCR host returned an invalid health payload.",
+        )
         if not isinstance(payload, dict):
             raise OcrExecutionError("OCR host returned an invalid health payload.")
         return dict(payload)
@@ -138,7 +155,14 @@ class OcrHostClient:
             )
         except Exception as exc:  # noqa: BLE001
             raise OcrExecutionError(f"OCR host request failed: {exc}") from exc
-        payload = response.json()
+        payload = (
+            _optional_json_payload(response)
+            if response.status_code >= 400
+            else _json_payload(
+                response,
+                invalid_message="OCR host returned an invalid OCR payload.",
+            )
+        )
         if response.status_code >= 400:
             detail = (
                 payload.get("detail")

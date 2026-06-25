@@ -39,6 +39,7 @@ class ChannelsCliTestCase(unittest.TestCase):
             "APP_EVENTS_BACKEND": "file",
             "APP_EVENTS_STATE_DIR": str(Path(self.harness._tempdir.name) / "events"),
             "APP_ALLOW_SQLITE_RUNTIME_FALLBACK": "1",
+            "APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK": "1",
         }
 
     def tearDown(self) -> None:

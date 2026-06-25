@@ -59,6 +59,34 @@ class ToolExecutionTestCase(ToolTestCaseBase):
             ),
         )
 
+    def test_list_tool_runs_applies_latest_run_limit(self) -> None:
+        first = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="echo",
+                    arguments={"message": "first"},
+                    mode=ToolMode.BACKGROUND,
+                ),
+            ),
+        )
+        second = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="echo",
+                    arguments={"message": "second"},
+                    mode=ToolMode.BACKGROUND,
+                ),
+            ),
+        )
+
+        limited = self.tool_service.list_tool_runs(tool_id="echo", limit=1)
+
+        self.assertEqual(len(limited), 1)
+        self.assertEqual(limited[0].id, second.id)
+        self.assertNotEqual(limited[0].id, first.id)
+        with self.assertRaises(ToolValidationError):
+            self.tool_service.list_tool_runs(limit=0)
+
     def test_remote_runtime_limits_concurrency_by_provider_key(self) -> None:
         registry = ToolRuntimeRegistry()
         metrics = RuntimeMetricsRegistry()

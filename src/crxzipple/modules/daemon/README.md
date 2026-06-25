@@ -25,6 +25,26 @@ processes and endpoints that those business flows depend on.
 - `DaemonLease`
   - one optional ownership lease against an instance
 
+## State Scope
+
+Daemon state is host/workspace-scoped supervisor state. It records which long-running
+services are defined for this local runtime, which concrete processes/endpoints are
+currently known on this host, and which runtime owner currently holds a lease.
+
+It is not user profile state, not session history, and not business-module truth.
+Business facts remain with their owner modules:
+
+- orchestration owns runs and execution chains
+- tool owns tool runs and worker assignments
+- browser owns profile/page/runtime facts
+- process owns process sessions and output
+- operations owns projected observability read models
+
+The default local state root comes from `APP_DAEMON_STATE_DIR` or the configured
+runtime state directory. For multi-user or multi-host deployment, isolate daemon
+state per host/workspace and let Operations aggregate health from owner services,
+events, and projections instead of sharing daemon store files across users.
+
 ## Examples
 
 - worker daemons
@@ -119,3 +139,7 @@ These are available from both:
 
 - daemon CLI
 - daemon HTTP API
+
+Workbench and Operations UI should prefer `/operations/daemon` projections for
+health and fleet status. Direct `/daemon/*` APIs are operator/control surfaces,
+not the primary user-facing runtime truth.

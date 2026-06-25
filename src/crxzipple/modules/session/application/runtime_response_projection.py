@@ -10,7 +10,7 @@ from crxzipple.modules.llm.domain import (
     LlmResponseItemKind,
     ToolCallIntent,
 )
-from crxzipple.modules.session.application.services import AppendSessionItemInput
+from crxzipple.modules.session.application.item_append import AppendSessionItemInput
 from crxzipple.modules.session.domain import (
     SessionItemKind,
     SessionItemPhase,

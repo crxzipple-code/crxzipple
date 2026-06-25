@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from crxzipple.modules.mobile.domain import (
     MobileActionCommand,
@@ -21,6 +22,7 @@ from .ports import (
     MobileCapabilitiesResolver,
     MobileControlCommandAssembler,
     MobileActionCommandAssembler,
+    MobileDeviceLeaseStore,
     MobileEngineRegistry,
     MobileExecutionCoordinator,
     MobileExecutionPlanner,
@@ -259,6 +261,8 @@ class MobileExecutionCoordinatorService(MobileExecutionCoordinator):
     runtime_state_store: MobileRuntimeStateStore
     execution_planner: MobileExecutionPlanner
     engine_registry: MobileEngineRegistry
+    device_lease_store: MobileDeviceLeaseStore | None = None
+    lease_ttl_seconds: int = 300
 
     def execute(
         self,
@@ -283,38 +287,52 @@ class MobileExecutionCoordinatorService(MobileExecutionCoordinator):
             system=system,
             device_name=command.device_name,
         )
-        capabilities = self.capabilities_resolver.resolve(device=device)
-        runtime_state = self.runtime_state_store.get(device_name=device.name)
-        plan = self.execution_planner.plan(
-            system=system,
-            device=device,
-            capabilities=capabilities,
-            command=command,
-        )
-        binding = self.engine_registry.resolve(
-            control_family=capabilities.control_family,
-            action_family=capabilities.action_family,
-        )
-        active_runtime_state = runtime_state
+        lease_id: str | None = None
         try:
-            if isinstance(command, MobileControlCommand):
-                result, updated_state = binding.control_engine.execute(
-                    plan=plan,
-                    runtime_state=runtime_state,
+            if self.device_lease_store is not None:
+                lease = self.device_lease_store.acquire(
+                    device_name=device.name,
+                    owner_kind="mobile-execution",
+                    owner_id=uuid4().hex,
+                    ttl_seconds=max(int(self.lease_ttl_seconds), 1),
                 )
-            else:
-                active_runtime_state = runtime_state or MobileDeviceRuntimeState(device_name=device.name)
-                result, updated_state = binding.action_engine.execute(
-                    plan=plan,
-                    runtime_state=active_runtime_state,
-                )
-        except MobileExecutionError:
-            if active_runtime_state is not None:
-                self.runtime_state_store.save(active_runtime_state)
-            raise
-        if updated_state is None:
-            if device is not None:
+                lease_id = lease.id
+            capabilities = self.capabilities_resolver.resolve(device=device)
+            runtime_state = self.runtime_state_store.get(device_name=device.name)
+            plan = self.execution_planner.plan(
+                system=system,
+                device=device,
+                capabilities=capabilities,
+                command=command,
+            )
+            binding = self.engine_registry.resolve(
+                control_family=capabilities.control_family,
+                action_family=capabilities.action_family,
+            )
+            active_runtime_state = runtime_state
+            try:
+                if isinstance(command, MobileControlCommand):
+                    result, updated_state = binding.control_engine.execute(
+                        plan=plan,
+                        runtime_state=runtime_state,
+                    )
+                else:
+                    active_runtime_state = runtime_state or MobileDeviceRuntimeState(
+                        device_name=device.name,
+                    )
+                    result, updated_state = binding.action_engine.execute(
+                        plan=plan,
+                        runtime_state=active_runtime_state,
+                    )
+            except MobileExecutionError:
+                if active_runtime_state is not None:
+                    self.runtime_state_store.save(active_runtime_state)
+                raise
+            if updated_state is None:
                 self.runtime_state_store.delete(device_name=device.name)
-        else:
-            self.runtime_state_store.save(updated_state)
-        return result
+            else:
+                self.runtime_state_store.save(updated_state)
+            return result
+        finally:
+            if lease_id is not None and self.device_lease_store is not None:
+                self.device_lease_store.release(lease_id=lease_id, reason="execution-finished")

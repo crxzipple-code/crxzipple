@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmCapability,
     LlmMessage,
 )

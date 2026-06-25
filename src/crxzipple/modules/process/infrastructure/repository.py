@@ -96,6 +96,32 @@ class FilesystemProcessSessionRepository:
     def read_stderr(self, process_id: str) -> str:
         return self._read_text_file(self._stderr_path(process_id))
 
+    def read_stdout_window(
+        self,
+        process_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[str, int]:
+        return self._read_text_window(
+            self._stdout_path(process_id),
+            offset=offset,
+            limit=limit,
+        )
+
+    def read_stderr_window(
+        self,
+        process_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[str, int]:
+        return self._read_text_window(
+            self._stderr_path(process_id),
+            offset=offset,
+            limit=limit,
+        )
+
     def read_exit_code(self, process_id: str) -> int | None:
         path = self._exit_code_path(process_id)
         if not path.exists():
@@ -139,13 +165,13 @@ class FilesystemProcessSessionRepository:
         return refreshed
 
     def _session_dir(self, process_id: str) -> Path:
+        _require_safe_process_id(process_id)
         return self._root_dir / process_id
 
     def _resolve_session_dir(self, process_id: str) -> Path:
+        _require_safe_process_id(process_id)
         local_dir = self._session_dir(process_id)
         if (local_dir / "session.json").exists():
-            return local_dir
-        if Path(process_id).name != process_id:
             return local_dir
         try:
             namespace_dirs = sorted(self._root_dir.parent.iterdir())
@@ -217,6 +243,30 @@ class FilesystemProcessSessionRepository:
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8", errors="replace")
+
+    @staticmethod
+    def _read_text_window(path: Path, *, offset: int, limit: int) -> tuple[str, int]:
+        if not path.exists():
+            return "", max(int(offset), 0)
+        normalized_offset = max(int(offset), 0)
+        normalized_limit = max(int(limit), 1)
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(normalized_offset)
+            text = handle.read(normalized_limit)
+            next_offset = handle.tell()
+        return text, next_offset
+
+
+def _require_safe_process_id(process_id: str) -> None:
+    normalized = process_id.strip()
+    if (
+        not normalized
+        or normalized != process_id
+        or normalized in {".", ".."}
+        or Path(normalized).name != normalized
+        or "\\" in normalized
+    ):
+        raise ProcessNotFoundError(f"Process '{process_id}' was not found.")
 
 
 def _parse_datetime(value: object) -> datetime | None:

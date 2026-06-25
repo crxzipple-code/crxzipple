@@ -33,6 +33,24 @@ class ProcessSessionRepositoryPort(Protocol):
     def read_stderr(self, process_id: str) -> str:
         ...
 
+    def read_stdout_window(
+        self,
+        process_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[str, int]:
+        ...
+
+    def read_stderr_window(
+        self,
+        process_id: str,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[str, int]:
+        ...
+
     def stdout_path(self, process_id: str) -> Path:
         ...
 

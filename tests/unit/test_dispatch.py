@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 import unittest
 
 from crxzipple.modules.dispatch.application import (
+    CancelDispatchTaskInput,
     CompleteDispatchTaskInput,
     CreateDispatchTaskInput,
     EnqueueDispatchTaskInput,
+    FailDispatchTaskInput,
     HeartbeatDispatchTaskInput,
     RequeueDispatchTaskInput,
     RecoverAbandonedDispatchTasksInput,
     WaitDispatchTaskInput,
 )
-from crxzipple.modules.dispatch.domain import DispatchPolicy, DispatchTaskStatus
+from crxzipple.modules.dispatch.domain import (
+    DispatchPolicy,
+    DispatchTaskStatus,
+    DispatchValidationError,
+)
 from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
@@ -323,3 +331,111 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0].id, tool_task.id)
         self.assertEqual(recovered[0].status, DispatchTaskStatus.QUEUED)
+
+    def test_sql_repository_concurrent_claims_do_not_duplicate_tasks(self) -> None:
+        task_ids = [f"dispatch-concurrent-{index}" for index in range(6)]
+        for index, task_id in enumerate(task_ids):
+            task = self.dispatch_service.create_task(
+                CreateDispatchTaskInput(
+                    task_id=task_id,
+                    owner_kind="concurrent_owner",
+                    owner_id=f"run-{index}",
+                    priority=index,
+                ),
+            )
+            self.dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=task.id))
+
+        worker_count = 12
+        barrier = Barrier(worker_count)
+
+        def claim(worker_index: int) -> str | None:
+            barrier.wait(timeout=10)
+            task = self.dispatch_service.claim_next_queued_task(
+                owner_kind="concurrent_owner",
+                worker_id=f"worker-{worker_index}",
+                claim_token=f"claim-{worker_index}",
+                lease_seconds=60,
+            )
+            return None if task is None else task.id
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            claimed_ids = list(executor.map(claim, range(worker_count)))
+
+        non_empty_claims = [task_id for task_id in claimed_ids if task_id is not None]
+        self.assertEqual(len(non_empty_claims), len(task_ids))
+        self.assertEqual(sorted(non_empty_claims), sorted(task_ids))
+        self.assertEqual(len(set(non_empty_claims)), len(non_empty_claims))
+
+        claimed_tasks = self.dispatch_service.list_tasks(
+            status=DispatchTaskStatus.CLAIMED,
+            owner_kind="concurrent_owner",
+        )
+        self.assertEqual(len(claimed_tasks), len(task_ids))
+        self.assertEqual(
+            sorted(task.claim_token for task in claimed_tasks if task.claim_token),
+            sorted(
+                claim_token
+                for claim_token in (
+                    f"claim-{index}" if task_id is not None else None
+                    for index, task_id in enumerate(claimed_ids)
+                )
+                if claim_token is not None
+            ),
+        )
+
+    def test_terminal_transitions_are_idempotent_and_cannot_be_overwritten(self) -> None:
+        task = self.dispatch_service.create_task(
+            CreateDispatchTaskInput(
+                task_id="dispatch-terminal",
+                owner_kind="terminal_owner",
+                owner_id="run-terminal",
+            ),
+        )
+        self.dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=task.id))
+        self.dispatch_service.claim_next_queued_task(
+            owner_kind="terminal_owner",
+            worker_id="worker-terminal",
+            claim_token="claim-terminal",
+        )
+        completed_at = datetime(2026, 6, 21, 10, 0, tzinfo=timezone.utc)
+        repeated_at = completed_at + timedelta(minutes=1)
+
+        completed = self.dispatch_service.complete_task(
+            CompleteDispatchTaskInput(task_id=task.id, now=completed_at),
+        )
+        repeated = self.dispatch_service.complete_task(
+            CompleteDispatchTaskInput(task_id=task.id, now=repeated_at),
+        )
+
+        self.assertEqual(completed.status, DispatchTaskStatus.COMPLETED)
+        self.assertEqual(repeated.status, DispatchTaskStatus.COMPLETED)
+        self.assertIsNotNone(completed.completed_at)
+        self.assertIsNotNone(repeated.completed_at)
+        assert completed.completed_at is not None
+        assert repeated.completed_at is not None
+        self.assertEqual(
+            repeated.completed_at.replace(tzinfo=None),
+            completed.completed_at.replace(tzinfo=None),
+        )
+        with self.assertRaisesRegex(
+            DispatchValidationError,
+            "Terminal dispatch tasks cannot be failed",
+        ):
+            self.dispatch_service.fail_task(
+                FailDispatchTaskInput(
+                    task_id=task.id,
+                    message="too late",
+                    now=repeated_at,
+                ),
+            )
+        with self.assertRaisesRegex(
+            DispatchValidationError,
+            "Terminal dispatch tasks cannot be cancelled",
+        ):
+            self.dispatch_service.cancel_task(
+                CancelDispatchTaskInput(
+                    task_id=task.id,
+                    reason="too late",
+                    now=repeated_at,
+                ),
+            )

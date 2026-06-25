@@ -45,6 +45,7 @@ class SessionItemModel(Base):
             "session_key",
             "session_id",
             "sequence_no",
+            unique=True,
         ),
         Index(
             "ix_session_items_source",
@@ -97,6 +98,7 @@ class SessionInstanceModel(Base):
             "ix_session_instances_session_sequence",
             "session_key",
             "sequence_no",
+            unique=True,
         ),
     )
 

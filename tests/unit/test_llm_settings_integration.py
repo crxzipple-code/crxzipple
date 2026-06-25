@@ -6,7 +6,7 @@ from crxzipple.modules.llm.application import (
     LlmApplicationService,
     RegisterLlmProfileInput,
 )
-from crxzipple.modules.llm.application.services import (
+from crxzipple.modules.llm.application.llm_profile_config import (
     llm_profile_from_config,
     register_llm_profile_input_from_config,
 )

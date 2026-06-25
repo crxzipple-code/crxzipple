@@ -528,7 +528,7 @@ class EventsModuleTestCase(unittest.TestCase):
         from crxzipple.modules.operations.application.event_contracts import (
             OPERATIONS_PROJECTION_INVALIDATED_EVENT,
         )
-        from crxzipple.modules.operations.application.runtime import (
+        from crxzipple.modules.operations.application.observer_event_names import (
             operations_observer_event_names,
         )
 
@@ -1141,6 +1141,45 @@ class EventsModuleTestCase(unittest.TestCase):
             self.assertEqual(
                 [record.envelope.payload["order"] for record in records],
                 [1, 2],
+            )
+        finally:
+            service.close()
+
+    def test_redis_events_backend_replays_after_cursor_in_publish_order(self) -> None:
+        backend = RedisEventsBackend(
+            client=FakeRedisClient(),
+            key_prefix="test:events",
+            block_ms=20,
+        )
+        service = EventsApplicationService(backend)
+
+        try:
+            service.publish(Event(topic="runtime.replay", payload={"order": 1}))
+            cursor = service.snapshot_event_topic("runtime.replay")
+            service.publish(Event(topic="runtime.replay", payload={"order": 2}))
+            service.publish(Event(topic="runtime.replay", payload={"order": 3}))
+
+            records = service.read_event_topic(
+                "runtime.replay",
+                after_cursor=cursor,
+                limit=10,
+            )
+
+            self.assertEqual([record.cursor for record in records], ["2-0", "3-0"])
+            self.assertEqual(
+                [record.envelope.payload["order"] for record in records],
+                [2, 3],
+            )
+
+            tail_records = service.read_event_topic(
+                "runtime.replay",
+                after_cursor=records[0].cursor,
+                limit=10,
+            )
+            self.assertEqual([record.cursor for record in tail_records], ["3-0"])
+            self.assertEqual(
+                [record.envelope.payload["order"] for record in tail_records],
+                [3],
             )
         finally:
             service.close()

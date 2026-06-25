@@ -14,6 +14,17 @@ Date: 2026-06-14
 
 因此，CRXZipple 不能把 Codex HTTP adapter 简单按 OpenAI Responses HTTP continuation 来实现。真正对齐 Codex 的路径是：新增 Codex WebSocket transport，并在 WebSocket `response.create` 消息中实现 incremental continuation。
 
+## 2026-06-23 当前运行口径纠偏
+
+本文件记录 Codex WebSocket continuation 的协议证据、底层 adapter/transport 能力和后续恢复方向；它不表示当前 orchestration 默认链路已经启用 Codex provider-native continuation。
+
+当前代码口径如下：
+
+- 底层 Codex renderer/transport 可以构造并测试 `response.create + previous_response_id + delta input`。
+- LLM/orchestration runtime gate 对 `openai_codex_responses` 仍返回空 continuation state；`profile_supports_provider_continuation(...)` 也显式拒绝 Codex WebSocket。
+- 因此真实 orchestration 链路中的 Codex 请求应显示 full clean input、`has_previous_response_id=false`、`input_delta_mode=false`。
+- 如需恢复 Codex WebSocket runtime delta，必须先提交单独变更请求，补齐 turn-scoped transport gate、fingerprint 校验、fallback 语义和 Operations 可观测验收。
+
 ## Codex 源码证据
 
 ### HTTP request 不含 `previous_response_id`
@@ -115,7 +126,7 @@ Unsupported parameter: previous_response_id
 
 ## 目标
 
-实现 Codex WebSocket continuation transport，使 CRXZipple 能按 Codex 源码一致的协议工作：
+实现 Codex WebSocket continuation transport 的底层能力，使 CRXZipple 将来能按 Codex 源码一致的协议工作：
 
 ```text
 首轮:
@@ -134,6 +145,8 @@ WebSocket response.create(full request, no previous_response_id)
 - Orchestration 只表达 normalized request、tool result、context delta 和 continuation intent。
 - Adapter 根据 profile capability 选择 HTTP full request 或 WebSocket incremental request。
 - Operations 记录 normalized request 和 provider actual request preview，明确 transport。
+
+当前默认 runtime 目标先冻结为：Codex request full clean replay 正确、无孤儿 tool output、Operations 可见 full replay / no previous response id；WebSocket delta 作为底层受测能力保留，不直接进入 orchestration 默认链路。
 
 ## 非目标
 
@@ -385,7 +398,18 @@ Responses/Codex WebSocket 下，工具结果映射为：
 
 ### 5.2 Timeline
 
-对于 Codex-like WebSocket continuation，应展示：
+当前 Codex runtime gate 关闭时，应展示：
+
+```text
+LLM request
+transport=websocket
+message=response.create
+continuation=full_replay
+previous_response_id=false
+input=full(...)
+```
+
+未来恢复 Codex-like WebSocket continuation 后，才应展示：
 
 ```text
 LLM request
@@ -502,21 +526,21 @@ reason=prefix_mismatch
 
 2026-06-14 进展：
 
-- Codex WebSocket continuation 已改为 fingerprint 驱动，而不是只按 `previous_response_id` 粗暴裁剪。
+- 底层 Codex WebSocket continuation renderer 已改为 fingerprint 驱动，而不是只按 `previous_response_id` 粗暴裁剪。
 - provider request preview 已记录 `input_item_fingerprints`、`input_baseline_fingerprints`、`instructions_fingerprint`、`tool_fingerprints`、`input_delta_mode`、`input_baseline_count`、`input_delta_count`。
-- Orchestration 会把上一轮 `input_baseline_fingerprints`、`instructions_fingerprint`、`tool_fingerprints` 保存到 `provider_continuation_state`，下一轮通过 `LlmProviderContinuation` 回传给 adapter。
-- 当 profile 默认参数或本轮 request option 解析出 `provider_transport=websocket`、存在 `previous_response_id`、存在上一轮 fingerprints，且当前 full input 以前一轮 fingerprints 为前缀时，发送 suffix input 并带上 `previous_response_id`。
-- 如果缺少 fingerprints、instructions mismatch、tool schema mismatch、prefix mismatch 或缺少 `previous_response_id`，则发送 full input 且不带 `previous_response_id`。
+- 当前 LLM/orchestration gate 对 Codex 不保存 provider-native continuation state，不会在下一轮通过 `LlmProviderContinuation` 回传 `previous_response_id`。
+- 当下层 renderer/transport 被直接传入 continuation、且存在 `provider_transport=websocket`、上一轮 response id、上一轮 fingerprints，并且当前 full input 以前一轮 fingerprints 为前缀时，才会发送 suffix input 并带上 `previous_response_id`。
+- 如果缺少 fingerprints、instructions mismatch、tool schema mismatch、prefix mismatch 或缺少 `previous_response_id`，底层 renderer/transport 会发送 full input 且不带 `previous_response_id`。
 
 ## Phase 4: Orchestration integration
 
 - [x] continuation state 增加 transport。
 - [x] continuation gate 改为 provider family + transport capability。
-- [x] Codex WebSocket profile 使用 WebSocket continuation。
+- [x] Codex WebSocket profile 当前不再通过 runtime gate 使用 provider-native continuation。
 - [x] Codex HTTP profile 使用 full request。
 - [x] continuation failure 自动 fallback full request。
 - [x] run metadata 记录 fallback reason。
-- [x] invoke 阶段复用 request envelope provider options 计算 continuation，避免二次计算丢失 `provider_transport=websocket`。
+- [x] invoke 阶段复用 request envelope provider options 构造 provider request；Codex continuation state 当前被 gate 清空。
 - [x] LLM profile 默认参数支持声明 `provider_transport`。
 - [x] Orchestration request policy 从 profile default params 下发 `provider_options.provider_transport`。
 
@@ -524,13 +548,13 @@ reason=prefix_mismatch
 
 - OpenAI Responses HTTP profile 继续允许 provider-native continuation。
 - Codex HTTP profile 不允许 provider-native continuation。
-- Codex WebSocket profile 只有在 `provider_transport=websocket` 且 profile capability 同时包含 `provider_native_continuation`、`provider_websocket_transport`、`provider_incremental_input` 时才允许 continuation。
+- Codex WebSocket profile 即使 `provider_transport=websocket` 且 profile capability 包含 `provider_native_continuation`、`provider_websocket_transport`、`provider_incremental_input`，当前 runtime gate 仍不允许 provider-native continuation；该冻结由 `provider_continuation.py` 回归测试保护。
 - Settings profile import 已支持 Codex WebSocket capability 自动补齐 `provider_native_continuation`。
 - `provider_transport` 已从 LLM profile default params / request overrides 进入 `LlmAdapterRequest.provider_transport`，同时由 adapter 过滤避免泄漏到 provider payload。
 - Codex WebSocket profile 可在 `default_params.provider_transport=websocket` 中声明默认 transport；orchestration 测试已移除 run metadata 临时 override，避免把 transport 选择做成单次任务私有配置。
-- Orchestration invoke 阶段已复用 `request_envelope.provider_options` 重新计算 continuation；此前 `_build_advance_context` 能正确判定 WebSocket continuation，但实际 invoke 二次计算未传 provider options，会导致 Codex 第二轮丢失 `previous_response_id`。
-- 当前 fallback 先在 Codex adapter 内完成：只处理“尚未输出前的 WebSocket continuation 拒绝/协议错误”，不会覆盖已经开始输出的 stream，也不会吞掉 server_error 可重试异常。fallback 成功时会写入 LLM result metadata：`provider_continuation_fallback=true`、`provider_continuation_fallback_reason=websocket_continuation_failed_before_output`。
-- Orchestration 已从 LLM result metadata 提取 fallback 状态，并写入 `provider_continuation_state.fallback` / `provider_continuation_state.fallback_reason`，用于后续 continuation decision、Workbench 和 Operations 展示。
+- 历史曾验证过 invoke 阶段 provider options 透传问题；当前更高优先级决策是 Codex continuation state 不进入 runtime 默认链路。
+- 底层 fallback 只处理“尚未输出前的 WebSocket continuation 拒绝/协议错误”，不会覆盖已经开始输出的 stream，也不会吞掉 server_error 可重试异常。fallback 成功时会写入 LLM result metadata：`provider_continuation_fallback=true`、`provider_continuation_fallback_reason=websocket_continuation_failed_before_output`。
+- 当前默认 runtime 不应出现 Codex provider continuation fallback；若出现，应作为 gate 泄漏问题处理。
 
 ## Phase 5: Context Tree replay tool
 
@@ -539,14 +563,14 @@ reason=prefix_mismatch
 - [x] `context_tree.diff_since` 支持 snapshot id/revision diff。
 - [x] `context_tree.read_snapshot` 支持历史 render snapshot 读取。
 - [x] prompt 中说明模型需要重读树时显式调用工具。
-- [x] provider-native continuation 后续轮次不再每轮自动完整重发树。
+- [x] provider-native continuation 启用时后续轮次不再每轮自动完整重发树；当前 Codex runtime gate 关闭时仍走 full clean input，树只以 compact projection / 显式工具方式进入。
 
 2026-06-14 进展：
 
 - Context Tree replay 已由 `tools/context_tree` 提供：`list` / `expand` / `render_current` / `read_snapshot` / `diff_since`。
 - `context_tree.render_current` 默认输出上限为 `max_chars=16000`，避免 replay 工具本身引入额外 token estimator 依赖。
 - Context Tree usage guide 已提示模型需要重读完整当前可见树时调用 `context_tree.render_current`。
-- Orchestration provider-native continuation 场景已经通过 Context Workspace snapshot metadata 注入 delta，不再依赖每轮完整树回放。
+- 对启用 provider-native continuation 的 provider，Context Workspace snapshot metadata 可参与 delta/fingerprint 判断；当前 Codex 默认运行链路不启用该分支。
 
 ## Phase 6: Observability
 
@@ -574,7 +598,7 @@ reason=prefix_mismatch
 
 - [x] 单测：Codex HTTP 不发送 `previous_response_id`。
 - [x] 单测：Codex WebSocket 第二轮发送 `previous_response_id`。
-- [x] 单测：Codex WebSocket orchestration run 第二轮带 `previous_response_id`，且工具结果作为 provider input delta。
+- [x] 单测：Codex WebSocket orchestration run 在当前 runtime gate 关闭时第二轮不带 `previous_response_id`，并回放 full clean input。
 - [x] 单测：缺少 input fingerprints 时发送 full input，不带 `previous_response_id`。
 - [x] 单测：prefix mismatch 时发送 full input，不带 `previous_response_id`。
 - [x] 单测：instructions mismatch 时发送 full input，不带 `previous_response_id`。
@@ -594,9 +618,9 @@ reason=prefix_mismatch
 - [x] 单测：默认授权策略允许 `llm.warmup`。
 - [x] 单测：tool result 作为 `function_call_output`。
 - [x] 单测：LLM settings/profile default params 可声明 `provider_transport=websocket`。
-- [x] 单测：Codex WebSocket orchestration run 通过 profile default transport 触发 continuation，不依赖 run metadata override。
+- [x] 单测：Codex WebSocket orchestration run 即使 profile default transport 为 websocket，也不会在当前 runtime gate 下触发 provider-native continuation。
 - [ ] 集成测试：东航航班任务至少完成工具循环，不因 continuation 参数失败。
-- [x] 集成测试：Operations timeline 能看到 delta request。
+- [x] 集成测试：Operations timeline 能看到当前 Codex full replay / no previous response id；底层 delta request 由 renderer/transport 回归覆盖。
 
 ## 验收标准
 
@@ -607,8 +631,8 @@ reason=prefix_mismatch
 
 2. 使用 Codex WebSocket profile 时：
    - 首轮 request 是完整 `response.create`。
-   - 第二轮在 prefix match 时包含 `previous_response_id`。
-   - 第二轮 input 只包含 delta items。
+   - 当前 runtime gate 关闭时，后续 request 不包含 `previous_response_id`，并回放 full clean input。
+   - 只有未来恢复 runtime gate 后，第二轮才允许在 prefix match 时包含 `previous_response_id`，且 input 只包含 delta items。
    - provider actual preview 标记 `transport=websocket`。
 
 3. 使用 OpenAI Responses HTTP profile 时：
@@ -630,5 +654,5 @@ reason=prefix_mismatch
 ## 当前决策
 
 - 短期：保留已做的 Codex HTTP `previous_response_id` 禁用，避免新会话直接 failed。
-- 中期：实现 Codex WebSocket transport，才恢复 Codex provider-native continuation。
+- 中期：在已有底层 WebSocket transport 基础上补齐 turn-scoped runtime gate、fingerprint 校验和 Operations 验收后，才恢复 Codex provider-native continuation。
 - 长期：把 provider continuation 能力从 api_family 维度提升到 provider family + transport + request schema 维度。

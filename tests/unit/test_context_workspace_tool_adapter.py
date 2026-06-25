@@ -874,6 +874,71 @@ def test_owner_refresh_clears_stale_tool_schema_state_without_action_marker() ->
     ] == "fetch_weather"
 
 
+def test_tool_schema_mirror_drops_stale_function_removed_from_owner_catalog() -> None:
+    tool_service = _FakeToolService(
+        Tool(
+            id="fetch_weather",
+            source_id="bundled.openapi.weather",
+            name="Fetch Weather",
+            description="Fetch current weather for a location.",
+            parameters=(
+                ToolParameter(
+                    name="location",
+                    description="Location to query.",
+                    data_type="string",
+                    required=True,
+                ),
+            ),
+        ),
+    )
+    services = _context_services(tool_service)
+    session_key = "session:tool-owner-drift"
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key=session_key,
+            agent_id="assistant",
+            metadata={"available_tool_names": ["fetch_weather"]},
+        ),
+    )
+    for node_id in (
+        "tools.available",
+        "tools.bundle.bundled.openapi.weather",
+        "tools.tool.fetch_weather",
+    ):
+        action = (
+            ContextAction.ENABLE_TOOL_SCHEMA
+            if node_id == "tools.tool.fetch_weather"
+            else ContextAction.EXPAND
+        )
+        services["tree"].apply_action(
+            ContextActionInput(
+                session_key=session_key,
+                node_id=node_id,
+                action=action,
+            ),
+        )
+
+    rendered_before_catalog_change = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
+    )
+    assert rendered_before_catalog_change.mirrored_node_ids == (
+        "tools.tool.fetch_weather",
+    )
+
+    tool_service.replace_tools()
+    rendered_after_catalog_change = services["render"].render_observation(
+        ContextObservationRenderInput(session_key=session_key),
+    )
+    tree_after_catalog_change = services["tree"].list_tree(session_key)
+
+    assert not any(
+        node.id == "tools.tool.fetch_weather"
+        for node in tree_after_catalog_change.nodes
+    )
+    assert rendered_after_catalog_change.mirrored_node_ids == ()
+    assert "tool_schemas" not in rendered_after_catalog_change.provider_attachments
+
+
 def test_tool_schema_mirror_budget_limits_enabled_function_schemas() -> None:
     tools = tuple(
         Tool(
@@ -1782,6 +1847,9 @@ class _FakeToolService:
         self._groups_by_source = groups_by_source or {}
         self._summary_by_source = summary_by_source or {}
         self._metadata_by_source = metadata_by_source or {}
+
+    def replace_tools(self, *tools: Tool) -> None:
+        self._tools = {tool.id: tool for tool in tools}
 
     def get_tool(self, tool_id: str) -> Tool:
         tool = self._tools.get(tool_id)

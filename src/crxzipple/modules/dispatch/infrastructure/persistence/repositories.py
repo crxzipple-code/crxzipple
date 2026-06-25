@@ -155,7 +155,7 @@ class SqlAlchemyDispatchTaskRepository:
             )
             .subquery()
         )
-        candidate_id = self.session.scalar(
+        candidate_id = (
             select(queued_lane_heads.c.id)
             .where(queued_lane_heads.c.lane_position == 1)
             .order_by(
@@ -165,13 +165,12 @@ class SqlAlchemyDispatchTaskRepository:
                 queued_lane_heads.c.created_at.asc(),
                 queued_lane_heads.c.id.asc(),
             )
-            .limit(1),
+            .limit(1)
+            .scalar_subquery()
         )
-        if candidate_id is None:
-            return None
 
         now = utcnow()
-        updated = self.session.execute(
+        claimed_id = self.session.scalar(
             update(DispatchTaskModel)
             .where(
                 and_(
@@ -191,13 +190,14 @@ class SqlAlchemyDispatchTaskRepository:
                     else None
                 ),
                 updated_at=now,
-            ),
+            )
+            .returning(DispatchTaskModel.id),
         )
-        if updated.rowcount != 1:
+        if claimed_id is None:
             return None
 
         self.session.flush()
-        model = self.session.get(DispatchTaskModel, candidate_id)
+        model = self.session.get(DispatchTaskModel, claimed_id)
         if model is None:
             return None
         return self._to_entity(model)

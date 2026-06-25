@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import re
 
@@ -192,6 +193,25 @@ def test_runtime_kernel_does_not_embed_generic_evidence_judges_or_task_specializ
         for term in judge_terms:
             if term in text:
                 violations.append(f"{relative}: {term}")
+        for label, pattern in task_patterns.items():
+            if pattern.search(text):
+                violations.append(f"{relative}: {label}")
+
+    assert violations == []
+
+
+def test_browser_core_does_not_embed_task_specific_site_logic() -> None:
+    task_patterns = {
+        "east_china_airlines": re.compile(r"东航|东方航空|ceair", flags=re.IGNORECASE),
+        "travel_booking_site": re.compile(r"携程|ctrip", flags=re.IGNORECASE),
+        "flight_ticket_domain": re.compile(r"航班|机票", flags=re.IGNORECASE),
+    }
+    violations: list[str] = []
+    for path in _production_python_files(
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "browser",
+    ):
+        relative = path.relative_to(REPO_ROOT)
+        text = path.read_text(encoding="utf-8")
         for label, pattern in task_patterns.items():
             if pattern.search(text):
                 violations.append(f"{relative}: {label}")
@@ -784,6 +804,13 @@ def test_admin_entrypoints_do_not_require_orchestration_worker_services() -> Non
         / "orchestration"
         / "interfaces"
         / "worker_cli.py",
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "interfaces"
+        / "worker_cli_common.py",
     }
     forbidden = (
         "AppKey.ORCHESTRATION_SCHEDULER_SERVICE",
@@ -798,6 +825,65 @@ def test_admin_entrypoints_do_not_require_orchestration_worker_services() -> Non
         for name in forbidden:
             if name in text:
                 violations.append(f"{path.relative_to(REPO_ROOT)}: {name}")
+
+    assert violations == []
+
+
+def test_orchestration_worker_cli_keeps_benchmark_runtime_lazy() -> None:
+    worker_cli_files = (
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "interfaces"
+        / "worker_cli.py",
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "interfaces"
+        / "worker_cli_common.py",
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "interfaces"
+        / "worker_cli_executor.py",
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "interfaces"
+        / "worker_cli_scheduler.py",
+    )
+    forbidden_top_level_imports = (
+        "crxzipple.modules.agent",
+        "crxzipple.modules.llm",
+        "crxzipple.modules.tool",
+        "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark",
+    )
+    violations: list[str] = []
+
+    for path in worker_cli_files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            module_names: list[str] = []
+            if isinstance(node, ast.Import):
+                module_names.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                module_names.append(node.module)
+            for module_name in module_names:
+                for forbidden in forbidden_top_level_imports:
+                    if module_name == forbidden or module_name.startswith(
+                        f"{forbidden}.",
+                    ):
+                        violations.append(
+                            f"{path.relative_to(REPO_ROOT)}: {module_name}",
+                        )
 
     assert violations == []
 

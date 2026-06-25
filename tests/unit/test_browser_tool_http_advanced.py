@@ -380,7 +380,6 @@ class BrowserToolHttpAdvancedTestCase(HttpModuleTestCase):
             result_payload = result.details["value"]["result"]
             self.assertNotIn("body", result_payload)
             self.assertTrue(result_payload["body_removed_from_details"])
-            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact.id])
             self.assertEqual(result.metadata["artifact_ids"], [artifact.id])
 
     def test_browser_script_inspect_large_preview_is_written_as_artifact(self) -> None:
@@ -444,7 +443,6 @@ class BrowserToolHttpAdvancedTestCase(HttpModuleTestCase):
             result_payload = result.details["value"]["result"]
             self.assertNotIn("source_preview", result_payload)
             self.assertTrue(result_payload["source_preview_removed_from_details"])
-            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact.id])
             self.assertEqual(result.metadata["artifact_ids"], [artifact.id])
 
     def test_browser_script_extract_request_formats_endpoint_candidates(self) -> None:
@@ -652,7 +650,7 @@ class BrowserToolHttpAdvancedTestCase(HttpModuleTestCase):
                 }
             ],
         )
-        self.assertNotIn("evidence_path_key", result.metadata["browser_evidence"])
+        self.assertNotIn("evidence_path_key", result.metadata)
 
     def test_browser_action_handler_surfaces_evaluate_envelope_result_in_content(self) -> None:
         class _Store:
@@ -1206,7 +1204,7 @@ class BrowserToolHttpAdvancedTestCase(HttpModuleTestCase):
             artifact_id = attachment_block["artifact_id"]
             artifact = artifact_service.get_artifact(artifact_id)
             self.assertEqual(artifact.mime_type, "image/png")
-            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact_id])
+            self.assertEqual(result.metadata["artifact_ids"], [artifact_id])
             self.assertEqual(result.metadata["artifact_ids"], [artifact_id])
             self.assertEqual(
                 result.details,
@@ -1384,5 +1382,5 @@ class BrowserToolHttpAdvancedTestCase(HttpModuleTestCase):
             self.assertEqual(payload["kind"], "action-trace")
             self.assertEqual(payload["trace_id"], "trace/action:1")
             self.assertEqual(payload["storage"]["local"]["added_keys"], ["flight_search"])
-            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact_id])
+            self.assertEqual(result.metadata["artifact_ids"], [artifact_id])
             self.assertEqual(result.metadata["artifact_ids"], [artifact_id])

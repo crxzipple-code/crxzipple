@@ -477,7 +477,7 @@ PYTHONPATH=src pytest -q \
   tests/unit/test_turn_submission_prompt_bootstrap.py \
   tests/unit/test_browser_tool_application.py \
   tests/unit/test_browser_observation.py \
-  tests/unit/test_browser_evidence_metadata.py
+  tests/unit/test_browser_result_facts.py
 
 cd frontend
 npm run typecheck

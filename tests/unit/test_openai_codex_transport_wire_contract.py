@@ -13,9 +13,11 @@ from crxzipple.modules.llm.domain import (
     LlmProviderContinuation,
     LlmProviderKind,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
-    openai_response_projected_input_items,
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_common import (
     projected_input_items_from_messages,
+)
+from crxzipple.modules.llm.infrastructure.adapters.provider_openai_message_projection import (
+    openai_response_projected_input_items,
 )
 from crxzipple.modules.llm.infrastructure.adapters.provider_request_preview import (
     openai_provider_payload_fingerprint,
@@ -103,7 +105,7 @@ def test_codex_websocket_fake_server_records_previous_response_id_and_delta_inpu
     )
 
     with patch(
-        "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.websocket.create_connection",
+        "crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport.websocket.create_connection",
         return_value=fake_ws,
     ):
         response = adapter.invoke(_profile(), request)
@@ -144,7 +146,7 @@ def test_codex_http_fake_server_records_full_input_without_previous_response_id(
     )
 
     with patch(
-        "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+        "crxzipple.modules.llm.infrastructure.adapters.openai_codex_http_transport.requests.post",
         return_value=_FakeStreamResponse(
             events=(
                 (

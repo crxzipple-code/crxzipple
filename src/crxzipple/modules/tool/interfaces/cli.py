@@ -366,9 +366,18 @@ def build_cli() -> typer.Typer:
             "--tool-id",
             help="Filter runs for a single tool.",
         ),
+        limit: int = typer.Option(
+            100,
+            "--limit",
+            min=1,
+            help="Maximum number of latest runs to list.",
+        ),
     ) -> None:
         container = ensure_container(ctx)
-        runs = container.require(AppKey.TOOL_SERVICE).list_tool_runs(tool_id=tool_id)
+        runs = container.require(AppKey.TOOL_SERVICE).list_tool_runs(
+            tool_id=tool_id,
+            limit=limit,
+        )
         echo_data([ToolRunDTO.from_entity(run) for run in runs])
 
     @app.command("get-run")

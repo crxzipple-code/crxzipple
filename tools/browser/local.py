@@ -587,7 +587,7 @@ def _tool_result(
     details = _browser_result_details(content)
     browser_runtime_metadata = _coerce_browser_runtime_metadata(runtime_metadata)
     browser_audit_metadata = _browser_audit_metadata(content, content_blocks)
-    browser_evidence = _browser_evidence_metadata(
+    result_facts = _browser_result_facts(
         tool_id=tool_id,
         family=family,
         kind=kind,
@@ -613,8 +613,8 @@ def _tool_result(
         "guidance": dict(guidance) if isinstance(guidance, dict) else None,
         **browser_audit_metadata,
     }
-    if browser_evidence:
-        metadata["browser_evidence"] = browser_evidence
+    if result_facts:
+        metadata.update(result_facts)
     return ToolRunResult.structured(
         details=details,
         content=[dict(block) for block in content_blocks],
@@ -637,14 +637,13 @@ def _browser_audit_metadata(
     if target_url is not None:
         metadata.update(_safe_browser_url_metadata(target_url))
 
-    artifact_ids = _browser_artifact_ids_from_blocks(content_blocks)
+    artifact_ids = _artifact_ids_from_blocks(content_blocks)
     if artifact_ids:
-        metadata["browser_artifact_ids"] = list(artifact_ids)
         metadata["artifact_ids"] = list(artifact_ids)
     return metadata
 
 
-def _browser_evidence_metadata(
+def _browser_result_facts(
     *,
     tool_id: str,
     family: str | None,
@@ -693,7 +692,7 @@ def _browser_evidence_metadata(
     ):
         if fact_key in evidence:
             continue
-        value = _browser_evidence_first_scalar(scalar_sources, source_keys)
+        value = _browser_fact_first_scalar(scalar_sources, source_keys)
         if value is not None:
             evidence[fact_key] = _truncate_text(value, 180)
 
@@ -702,7 +701,7 @@ def _browser_evidence_metadata(
         if target_id is not None:
             evidence["target_id"] = target_id
 
-    payload_shape_source = _browser_evidence_first_value(
+    payload_shape_source = _browser_fact_first_value(
         (details, content),
         (
             "request_payload",
@@ -715,11 +714,11 @@ def _browser_evidence_metadata(
             "arguments",
         ),
     )
-    payload_shape = _browser_evidence_shape(payload_shape_source)
+    payload_shape = _browser_fact_shape(payload_shape_source)
     if payload_shape is not None:
         evidence["payload_shape"] = payload_shape
 
-    result_shape_source = _browser_evidence_first_value(
+    result_shape_source = _browser_fact_first_value(
         (details, content),
         (
             "result_shape",
@@ -731,11 +730,11 @@ def _browser_evidence_metadata(
             "body",
         ),
     )
-    result_shape = _browser_evidence_shape(result_shape_source)
+    result_shape = _browser_fact_shape(result_shape_source)
     if result_shape is not None:
         evidence["result_shape"] = result_shape
 
-    runtime_globals = _browser_evidence_runtime_globals((details, content))
+    runtime_globals = _browser_fact_runtime_globals((details, content))
     if runtime_globals:
         evidence["runtime_globals"] = runtime_globals
 
@@ -771,13 +770,13 @@ def _browser_action_evidence(
     details: Any,
     kind: str | None,
 ) -> dict[str, Any]:
-    action = _browser_evidence_first_mapping((details, content), ("action",))
-    command = _browser_evidence_first_mapping((content, details), ("command",))
-    result = _browser_evidence_first_mapping((details, content), ("result",))
-    target = _browser_evidence_first_mapping((command, action, result), ("target",))
+    action = _browser_fact_first_mapping((details, content), ("action",))
+    command = _browser_fact_first_mapping((content, details), ("command",))
+    result = _browser_fact_first_mapping((details, content), ("result",))
+    target = _browser_fact_first_mapping((command, action, result), ("target",))
     action_kind = (
-        _browser_evidence_first_scalar((action,), ("kind", "action_kind"))
-        or _browser_evidence_first_scalar((command,), ("kind",))
+        _browser_fact_first_scalar((action,), ("kind", "action_kind"))
+        or _browser_fact_first_scalar((command,), ("kind",))
         or _normalize_text(kind)
     )
     if action_kind is None:
@@ -785,7 +784,7 @@ def _browser_action_evidence(
     if not _is_browser_interaction_kind(action_kind):
         return {}
     evidence: dict[str, Any] = {"action_kind": _truncate_text(action_kind, 80)}
-    action_ok = _browser_evidence_first_value((action, result), ("ok", "success"))
+    action_ok = _browser_fact_first_value((action, result), ("ok", "success"))
     if isinstance(action_ok, bool):
         evidence["action_ok"] = action_ok
     for fact_key, sources, source_keys in (
@@ -812,7 +811,7 @@ def _browser_action_evidence(
     ):
         if fact_key in evidence:
             continue
-        value = _browser_evidence_first_scalar(sources, source_keys)
+        value = _browser_fact_first_scalar(sources, source_keys)
         if value is not None:
             evidence[fact_key] = _truncate_text(value, 180)
     return evidence
@@ -834,7 +833,7 @@ def _browser_network_replay_evidence(
         ("source_request_id", ("source_request_id",)),
         ("source_capture_id", ("source_capture_id",)),
     ):
-        value = _browser_evidence_first_scalar((result,), source_keys)
+        value = _browser_fact_first_scalar((result,), source_keys)
         if value is not None:
             evidence[fact_key] = _truncate_text(value, 180)
     diff = result.get("request_diff")
@@ -872,7 +871,7 @@ def _browser_script_insight_evidence(
     content: Any,
     details: Any,
 ) -> dict[str, Any]:
-    causality = _browser_evidence_first_mapping(
+    causality = _browser_fact_first_mapping(
         (details, content),
         ("causality", "network_causality"),
     )
@@ -884,7 +883,7 @@ def _browser_script_insight_evidence(
         api_candidates = _api_candidate_evidence(causality.get("api_candidates"))
         if api_candidates:
             evidence["api_candidates"] = api_candidates
-    client_path = _browser_evidence_first_scalar(
+    client_path = _browser_fact_first_scalar(
         (details, content),
         ("api_client_path", "client_path", "script_path", "discovered_client_path"),
     )
@@ -893,11 +892,11 @@ def _browser_script_insight_evidence(
     return evidence
 
 
-def _browser_evidence_first_mapping(
+def _browser_fact_first_mapping(
     sources: tuple[Any, ...],
     keys: tuple[str, ...],
 ) -> dict[str, Any]:
-    value = _browser_evidence_first_value(sources, keys)
+    value = _browser_fact_first_value(sources, keys)
     return value if isinstance(value, dict) else {}
 
 
@@ -908,7 +907,7 @@ def _browser_network_like_result(content: Any, details: Any) -> dict[str, Any]:
         kind = _normalize_text(source.get("kind"))
         if kind and kind.startswith("network-"):
             return source
-        result = _browser_evidence_first_mapping((source,), ("result",))
+        result = _browser_fact_first_mapping((source,), ("result",))
         result_kind = _normalize_text(result.get("kind"))
         if result_kind and result_kind.startswith("network-"):
             return result
@@ -1013,12 +1012,12 @@ def _safe_evidence_url(value: str | None) -> str | None:
     return _normalize_text(safe.get("browser_target_url"))
 
 
-def _browser_evidence_first_scalar(
+def _browser_fact_first_scalar(
     sources: tuple[Any, ...],
     keys: tuple[str, ...],
 ) -> str | None:
     for source in sources:
-        value = _browser_evidence_find_first_value(source, keys, seen=set())
+        value = _browser_fact_find_first_value(source, keys, seen=set())
         if not isinstance(value, (str, int, float, bool)):
             continue
         normalized = _normalize_text(value)
@@ -1027,18 +1026,18 @@ def _browser_evidence_first_scalar(
     return None
 
 
-def _browser_evidence_first_value(
+def _browser_fact_first_value(
     sources: tuple[Any, ...],
     keys: tuple[str, ...],
 ) -> Any:
     for source in sources:
-        value = _browser_evidence_find_first_value(source, keys, seen=set())
+        value = _browser_fact_find_first_value(source, keys, seen=set())
         if value is not None:
             return value
     return None
 
 
-def _browser_evidence_find_first_value(
+def _browser_fact_find_first_value(
     value: Any,
     keys: tuple[str, ...],
     *,
@@ -1054,7 +1053,7 @@ def _browser_evidence_find_first_value(
             if key in normalized:
                 return normalized[key]
         for item in normalized.values():
-            found = _browser_evidence_find_first_value(item, keys, seen=seen)
+            found = _browser_fact_find_first_value(item, keys, seen=seen)
             if found is not None:
                 return found
         return None
@@ -1064,13 +1063,13 @@ def _browser_evidence_find_first_value(
             return None
         seen.add(marker)
         for item in value:
-            found = _browser_evidence_find_first_value(item, keys, seen=seen)
+            found = _browser_fact_find_first_value(item, keys, seen=seen)
             if found is not None:
                 return found
     return None
 
 
-def _browser_evidence_shape(
+def _browser_fact_shape(
     value: Any,
     *,
     depth: int = 0,
@@ -1081,9 +1080,9 @@ def _browser_evidence_shape(
     if seen is None:
         seen = set()
     if isinstance(value, str):
-        parsed = _browser_evidence_parse_json_preview(value)
+        parsed = _browser_fact_parse_json_preview(value)
         if parsed is not None:
-            return _browser_evidence_shape(parsed, depth=depth, seen=seen)
+            return _browser_fact_shape(parsed, depth=depth, seen=seen)
         return f"str({len(value)})" if len(value) > 80 else "str"
     if isinstance(value, bool):
         return "bool"
@@ -1103,7 +1102,7 @@ def _browser_evidence_shape(
             if index >= 12:
                 shaped["_truncated_keys"] = max(len(value) - 12, 0)
                 break
-            shaped[str(key)] = _browser_evidence_shape(
+            shaped[str(key)] = _browser_fact_shape(
                 item,
                 depth=depth + 1,
                 seen=seen,
@@ -1117,13 +1116,13 @@ def _browser_evidence_shape(
         item_shape = None
         for item in value:
             if item is not None:
-                item_shape = _browser_evidence_shape(item, depth=depth + 1, seen=seen)
+                item_shape = _browser_fact_shape(item, depth=depth + 1, seen=seen)
                 break
         return {"type": "list", "count": len(value), "item": item_shape}
     return type(value).__name__
 
 
-def _browser_evidence_parse_json_preview(value: str) -> Any:
+def _browser_fact_parse_json_preview(value: str) -> Any:
     text = value.strip()
     if not text or text[0] not in "[{":
         return None
@@ -1135,8 +1134,8 @@ def _browser_evidence_parse_json_preview(value: str) -> Any:
         return None
 
 
-def _browser_evidence_runtime_globals(sources: tuple[Any, ...]) -> list[str]:
-    value = _browser_evidence_first_value(
+def _browser_fact_runtime_globals(sources: tuple[Any, ...]) -> list[str]:
+    value = _browser_fact_first_value(
         sources,
         (
             "runtime_globals",
@@ -1159,7 +1158,7 @@ def _browser_evidence_runtime_globals(sources: tuple[Any, ...]) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def _browser_artifact_ids_from_blocks(
+def _artifact_ids_from_blocks(
     content_blocks: list[dict[str, Any]],
 ) -> tuple[str, ...]:
     artifact_ids: list[str] = []

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from crxzipple.modules.llm.application import LlmApplicationService
-from crxzipple.modules.llm.application.services import llm_profile_from_config
+from crxzipple.modules.llm.application.llm_profile_config import llm_profile_from_config
 from crxzipple.modules.llm.domain.exceptions import LlmNotFoundError
 from crxzipple.modules.orchestration.application.ports import LlmPort
 

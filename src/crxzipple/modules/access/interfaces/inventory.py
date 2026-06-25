@@ -13,7 +13,7 @@ from crxzipple.modules.access.application.read_models import (
     AccessConsumerBindingReadModel,
     CredentialBindingReadModel,
 )
-from crxzipple.modules.access.application.settings_integration import (
+from crxzipple.modules.access.application.settings_config_views import (
     AccessSettingsConfigProvider,
 )
 from crxzipple.modules.access.interfaces.external_consumers import (

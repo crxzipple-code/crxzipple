@@ -31,6 +31,9 @@ class SessionItemRepository(Protocol):
     def get(self, item_id: str) -> SessionItem | None:
         ...
 
+    def get_many(self, item_ids: tuple[str, ...]) -> list[SessionItem]:
+        ...
+
     def get_by_source(
         self,
         *,

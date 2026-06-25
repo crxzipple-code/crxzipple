@@ -9,6 +9,11 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from crxzipple.interfaces.http.app import create_app
+from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.authorization.domain import (
+    AuthorizationEffect,
+    AuthorizationPolicy,
+)
 from tests.unit.skill_test_support import write_skill_package
 from tests.unit.support import SqliteTestHarness
 
@@ -91,6 +96,62 @@ class ArtifactsHttpTestCase(unittest.TestCase):
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.content, b"not-a-real-png")
 
+    def test_artifact_preview_and_download_are_authorized(self) -> None:
+        response = self.client.post(
+            "/artifacts",
+            params={"name": "private.txt", "mime_type": "text/plain"},
+            content=b"private",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        container = self.client.app.state.container
+        container.require(AppKey.AUTHORIZATION_SERVICE).create_policy(
+            AuthorizationPolicy(
+                id="deny_artifact_read_test",
+                description="Deny artifact reads for HTTP test.",
+                effect=AuthorizationEffect.DENY,
+                actions=("artifact.read",),
+                resource_kind="artifact",
+                resource_id=payload["id"],
+                priority=100,
+            ),
+            actor_type="test",
+            actor_id="artifacts",
+            reason="authorization regression",
+        )
+
+        metadata = self.client.get(f"/artifacts/{payload['id']}")
+        preview = self.client.get(payload["preview_url"])
+        download = self.client.get(payload["download_url"])
+
+        self.assertEqual(metadata.status_code, 403)
+        self.assertEqual(preview.status_code, 403)
+        self.assertEqual(download.status_code, 403)
+
     def test_missing_artifact_returns_not_found(self) -> None:
         response = self.client.get("/artifacts/missing")
+        self.assertEqual(response.status_code, 404)
+
+    def test_missing_artifact_file_returns_not_found_for_variant(self) -> None:
+        response = self.client.post(
+            "/artifacts",
+            params={"name": "note.txt", "mime_type": "text/plain"},
+            content=b"hello",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        artifact_dir = Path(self._artifact_tempdir.name) / payload["id"]
+        for path in artifact_dir.iterdir():
+            if path.name != "metadata.json":
+                path.unlink()
+
+        preview = self.client.get(payload["preview_url"])
+        download = self.client.get(payload["download_url"])
+
+        self.assertEqual(preview.status_code, 404)
+        self.assertEqual(download.status_code, 404)
+
+    def test_path_traversal_artifact_id_returns_not_found(self) -> None:
+        response = self.client.get("/artifacts/..%2Fescape")
+
         self.assertEqual(response.status_code, 404)

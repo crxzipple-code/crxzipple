@@ -8,7 +8,7 @@ from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     default_base_url,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+from crxzipple.modules.llm.infrastructure.adapters.provider_gemini_message_projection import (
     gemini_contents,
 )
 from crxzipple.modules.llm.infrastructure.adapters.http_helpers import join_url

@@ -12,10 +12,7 @@ from crxzipple.modules.artifacts.domain.entities import (
     ArtifactVariant,
 )
 from crxzipple.modules.context_workspace.application import (
-    CONTEXT_INSTRUCTIONS_NODE_ID,
     CONTEXT_TREE_SCHEMA_VERSION,
-    EXECUTION_CURRENT_NODE_ID,
-    SESSION_CURRENT_NODE_ID,
     ContextNodeUpsertInput,
     ContextControlSliceService,
     ContextSliceBuilderService,
@@ -26,7 +23,6 @@ from crxzipple.modules.context_workspace.application import (
     EnsureContextWorkspaceInput,
     RequestRenderSnapshotService,
 )
-import crxzipple.modules.context_workspace.application.root_nodes as root_node_module
 from crxzipple.modules.context_workspace.domain import (
     ContextAction,
     ContextEstimate,
@@ -294,14 +290,14 @@ def test_context_workspace_preview_prefers_control_slice_selected_session_refs()
 def test_context_workspace_snapshot_projects_context_slice_session_input_items() -> None:
     class _SessionItemResolver:
         def get_item(self, item_id: str):  # type: ignore[no-untyped-def]
-            assert item_id == "item-slice-user"
+            assert item_id == "item-user-1"
             return type(
                 "SessionItem",
                 (),
                 {
-                    "id": "item-slice-user",
+                    "id": "item-user-1",
                     "session_id": "session-instance-1",
-                    "sequence_no": 7,
+                    "sequence_no": 1,
                     "role": "user",
                     "content_payload": {
                         "blocks": [{"type": "text", "text": "live slice task"}],
@@ -337,7 +333,7 @@ def test_context_workspace_snapshot_projects_context_slice_session_input_items()
             action=ContextAction.UPSERT,
             nodes=(
                 ContextNodeSeed(
-                    node_id="session.step.item.slice-user",
+                    node_id="session.step.item.current-user",
                     parent_id="session.current",
                     owner="session",
                     kind="session_item",
@@ -345,7 +341,20 @@ def test_context_workspace_snapshot_projects_context_slice_session_input_items()
                     content="stale tree text must not project",
                     state=ContextNodeState(included_in_next_slice=True),
                     owner_ref={
-                        "session_item_id": "item-slice-user",
+                        "session_item_id": "item-user-1",
+                        "role": "user",
+                    },
+                ),
+                ContextNodeSeed(
+                    node_id="session.step.item.old-user",
+                    parent_id="session.current",
+                    owner="session",
+                    kind="session_item",
+                    title="Old User Message",
+                    content="old tree text must not project",
+                    state=ContextNodeState(included_in_next_slice=True),
+                    owner_ref={
+                        "session_item_id": "item-old-user",
                         "role": "user",
                     },
                 ),
@@ -429,28 +438,41 @@ def test_context_workspace_snapshot_projects_context_slice_session_input_items()
             "metadata": {
                 "owner": "session",
                 "kind": "session_item",
-                "session_item_id": "item-slice-user",
-                "node_id": "session.step.item.slice-user",
-                "sequence_no": 7,
+                "session_item_id": "item-user-1",
+                "node_id": "session.step.item.current-user",
+                "sequence_no": 1,
             },
         },
     )
     assert len(snapshot_record.input_item_refs) == 1
     input_item_ref = snapshot_record.input_item_refs[0]
-    assert input_item_ref["node_id"] == "session.step.item.slice-user"
-    assert input_item_ref["session_item_id"] == "item-slice-user"
+    assert input_item_ref["node_id"] == "session.step.item.current-user"
+    assert input_item_ref["session_item_id"] == "item-user-1"
     assert input_item_ref["owner_module"] == "session"
     assert input_item_ref["owner_kind"] == "session_item"
-    assert input_item_ref["owner_id"] == "item-slice-user"
-    assert input_item_ref["sequence_no"] == 7
+    assert input_item_ref["owner_id"] == "item-user-1"
+    assert input_item_ref["sequence_no"] == 1
     assert snapshot_record.metadata["request_context_source"] == "context_slice"
     assert snapshot_record.metadata["context_slice_projected_input_item_count"] == 1
+    request_render_cost = snapshot_record.metadata["request_render_cost"]
+    assert request_render_cost["selected_node_count"] >= 1
+    assert request_render_cost["context_selected_node_count"] >= 1
+    assert request_render_cost["selected_session_item_count"] == 1
+    assert request_render_cost["provider_visible_tool_count"] == 1
+    assert request_render_cost["projected_input_item_count"] == 1
+    assert request_render_cost["rendered_input_char_count"] > 0
+    assert request_render_cost["elapsed_ms"] >= 0
+    assert snapshot_record.metadata["request_render_snapshot"]["cost"] == request_render_cost
     assert snapshot_record.metadata["context_slice_omitted_node_count"] >= 0
     assert snapshot_record.metadata["context_slice_unresolved_ref_count"] == 0
     assert snapshot_record.metadata["context_slice_loss"]["unresolved_ref_count"] == 0
     assert "stale tree text must not project" not in str(
         snapshot_record.projected_input_items,
     )
+    assert "old tree text must not project" not in str(
+        snapshot_record.projected_input_items,
+    )
+    assert "item-old-user" not in str(snapshot_record.projected_input_items)
     assert "raw diagnostic must not project" not in str(
         snapshot_record.projected_input_items,
     )
@@ -478,6 +500,7 @@ def test_context_workspace_snapshot_projects_context_slice_session_input_items()
     assert persisted_request_snapshot.render_report["context_slice_loss"][
         "unresolved_ref_count"
     ] == 0
+    assert persisted_request_snapshot.render_report["cost"] == request_render_cost
     loaded = adapter.get_recorded_run_request_render_snapshot(
         run=_run(),
         draft=_draft(),
@@ -488,11 +511,254 @@ def test_context_workspace_snapshot_projects_context_slice_session_input_items()
     assert loaded.tool_schema_refs == snapshot_record.tool_schema_refs
 
 
+def test_request_render_preview_observation_slice_is_read_only() -> None:
+    class _ExplodingOwnerRegistry:
+        def get(self, owner):  # noqa: ANN001
+            raise AssertionError(f"request render must not refresh owner '{owner}'")
+
+    class _SessionItemResolver:
+        def get_item(self, item_id: str):  # type: ignore[no-untyped-def]
+            if item_id != "item-user-1":
+                raise AssertionError(f"unexpected session item: {item_id}")
+            return type(
+                "SessionItem",
+                (),
+                {
+                    "id": "item-user-1",
+                    "session_id": "session-instance-1",
+                    "sequence_no": 1,
+                    "role": "user",
+                    "content_payload": {
+                        "blocks": [{"type": "text", "text": "hello tree"}],
+                    },
+                    "metadata": {},
+                },
+            )()
+
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    snapshots = InMemoryContextSnapshotRepository()
+    request_render_snapshots = InMemoryContextRequestRenderSnapshotRepository()
+    exploding_registry = _ExplodingOwnerRegistry()
+    adapter = ContextWorkspaceRunSnapshotAdapter(
+        workspace_service=ContextWorkspaceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            owner_registry=exploding_registry,
+        ),
+        render_service=ContextObservationSnapshotService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+        slice_builder=ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            owner_registry=exploding_registry,
+            session_item_resolver=_SessionItemResolver(),
+        ),
+        request_render_snapshot_service=RequestRenderSnapshotService(
+            workspace_repository=workspaces,
+            snapshot_repository=request_render_snapshots,
+        ),
+    )
+
+    snapshot_record = adapter.preview_run_request_render_snapshot(
+        run=_run(),
+        draft=_draft(),
+    )
+
+    assert snapshot_record is not None
+    builder_timings = snapshot_record.metadata["context_slice_builder_timings"]
+    assert builder_timings["refresh_owner_children_ms"] >= 0
+    assert builder_timings["total_ms"] >= 0
+
+
+def test_request_render_budget_stays_bounded_for_long_session_tree() -> None:
+    large_history_text = "archived-history-body-" + ("x" * 400)
+
+    class _SessionItemResolver:
+        def __init__(self) -> None:
+            self.resolved_ids: list[str] = []
+
+        def get_item(self, item_id: str):  # type: ignore[no-untyped-def]
+            self.resolved_ids.append(item_id)
+            if item_id != "item-user-1":
+                raise AssertionError(f"unexpected history resolution: {item_id}")
+            return type(
+                "SessionItem",
+                (),
+                {
+                    "id": "item-user-1",
+                    "session_id": "session-instance-1",
+                    "sequence_no": 121,
+                    "role": "user",
+                    "content_payload": {
+                        "blocks": [{"type": "text", "text": "frontier task only"}],
+                    },
+                    "metadata": {},
+                },
+            )()
+
+    resolver = _SessionItemResolver()
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    operations = InMemoryContextOperationRepository()
+    snapshots = InMemoryContextSnapshotRepository()
+    request_render_snapshots = InMemoryContextRequestRenderSnapshotRepository()
+    workspace_service = ContextWorkspaceService(
+        workspace_repository=workspaces,
+        node_repository=nodes,
+    )
+    tree_service = ContextTreeService(
+        workspace_repository=workspaces,
+        node_repository=nodes,
+        operation_repository=operations,
+    )
+    workspace_service.ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:context",
+            agent_id="assistant",
+            refresh_expanded_children=False,
+        ),
+    )
+    tree_service.upsert_nodes(
+        ContextNodeUpsertInput(
+            session_key="session:context",
+            action=ContextAction.UPSERT,
+            nodes=(
+                *(
+                    ContextNodeSeed(
+                        node_id=f"session.item.old-{index}",
+                        parent_id="session.current",
+                        owner="session",
+                        kind="session_item",
+                        title=f"Old Message {index}",
+                        summary=large_history_text,
+                        content=large_history_text,
+                        state=ContextNodeState(included_in_next_slice=True),
+                        owner_ref={
+                            "session_item_id": f"item-old-{index}",
+                            "role": "assistant",
+                        },
+                    )
+                    for index in range(120)
+                ),
+                ContextNodeSeed(
+                    node_id="session.item.frontier",
+                    parent_id="session.current",
+                    owner="session",
+                    kind="session_item",
+                    title="Current User Message",
+                    summary="frontier task",
+                    content="stale frontier tree content must not render",
+                    state=ContextNodeState(included_in_next_slice=True),
+                    owner_ref={
+                        "session_item_id": "item-user-1",
+                        "role": "user",
+                    },
+                ),
+                ContextNodeSeed(
+                    node_id="tools.capability.search",
+                    parent_id="tools.available",
+                    owner="tool",
+                    kind="tool_function",
+                    title="capability.search",
+                    summary="Find available capabilities.",
+                    state=ContextNodeState(loaded=True),
+                    owner_ref={
+                        "source_id": "configured.capability",
+                        "tool_id": "capability.search",
+                    },
+                ),
+            ),
+        ),
+    )
+    adapter = ContextWorkspaceRunSnapshotAdapter(
+        workspace_service=workspace_service,
+        render_service=ContextObservationSnapshotService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+        tree_service=tree_service,
+        control_slice_builder=ContextControlSliceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+        ),
+        slice_builder=ContextSliceBuilderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            session_item_resolver=resolver,
+        ),
+        request_render_snapshot_service=RequestRenderSnapshotService(
+            workspace_repository=workspaces,
+            snapshot_repository=request_render_snapshots,
+        ),
+    )
+
+    snapshot_record = adapter.record_run_request_render_snapshot(
+        run=_run(),
+        draft=_draft(
+            tool_schemas=(
+                ToolSchema(
+                    name="capability.search",
+                    description="Find tools and capabilities.",
+                ),
+                *(
+                    ToolSchema(
+                        name=f"unused.tool_{index}",
+                        description="Unused tool.",
+                    )
+                    for index in range(50)
+                ),
+            ),
+        ),
+    )
+
+    assert snapshot_record is not None
+    assert resolver.resolved_ids == ["item-user-1"]
+    assert snapshot_record.projected_input_items == (
+        {
+            "kind": "message",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "text", "text": "frontier task only"}],
+            },
+            "source": "context_slice",
+            "metadata": {
+                "owner": "session",
+                "kind": "session_item",
+                "session_item_id": "item-user-1",
+                "node_id": "session.item.frontier",
+                "sequence_no": 121,
+            },
+        },
+    )
+    assert tuple(schema.name for schema in snapshot_record.tool_schemas) == (
+        "capability.search",
+    )
+    rendered = str(snapshot_record.projected_input_items)
+    assert "archived-history-body" not in rendered
+    assert "stale frontier tree content" not in rendered
+    cost = snapshot_record.metadata["request_render_cost"]
+    assert cost["selected_session_item_count"] == 1
+    assert cost["projected_input_item_count"] == 1
+    assert cost["provider_visible_tool_count"] == 1
+    assert cost["rendered_input_char_count"] < 600
+    assert snapshot_record.metadata["context_slice_omitted_node_count"] >= 120
+    persisted_request_snapshot = request_render_snapshots.get(
+        snapshot_record.snapshot_id,
+    )
+    assert persisted_request_snapshot is not None
+    assert persisted_request_snapshot.render_report["cost"] == cost
+
+
 def test_context_workspace_snapshot_projects_only_model_history_session_items_once() -> None:
     class _SessionItemResolver:
         def get_item(self, item_id: str):  # type: ignore[no-untyped-def]
             items = {
-                "item-user": {
+                "item-user-1": {
                     "kind": "user_message",
                     "role": "user",
                     "sequence_no": 1,
@@ -576,7 +842,7 @@ def test_context_workspace_snapshot_projects_only_model_history_session_items_on
                     kind="session_item",
                     title="User Message",
                     state=ContextNodeState(included_in_next_slice=True),
-                    owner_ref={"session_item_id": "item-user"},
+                    owner_ref={"session_item_id": "item-user-1"},
                 ),
                 ContextNodeSeed(
                     node_id="session.item.user.b",
@@ -585,7 +851,7 @@ def test_context_workspace_snapshot_projects_only_model_history_session_items_on
                     kind="session_item",
                     title="Duplicate User Message",
                     state=ContextNodeState(included_in_next_slice=True),
-                    owner_ref={"session_item_id": "item-user"},
+                    owner_ref={"session_item_id": "item-user-1"},
                 ),
                 ContextNodeSeed(
                     node_id="session.item.reasoning",
@@ -648,7 +914,7 @@ def test_context_workspace_snapshot_projects_only_model_history_session_items_on
             "metadata": {
                 "owner": "session",
                 "kind": "session_item",
-                "session_item_id": "item-user",
+                "session_item_id": "item-user-1",
                 "node_id": "session.item.user.a",
                 "sequence_no": 1,
             },
@@ -662,14 +928,14 @@ def test_context_workspace_snapshot_projects_only_model_history_session_items_on
 def test_context_slice_does_not_fallback_to_draft_tool_schemas() -> None:
     class _SessionItemResolver:
         def get_item(self, item_id: str):  # type: ignore[no-untyped-def]
-            assert item_id == "item-slice-user"
+            assert item_id == "item-user-1"
             return type(
                 "SessionItem",
                 (),
                 {
-                    "id": "item-slice-user",
+                    "id": "item-user-1",
                     "session_id": "session-instance-1",
-                    "sequence_no": 7,
+                    "sequence_no": 1,
                     "role": "user",
                     "content_payload": {
                         "blocks": [{"type": "text", "text": "live slice task"}],
@@ -705,14 +971,14 @@ def test_context_slice_does_not_fallback_to_draft_tool_schemas() -> None:
             action=ContextAction.UPSERT,
             nodes=(
                 ContextNodeSeed(
-                    node_id="session.step.item.slice-user",
+                    node_id="session.step.item.current-user",
                     parent_id="session.current",
                     owner="session",
                     kind="session_item",
                     title="User Message",
                     state=ContextNodeState(included_in_next_slice=True),
                     owner_ref={
-                        "session_item_id": "item-slice-user",
+                        "session_item_id": "item-user-1",
                         "role": "user",
                     },
                 ),
@@ -771,9 +1037,11 @@ def test_context_workspace_snapshot_merges_execution_chain_protocol_refs() -> No
     )
 
     execution_ref = {
-        "owner_module": "orchestration",
-        "owner_kind": "execution_step_item",
-        "owner_id": "item-exec-result-1",
+        "owner_module": "session",
+        "owner_kind": "session_item",
+        "owner_id": "item-result-1",
+        "item_id": "item-result-1",
+        "session_item_id": "item-result-1",
         "execution_step_item_id": "item-exec-result-1",
         "execution_step_id": "step-tools",
         "execution_chain_id": "chain-run-context",
@@ -891,9 +1159,11 @@ def test_context_workspace_snapshot_projects_execution_protocol_refs_from_sessio
     )
     protocol_refs = [
         {
-            "owner_module": "orchestration",
-            "owner_kind": "execution_step_item",
-            "owner_id": "item-exec-call-1",
+            "owner_module": "session",
+            "owner_kind": "session_item",
+            "owner_id": "item-call-1",
+            "item_id": "item-call-1",
+            "session_item_id": "item-call-1",
             "execution_step_item_id": "item-exec-call-1",
             "kind": "tool_call",
             "tool_call_id": "call-weather-1",
@@ -902,9 +1172,11 @@ def test_context_workspace_snapshot_projects_execution_protocol_refs_from_sessio
             "protocol_required": True,
         },
         {
-            "owner_module": "orchestration",
-            "owner_kind": "execution_step_item",
-            "owner_id": "item-exec-result-1",
+            "owner_module": "session",
+            "owner_kind": "session_item",
+            "owner_id": "item-result-1",
+            "item_id": "item-result-1",
+            "session_item_id": "item-result-1",
             "execution_step_item_id": "item-exec-result-1",
             "kind": "tool_result",
             "tool_call_id": "call-weather-1",
@@ -913,9 +1185,11 @@ def test_context_workspace_snapshot_projects_execution_protocol_refs_from_sessio
             "protocol_required": True,
         },
         {
-            "owner_module": "orchestration",
-            "owner_kind": "execution_step_item",
-            "owner_id": "item-exec-result-orphan",
+            "owner_module": "session",
+            "owner_kind": "session_item",
+            "owner_id": "item-result-orphan",
+            "item_id": "item-result-orphan",
+            "session_item_id": "item-result-orphan",
             "execution_step_item_id": "item-exec-result-orphan",
             "kind": "tool_result",
             "tool_call_id": "call-orphan",
@@ -1493,6 +1767,13 @@ def test_preview_request_render_snapshot_does_not_mutate_existing_workspace() ->
     assert snapshot_record.metadata["request_render_snapshot"]["timings"][
         "build_control_slice_ms"
     ] >= 0
+    request_render_cost = snapshot_record.metadata["request_render_cost"]
+    assert request_render_cost["selected_session_item_count"] == 0
+    assert request_render_cost["provider_visible_tool_count"] == 0
+    assert request_render_cost["projected_input_item_count"] == 0
+    assert request_render_cost["rendered_input_char_count"] > 0
+    assert request_render_cost["elapsed_ms"] >= 0
+    assert snapshot_record.metadata["request_render_snapshot"]["cost"] == request_render_cost
 
 
 def test_context_workspace_snapshot_metadata_locates_session_item_nodes() -> None:

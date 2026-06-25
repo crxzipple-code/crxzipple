@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
+    LlmInputItem,
+    LlmInputItemKind,
     LlmInvocation,
     LlmMessage,
     LlmMessageRole,
@@ -24,6 +26,12 @@ def test_operations_llm_detail_separates_render_report_from_wire_preview() -> No
         id="inv-render-report",
         llm_id=profile.id,
         messages=(LlmMessage(role=LlmMessageRole.USER, content="hello"),),
+        input_items=(
+            LlmInputItem(
+                kind=LlmInputItemKind.MESSAGE,
+                payload={"role": "user", "content": "hello"},
+            ),
+        ),
         provider_request_payload_preview={
             "preview_source": "provider_adapter",
             "renderer_id": "openai_codex_responses",
@@ -122,11 +130,15 @@ class _FakeLlmQueryService:
         self,
         *,
         llm_id: str | None = None,
+        run_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[LlmInvocation]:
         if llm_id is not None and llm_id != self._profile.id:
             return []
-        return [self._invocation][:limit]
+        if run_id is not None and run_id != self._invocation.run_id:
+            return []
+        return [self._invocation][offset:][:limit]
 
     def list_response_events(
         self,

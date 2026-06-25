@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.access.application.query import AccessControlPlaneQueryProvider
-from crxzipple.modules.access.application.settings_integration import (
+from crxzipple.modules.access.application.settings_config_views import (
     AccessSettingsConfigProvider,
 )
 from crxzipple.modules.access.interfaces.external_consumers import (

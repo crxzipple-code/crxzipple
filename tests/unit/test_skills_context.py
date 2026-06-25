@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from crxzipple.app.integration.skill_runtime_request_resolution import (
     SkillAuthorizationServiceAdapter,
@@ -16,6 +17,7 @@ from crxzipple.modules.authorization.infrastructure import (
 from crxzipple.modules.skills.application import (
     SkillAccessRequirementReadiness,
     SkillAuthorizationReadiness,
+    SkillCreateRequest,
     SkillDraftCreateRequest,
     SkillDraftIntent,
     SkillManager,
@@ -31,6 +33,12 @@ from crxzipple.modules.skills.application.events import (
     SKILL_DRAFT_VALIDATED_EVENT,
 )
 from crxzipple.modules.skills.domain import SkillReadinessSnapshot, SkillRequirements
+from crxzipple.modules.skills.domain import (
+    SkillEnablementPolicy,
+    SkillEnablementTargetKind,
+    SkillInstallScope,
+    SkillRuntimeVisibility,
+)
 from crxzipple.modules.skills.infrastructure.filesystem import (
     FilesystemSkillRepository,
     FilesystemSkillSourceRoot,
@@ -93,12 +101,17 @@ class _FakeOwnerCatalogRepository:
         self.readiness: dict[str, SkillReadinessSnapshot] = {}
         self.drafts: dict[str, object] = {}
         self.draft_audits: dict[str, list[object]] = {}
+        self.policies: dict[str, SkillEnablementPolicy] = {}
 
     def get_readiness(self, skill_id: str) -> SkillReadinessSnapshot | None:
         return self.readiness.get(skill_id)
 
     def get_enablement_policy(self, policy_id: str):
-        return None
+        return self.policies.get(policy_id)
+
+    def upsert_enablement_policy(self, policy: SkillEnablementPolicy):
+        self.policies[policy.policy_id] = policy
+        return policy
 
     def upsert_readiness(
         self,
@@ -555,6 +568,98 @@ class SkillsContextTestCase(unittest.TestCase):
 
             self.assertTrue(resolution.skills[0].ready)
             self.assertEqual(resolution.ready_skills[0].name, "repo-review")
+
+    def test_runtime_request_catalog_honors_source_runtime_visibility_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            system_root = root / "system"
+            _write_skill_package(
+                system_root / "repo-review",
+                name="repo-review",
+                description="Review repository changes carefully.",
+                instructions="# Repo Review\n",
+            )
+            owner_repository = _FakeOwnerCatalogRepository()
+            owner_repository.upsert_enablement_policy(
+                SkillEnablementPolicy(
+                    policy_id="source:system:enablement",
+                    target_kind=SkillEnablementTargetKind.SOURCE,
+                    target_id="system",
+                    enabled=True,
+                    trusted=False,
+                    runtime_visibility=SkillRuntimeVisibility.HIDDEN,
+                ),
+            )
+            manager = SkillManager(
+                repository=FilesystemSkillRepository(
+                    global_root=root / "global",
+                    system_root=system_root,
+                ),
+                owner_catalog_repository=owner_repository,
+            )
+
+            visible_catalog = manager.build_runtime_request_catalog(
+                workspace_dir=None,
+                surface="interactive",
+            )
+            resolution = manager.resolve_runtime_request_catalog(
+                workspace_dir=None,
+                surface="interactive",
+                available_tool_ids=(),
+            )
+
+            self.assertIsNone(visible_catalog)
+            self.assertEqual(resolution.skills, ())
+            self.assertEqual(
+                [package.name for package in manager.list_available(
+                    workspace_dir=None,
+                    surface="interactive",
+                    include_disabled=True,
+                )],
+                ["repo-review"],
+            )
+
+    def test_runtime_request_catalog_honors_skill_runtime_visibility_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            system_root = root / "system"
+            _write_skill_package(
+                system_root / "repo-review",
+                name="repo-review",
+                description="Review repository changes carefully.",
+                instructions="# Repo Review\n",
+            )
+            owner_repository = _FakeOwnerCatalogRepository()
+            owner_repository.upsert_enablement_policy(
+                SkillEnablementPolicy(
+                    policy_id="skill:repo-review:enablement",
+                    target_kind=SkillEnablementTargetKind.SKILL,
+                    target_id="repo-review",
+                    enabled=True,
+                    trusted=False,
+                    runtime_visibility=SkillRuntimeVisibility.HIDDEN,
+                ),
+            )
+            manager = SkillManager(
+                repository=FilesystemSkillRepository(
+                    global_root=root / "global",
+                    system_root=system_root,
+                ),
+                owner_catalog_repository=owner_repository,
+            )
+
+            visible_catalog = manager.build_runtime_request_catalog(
+                workspace_dir=None,
+                surface="interactive",
+            )
+            resolution = manager.resolve_runtime_request_catalog(
+                workspace_dir=None,
+                surface="interactive",
+                available_tool_ids=(),
+            )
+
+            self.assertIsNone(visible_catalog)
+            self.assertEqual(resolution.skills, ())
 
     def test_owner_readiness_uses_runtime_tool_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1438,3 +1543,122 @@ class SkillsContextTestCase(unittest.TestCase):
                     skill_name="release-ops",
                     path="../outside.md",
                 )
+
+    def test_install_normalizes_existing_target_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            source_root = root / "source" / "release-ops"
+            _write_skill_package(
+                source_root,
+                name="release-ops",
+                description="Prepare and validate releases.",
+                instructions="# Release Ops\n\nFollow the release checklist.\n",
+            )
+            repository = FilesystemSkillRepository(
+                global_root=root / "global",
+                system_root=root / "system",
+            )
+
+            with patch(
+                "crxzipple.modules.skills.infrastructure.filesystem.repository.shutil.copytree",
+                side_effect=FileExistsError("created by another writer"),
+            ):
+                with self.assertRaisesRegex(SkillValidationError, "already exists"):
+                    repository.install(
+                        source_dir=str(source_root),
+                        scope=SkillInstallScope.GLOBAL,
+                        workspace_dir=None,
+                    )
+
+    def test_create_normalizes_existing_target_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            repository = FilesystemSkillRepository(
+                global_root=root / "global",
+                system_root=root / "system",
+            )
+            target_path = workspace.resolve() / ".crxzipple" / "skills" / "release-ops"
+            target_path_class = type(target_path)
+            original_mkdir = target_path_class.mkdir
+
+            def mkdir_with_race(path: Path, *args: object, **kwargs: object) -> None:
+                if path == target_path:
+                    raise FileExistsError("created by another writer")
+                original_mkdir(path, *args, **kwargs)
+
+            with patch.object(target_path_class, "mkdir", new=mkdir_with_race):
+                with self.assertRaisesRegex(SkillValidationError, "already exists"):
+                    repository.create(
+                        SkillCreateRequest(
+                            name="release-ops",
+                            description="Prepare and validate releases.",
+                            instructions="# Release Ops\n\nFollow the release checklist.\n",
+                            workspace_dir=str(workspace),
+                        ),
+                    )
+
+    def test_write_file_rejects_traversal_to_instruction_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            repository = FilesystemSkillRepository(
+                global_root=root / "global",
+                system_root=root / "system",
+            )
+            repository.create(
+                SkillCreateRequest(
+                    name="release-ops",
+                    description="Prepare and validate releases.",
+                    instructions="# Release Ops\n\nFollow the release checklist.\n",
+                    workspace_dir=str(workspace),
+                ),
+            )
+            instructions_path = workspace / ".crxzipple" / "skills" / "release-ops" / "SKILL.md"
+            original_instructions = instructions_path.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                SkillValidationError,
+                "must not contain traversal segments",
+            ):
+                repository.write_file(
+                    workspace_dir=str(workspace),
+                    skill_name="release-ops",
+                    path="references/../SKILL.md",
+                    content="# Hijacked",
+                )
+
+            self.assertEqual(instructions_path.read_text(encoding="utf-8"), original_instructions)
+
+    def test_delete_file_rejects_traversal_inside_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            repository = FilesystemSkillRepository(
+                global_root=root / "global",
+                system_root=root / "system",
+            )
+            repository.create(
+                SkillCreateRequest(
+                    name="release-ops",
+                    description="Prepare and validate releases.",
+                    instructions="# Release Ops\n\nFollow the release checklist.\n",
+                    workspace_dir=str(workspace),
+                ),
+            )
+            instructions_path = workspace / ".crxzipple" / "skills" / "release-ops" / "SKILL.md"
+
+            with self.assertRaisesRegex(
+                SkillValidationError,
+                "must not contain traversal segments",
+            ):
+                repository.delete_file(
+                    workspace_dir=str(workspace),
+                    skill_name="release-ops",
+                    path="references/../SKILL.md",
+                )
+
+            self.assertTrue(instructions_path.is_file())

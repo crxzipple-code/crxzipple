@@ -23,7 +23,7 @@ from crxzipple.modules.llm.domain import (
     LlmResult,
     ToolCallIntent,
 )
-from crxzipple.modules.operations.application.observation import OperationsObservedEvent
+from crxzipple.modules.operations.application.observation_models import OperationsObservedEvent
 from crxzipple.modules.operations.application.read_models.llm import (
     LlmOperationsReadModelProvider,
 )
@@ -351,6 +351,14 @@ def test_llm_operations_page_exposes_runtime_transcript_budget_metadata() -> Non
 
     page = provider.page()
 
+    assert page.projection_diagnostics is not None
+    assert page.projection_diagnostics.module == "llm"
+    assert page.projection_diagnostics.owner_call_count >= 2
+    assert page.projection_diagnostics.processed_item_count >= 4
+    assert {
+        source.module
+        for source in page.projection_diagnostics.owner_sources
+    }.issuperset({"llm", "access", "orchestration", "operations"})
     row = page.recent_invocations.rows[0].cells
     assert row["provider_input_tokens"] == "1800"
     assert row["draft_input_items"] == "3"
@@ -597,11 +605,15 @@ class _FakeLlmQueryService:
         self,
         *,
         llm_id: str | None = None,
+        run_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[LlmInvocation]:
         if llm_id is not None and llm_id != self._profile.id:
             return []
-        return [self._invocation][:limit]
+        if run_id is not None and run_id != self._invocation.run_id:
+            return []
+        return [self._invocation][offset:][:limit]
 
     def list_response_events(
         self,

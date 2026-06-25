@@ -253,6 +253,7 @@ class HttpModuleTestCase(unittest.TestCase):
         )
         self.previous_daemon_state_dir = os.environ.get("APP_DAEMON_STATE_DIR")
         self.previous_events_state_dir = os.environ.get("APP_EVENTS_STATE_DIR")
+        self.previous_memory_storage_root = os.environ.get("APP_MEMORY_STORAGE_ROOT")
         self.previous_operations_state_dir = os.environ.get("APP_OPERATIONS_STATE_DIR")
         self.previous_events_backend = os.environ.get("APP_EVENTS_BACKEND")
         self.previous_events_redis_url = os.environ.get("APP_EVENTS_REDIS_URL")
@@ -314,6 +315,9 @@ class HttpModuleTestCase(unittest.TestCase):
         os.environ["APP_EVENTS_STATE_DIR"] = str(
             Path(self.harness._tempdir.name) / "events",
         )
+        os.environ["APP_MEMORY_STORAGE_ROOT"] = str(
+            Path(self.harness._tempdir.name) / "memory",
+        )
         os.environ["APP_OPERATIONS_STATE_DIR"] = str(
             Path(self.harness._tempdir.name) / "operations",
         )
@@ -360,6 +364,12 @@ class HttpModuleTestCase(unittest.TestCase):
         else:
             os.environ["APP_OPERATIONS_STATE_DIR"] = (
                 self.previous_operations_state_dir
+            )
+        if self.previous_memory_storage_root is None:
+            os.environ.pop("APP_MEMORY_STORAGE_ROOT", None)
+        else:
+            os.environ["APP_MEMORY_STORAGE_ROOT"] = (
+                self.previous_memory_storage_root
             )
         if self.previous_events_backend is None:
             os.environ.pop("APP_EVENTS_BACKEND", None)

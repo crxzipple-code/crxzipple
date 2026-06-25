@@ -31,11 +31,7 @@ from .query import (
     BrowserProfileQueryService,
     BrowserProfileRuntimeRecord,
 )
-from .services import (
-    BrowserExecutionCoordinatorService,
-    BrowserProfileAdminService,
-    BrowserProfileAllocatorService,
-    BrowserProfilePoolService,
+from .execution_planning import (
     DefaultBrowserAllocationTargetRecycler,
     DefaultBrowserAllocationTargetInspector,
     DefaultBrowserCapabilitiesResolver,
@@ -46,6 +42,10 @@ from .services import (
     DefaultBrowserProfileSelectionOpsFactory,
     DefaultBrowserProfileTabOpsFactory,
 )
+from .execution_coordinator import BrowserExecutionCoordinatorService
+from .profile_admin_service import BrowserProfileAdminService
+from .profile_allocator_service import BrowserProfileAllocatorService
+from .profile_pool_service import BrowserProfilePoolService
 from .tool_application import (
     BrowserToolApplicationError,
     BrowserToolApplicationService,

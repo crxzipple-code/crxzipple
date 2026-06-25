@@ -977,7 +977,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(second_processed)
         assert second_processed is not None
         self.assertEqual(second_processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertGreaterEqual(len(adapter.requests), 4)
+        self.assertEqual(len(adapter.requests), 3)
         followup_request = adapter.requests[-1]
         self.assertEqual(
             followup_request.request_metadata["input_mode"],

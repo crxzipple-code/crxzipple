@@ -21,6 +21,7 @@ from crxzipple.modules.mobile.infrastructure import (
     AdbBackedMobileActionEngine,
     AdbControlEngine,
     AndroidAdbClient,
+    FileBackedMobileDeviceLeaseStore,
     FileBackedMobileRefStore,
     FileBackedMobileRuntimeStateStore,
     FileBackedMobileSystemConfigStore,
@@ -38,6 +39,7 @@ class MobileInfrastructure:
     system_config_store: FileBackedMobileSystemConfigStore
     state_root: MobileStateRoot
     runtime_state_store: FileBackedMobileRuntimeStateStore
+    device_lease_store: FileBackedMobileDeviceLeaseStore
     ref_store: FileBackedMobileRefStore
     control_engine: AdbControlEngine
     action_engine: AdbBackedMobileActionEngine
@@ -116,6 +118,7 @@ def build_mobile_infrastructure(
     )
     resolved_system_config = system_config_store.load()
     runtime_state_store = FileBackedMobileRuntimeStateStore(state_root.runtime_dir)
+    device_lease_store = FileBackedMobileDeviceLeaseStore(state_root.leases_dir)
     ref_store = FileBackedMobileRefStore(state_root.refs_dir)
     control_engine = AdbControlEngine()
     action_engine = AdbBackedMobileActionEngine(
@@ -131,6 +134,7 @@ def build_mobile_infrastructure(
         ),
         capabilities_resolver=DefaultMobileCapabilitiesResolver(),
         runtime_state_store=runtime_state_store,
+        device_lease_store=device_lease_store,
         execution_planner=DefaultMobileExecutionPlanner(),
         engine_registry=StaticMobileEngineRegistry(
             adb_control=control_engine,
@@ -142,6 +146,7 @@ def build_mobile_infrastructure(
         system_config_store=system_config_store,
         state_root=state_root,
         runtime_state_store=runtime_state_store,
+        device_lease_store=device_lease_store,
         ref_store=ref_store,
         control_engine=control_engine,
         action_engine=action_engine,

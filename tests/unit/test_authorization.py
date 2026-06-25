@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import json
 from pathlib import Path
 import unittest
 
@@ -37,6 +38,8 @@ from crxzipple.modules.llm.application import (
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmDefaults,
+    LlmInputItem,
+    LlmInputItemKind,
     LlmMessage,
     LlmMessageRole,
     LlmProviderKind,
@@ -65,6 +68,54 @@ class _FakeLlmAdapter:
             ),
             provider_request_id="fake-authorization-request",
         )
+
+
+def _weather_tool_request(
+    *,
+    agent_id: str,
+    run_id: str | None = None,
+    session_key: str | None = None,
+    tool_id: str = "open_meteo_weather.forecast_weather",
+    effect_id: str = "weather_data",
+) -> ToolExecutionAuthorizationRequest:
+    context_attrs: dict[str, object] = {
+        "interface": "http",
+        "agent_id": agent_id,
+    }
+    if run_id is not None:
+        context_attrs["run_id"] = run_id
+    if session_key is not None:
+        context_attrs["session_key"] = session_key
+    return ToolExecutionAuthorizationRequest(
+        subject=AuthorizationSubject(type="interface", id="http"),
+        resource=AuthorizationResource(
+            kind="tool",
+            id=tool_id,
+            attrs={
+                "environment": "remote",
+                "mode": "inline",
+                "strategy": "async",
+                "required_effect_ids": [effect_id],
+                "authorization_effect_ids": [effect_id],
+                "mutates_state": False,
+                "tags": [],
+            },
+        ),
+        context=AuthorizationContext(attrs=context_attrs),
+        required_effect_ids=(effect_id,),
+    )
+
+
+def _authorization_settings(harness: SqliteTestHarness, *, enabled: bool = False):
+    return replace(
+        load_settings(),
+        database_url=harness.database_url,
+        authorization_enabled=enabled,
+        authorization_policy_paths=(),
+        tool_openapi_providers=(),
+        tool_mcp_providers=(),
+        llm_profiles=(),
+    )
 
 
 class AuthorizationTestCase(unittest.TestCase):
@@ -97,6 +148,7 @@ class AuthorizationTestCase(unittest.TestCase):
         self.assertEqual(
             [item.id for item in policies],
             [
+                "allow_artifact_read",
                 "allow_browser_local_tool_access_effect",
                 "allow_browser_tool_execution",
                 "allow_cli_source_cancel_from_cli_interface",
@@ -421,6 +473,12 @@ class AuthorizationTestCase(unittest.TestCase):
                 messages=(
                     LlmMessage(role=LlmMessageRole.USER, content="hello"),
                 ),
+                input_items=(
+                    LlmInputItem(
+                        kind=LlmInputItemKind.MESSAGE,
+                        payload={"role": "user", "content": "hello"},
+                    ),
+                ),
             ),
         )
         self.assertEqual(invocation.status.value, "succeeded")
@@ -699,6 +757,92 @@ class AuthorizationTestCase(unittest.TestCase):
             stored_audit = session.get(AuthorizationAuditModel, audit_records[0].id)
         self.assertIsNotNone(stored_audit)
 
+    def test_authorization_audit_payloads_redact_sensitive_values(self) -> None:
+        container = self.harness.build_runtime_container(
+            settings=_authorization_settings(self.harness, enabled=True),
+        )
+        service = container.require(AppKey.AUTHORIZATION_SERVICE)
+        service.create_policy(
+            AuthorizationPolicy(
+                id="allow-sensitive-policy",
+                effect=AuthorizationEffect.ALLOW,
+                actions=("tool.run",),
+                resource_kind="tool",
+                resource_id="secure-tool",
+                context_match={
+                    "api_key": "raw-api-key",
+                    "nested": {
+                        "client_secret": "raw-client-secret",
+                        "headers": {"Authorization": "Bearer raw-token"},
+                    },
+                },
+            ),
+            reason="contains secret fixtures",
+        )
+        service.dry_run(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(
+                    type="interface",
+                    id="http",
+                    attrs={"session_token": "raw-session-token"},
+                ),
+                action="tool.run",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="secure-tool",
+                    attrs={"credential_ref": "raw-credential-ref"},
+                ),
+                context=AuthorizationContext(
+                    attrs={"cookie": "raw-cookie", "safe": "visible"},
+                ),
+            ),
+            reason="dry-run secret fixtures",
+        )
+
+        audit_records = service.list_audit_records(limit=20)
+        payload_text = json.dumps(
+            [
+                {
+                    "before": record.before_payload,
+                    "after": record.after_payload,
+                    "decision": record.decision_payload,
+                    "metadata": record.metadata,
+                }
+                for record in audit_records
+            ],
+            sort_keys=True,
+        )
+
+        self.assertNotIn("raw-api-key", payload_text)
+        self.assertNotIn("raw-client-secret", payload_text)
+        self.assertNotIn("raw-token", payload_text)
+        self.assertNotIn("raw-session-token", payload_text)
+        self.assertNotIn("raw-credential-ref", payload_text)
+        self.assertNotIn("raw-cookie", payload_text)
+        self.assertIn("visible", payload_text)
+        self.assertIn("[redacted]", payload_text)
+
+        with container.require(AppKey.DATABASE_SESSION_FACTORY)() as session:
+            stored_audits = session.query(AuthorizationAuditModel).all()
+        stored_payload_text = json.dumps(
+            [
+                {
+                    "before": item.before_payload,
+                    "after": item.after_payload,
+                    "decision": item.decision_payload,
+                    "metadata": item.metadata_payload,
+                }
+                for item in stored_audits
+            ],
+            sort_keys=True,
+        )
+        self.assertNotIn("raw-api-key", stored_payload_text)
+        self.assertNotIn("raw-client-secret", stored_payload_text)
+        self.assertNotIn("raw-token", stored_payload_text)
+        self.assertNotIn("raw-session-token", stored_payload_text)
+        self.assertNotIn("raw-credential-ref", stored_payload_text)
+        self.assertNotIn("raw-cookie", stored_payload_text)
+
     def test_check_tool_execution_returns_approval_required_when_effect_is_missing(self) -> None:
         settings = replace(
             load_settings(),
@@ -792,6 +936,129 @@ class AuthorizationTestCase(unittest.TestCase):
 
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.code, AuthorizationDecisionCode.ALLOW)
+
+    def test_run_grant_state_machine_scopes_to_run_and_agent(self) -> None:
+        container = self.harness.build_runtime_container(
+            settings=_authorization_settings(self.harness),
+        )
+        service = container.require(AppKey.AUTHORIZATION_SERVICE)
+        service.grant_run_authorization(
+            run_id="run-weather-1",
+            agent_id="assistant",
+            approval_request_id="approval-weather-1",
+            effect_ids=("weather_data",),
+            tool_ids=("open_meteo_weather.forecast_weather",),
+        )
+
+        allowed = service.check_tool_execution(
+            _weather_tool_request(agent_id="assistant", run_id="run-weather-1"),
+        )
+        same_agent_other_run = service.check_tool_execution(
+            _weather_tool_request(agent_id="assistant", run_id="run-weather-2"),
+        )
+        other_agent_same_run = service.check_tool_execution(
+            _weather_tool_request(agent_id="other-agent", run_id="run-weather-1"),
+        )
+        missing_agent_same_run = service.check_tool_execution(
+            _weather_tool_request(agent_id="", run_id="run-weather-1"),
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(allowed.code, AuthorizationDecisionCode.ALLOW)
+        for decision in (
+            same_agent_other_run,
+            other_agent_same_run,
+            missing_agent_same_run,
+        ):
+            self.assertFalse(decision.allowed)
+            self.assertEqual(decision.code, AuthorizationDecisionCode.APPROVAL_REQUIRED)
+            self.assertEqual(decision.details["missing_effect_ids"], ["weather_data"])
+
+    def test_session_grant_state_machine_scopes_to_session_and_agent(self) -> None:
+        container = self.harness.build_runtime_container(
+            settings=_authorization_settings(self.harness),
+        )
+        service = container.require(AppKey.AUTHORIZATION_SERVICE)
+        service.grant_session_authorization(
+            session_key="agent:assistant:main",
+            agent_id="assistant",
+            approval_request_id="approval-weather-session",
+            effect_ids=("weather_data",),
+            tool_ids=("open_meteo_weather.forecast_weather",),
+        )
+
+        first_run = service.check_tool_execution(
+            _weather_tool_request(
+                agent_id="assistant",
+                run_id="run-weather-1",
+                session_key="agent:assistant:main",
+            ),
+        )
+        second_run_same_session = service.check_tool_execution(
+            _weather_tool_request(
+                agent_id="assistant",
+                run_id="run-weather-2",
+                session_key="agent:assistant:main",
+            ),
+        )
+        same_agent_other_session = service.check_tool_execution(
+            _weather_tool_request(
+                agent_id="assistant",
+                run_id="run-weather-1",
+                session_key="agent:assistant:other",
+            ),
+        )
+        other_agent_same_session = service.check_tool_execution(
+            _weather_tool_request(
+                agent_id="other-agent",
+                run_id="run-weather-1",
+                session_key="agent:assistant:main",
+            ),
+        )
+
+        self.assertTrue(first_run.allowed)
+        self.assertEqual(first_run.code, AuthorizationDecisionCode.ALLOW)
+        self.assertTrue(second_run_same_session.allowed)
+        self.assertEqual(second_run_same_session.code, AuthorizationDecisionCode.ALLOW)
+        for decision in (same_agent_other_session, other_agent_same_session):
+            self.assertFalse(decision.allowed)
+            self.assertEqual(decision.code, AuthorizationDecisionCode.APPROVAL_REQUIRED)
+            self.assertEqual(decision.details["missing_effect_ids"], ["weather_data"])
+
+    def test_agent_managed_grant_state_machine_revoke_removes_effect_access(self) -> None:
+        container = self.harness.build_runtime_container(
+            settings=_authorization_settings(self.harness, enabled=True),
+        )
+        service = container.require(AppKey.AUTHORIZATION_SERVICE)
+        tool_policy = service.grant_agent_tool_authorization(
+            agent_id="assistant",
+            tool_id="open_meteo_weather.forecast_weather",
+        )
+        effect_policy = service.grant_agent_effect_authorization(
+            agent_id="assistant",
+            effect_id="weather_data",
+        )
+
+        allowed = service.check_tool_execution(
+            _weather_tool_request(agent_id="assistant"),
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertIn(tool_policy.id, allowed.matched_policy_ids)
+        self.assertIn(effect_policy.id, allowed.matched_policy_ids)
+
+        revoked = service.revoke_agent_effect_authorization(
+            agent_id="assistant",
+            effect_id="weather_data",
+        )
+        after_revoke = service.check_tool_execution(
+            _weather_tool_request(agent_id="assistant"),
+        )
+
+        self.assertIsNotNone(revoked)
+        self.assertFalse(after_revoke.allowed)
+        self.assertEqual(after_revoke.code, AuthorizationDecisionCode.APPROVAL_REQUIRED)
+        self.assertEqual(after_revoke.details["missing_effect_ids"], ["weather_data"])
 
     def test_tool_execution_requires_effect_when_tool_authorization_allows_tool(self) -> None:
         settings = replace(

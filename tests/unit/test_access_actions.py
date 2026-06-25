@@ -15,9 +15,11 @@ from crxzipple.modules.access.application.repositories import (
 )
 from crxzipple.modules.access.application.setup import AccessSetupSessionService
 from crxzipple.modules.access.application.services import AccessApplicationService
+from crxzipple.modules.access.application.settings_config_views import (
+    AccessSettingsConfigProvider,
+)
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsActionAdapter,
-    AccessSettingsConfigProvider,
 )
 from crxzipple.modules.access.domain import CredentialResolutionError
 from crxzipple.modules.settings import create_in_memory_settings_services

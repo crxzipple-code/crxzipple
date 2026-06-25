@@ -22,6 +22,8 @@ from crxzipple.modules.workbench.application import (
     WorkbenchKeyValueSection,
     WorkbenchLinkedEntity,
     WorkbenchLinkedEntityDetail,
+    WorkbenchOwnerFactSource,
+    WorkbenchProjectionDiagnostics,
     WorkbenchRunView,
     WorkbenchTimelineItem,
     WorkbenchThreadSummary,
@@ -130,6 +132,49 @@ class RunMetricsResponse(BaseModel):
             llm_calls=value.llm_calls,
             tokens=value.tokens,
             estimated_cost_usd=value.estimated_cost_usd,
+        )
+
+
+class WorkbenchOwnerFactSourceResponse(BaseModel):
+    module: str
+    facts: list[str] = Field(default_factory=list)
+    read_path: str
+
+    @classmethod
+    def from_value(
+        cls,
+        value: WorkbenchOwnerFactSource,
+    ) -> "WorkbenchOwnerFactSourceResponse":
+        return cls(
+            module=value.module,
+            facts=list(value.facts),
+            read_path=value.read_path,
+        )
+
+
+class WorkbenchProjectionDiagnosticsResponse(BaseModel):
+    owner_sources: list[WorkbenchOwnerFactSourceResponse] = Field(default_factory=list)
+    owner_call_sources: list[str] = Field(default_factory=list)
+    owner_call_count: int
+    processed_item_count: int
+    timeline_item_count: int
+    elapsed_ms: float
+
+    @classmethod
+    def from_value(
+        cls,
+        value: WorkbenchProjectionDiagnostics,
+    ) -> "WorkbenchProjectionDiagnosticsResponse":
+        return cls(
+            owner_sources=[
+                WorkbenchOwnerFactSourceResponse.from_value(item)
+                for item in value.owner_sources
+            ],
+            owner_call_sources=list(value.owner_call_sources),
+            owner_call_count=value.owner_call_count,
+            processed_item_count=value.processed_item_count,
+            timeline_item_count=value.timeline_item_count,
+            elapsed_ms=value.elapsed_ms,
         )
 
 
@@ -488,6 +533,7 @@ class WorkbenchRunResponse(BaseModel):
     actions: list[WorkbenchActionResponse] = Field(default_factory=list)
     inspector: WorkbenchInspectorResponse
     trace: TraceContextResponse
+    projection_diagnostics: WorkbenchProjectionDiagnosticsResponse
 
     @classmethod
     def from_view(cls, view: WorkbenchRunView) -> "WorkbenchRunResponse":
@@ -521,6 +567,9 @@ class WorkbenchRunResponse(BaseModel):
             actions=[WorkbenchActionResponse.from_value(item) for item in view.actions],
             inspector=WorkbenchInspectorResponse.from_value(view.inspector),
             trace=TraceContextResponse.from_value(view.trace),
+            projection_diagnostics=WorkbenchProjectionDiagnosticsResponse.from_value(
+                view.projection_diagnostics,
+            ),
         )
 
 

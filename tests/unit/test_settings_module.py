@@ -10,7 +10,7 @@ from crxzipple.modules.settings import (
     UpsertSettingsOverrideInput,
     create_in_memory_settings_services,
 )
-from crxzipple.modules.settings.domain import SettingsActionStatus
+from crxzipple.modules.settings.domain import SettingsActionStatus, SettingsConflictError
 
 
 class SettingsModuleTestCase(unittest.TestCase):
@@ -171,6 +171,69 @@ class SettingsModuleTestCase(unittest.TestCase):
             services.queries.get_effective("tool:provider:weather").effective_value["provider_kind"],
             "openapi",
         )
+
+    def test_expected_active_version_rejects_stale_update_and_publish(self) -> None:
+        services = create_in_memory_settings_services()
+        services.actions.create_resource(
+            CreateSettingsResourceInput(
+                resource_id="runtime:defaults",
+                resource_kind="runtime_defaults",
+                owner_module="settings",
+                payload={"tool_worker": {"max_in_flight": 2}},
+                reason="bootstrap runtime defaults",
+                publish=True,
+            ),
+        )
+
+        first_active = services.queries.get_resource("runtime:defaults").active_version_id
+        updated = services.actions.update_resource(
+            UpdateSettingsResourceInput(
+                resource_id="runtime:defaults",
+                payload={"tool_worker": {"max_in_flight": 4}},
+                reason="operator updates from current version",
+                publish=True,
+                expected_active_version_id=first_active,
+            ),
+        )
+        self.assertEqual(updated.version.id, "runtime:defaults:v2")
+        self.assertEqual(
+            services.queries.get_resource("runtime:defaults").active_version_id,
+            "runtime:defaults:v2",
+        )
+
+        with self.assertRaises(SettingsConflictError):
+            services.actions.update_resource(
+                UpdateSettingsResourceInput(
+                    resource_id="runtime:defaults",
+                    payload={"tool_worker": {"max_in_flight": 8}},
+                    reason="operator tries stale update",
+                    publish=True,
+                    expected_active_version_id=first_active,
+                ),
+            )
+        self.assertEqual(
+            [version.id for version in services.queries.list_versions("runtime:defaults")],
+            ["runtime:defaults:v1", "runtime:defaults:v2"],
+        )
+        failed_update_audit = services.queries.list_audits()[-1]
+        self.assertEqual(failed_update_audit.status, SettingsActionStatus.FAILED)
+        self.assertEqual(failed_update_audit.error["code"], "settings_active_version_conflict")
+
+        with self.assertRaises(SettingsConflictError):
+            services.actions.publish_version(
+                PublishSettingsVersionInput(
+                    resource_id="runtime:defaults",
+                    reason="operator tries stale publish",
+                    expected_active_version_id=first_active,
+                ),
+            )
+        self.assertEqual(
+            services.queries.get_resource("runtime:defaults").active_version_id,
+            "runtime:defaults:v2",
+        )
+        failed_publish_audit = services.queries.list_audits()[-1]
+        self.assertEqual(failed_publish_audit.status, SettingsActionStatus.FAILED)
+        self.assertEqual(failed_publish_audit.error["code"], "settings_active_version_conflict")
 
 
 if __name__ == "__main__":

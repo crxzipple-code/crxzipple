@@ -1,38 +1,50 @@
+from crxzipple.modules.session.application.item_append import (
+    AppendSessionItemInput,
+    AppendSessionItemsInput,
+)
+from crxzipple.modules.session.application.session_lifecycle import (
+    EnsureSessionInput,
+    ResetSessionInput,
+    RoutedSessionResult,
+    SessionResolutionResult,
+    SyncRoutedSessionInput,
+)
+from crxzipple.modules.session.application.session_queries import (
+    BuildSessionMaintenanceWindowInput,
+    BuildSessionReplayWindowInput,
+    GetSessionContextFrontierInput,
+    GetSessionItemBySourceInput,
+    ListSessionInstancesInput,
+    ListSessionItemRangeInput,
+    ListSessionItemsInput,
+    ListSessionSegmentHandlesInput,
+)
 from crxzipple.modules.session.application.resolution import (
     ResolveSessionInput,
     ResolvedSessionBundle,
     SessionResolutionService,
     SessionRoutingDecision,
 )
-from crxzipple.modules.session.application.services import (
-    AppendSessionItemInput,
-    AppendSessionItemsInput,
-    BuildSessionMaintenanceWindowInput,
-    BuildSessionReplayWindowInput,
-    CompactSessionSegmentInput,
-    CompactSessionSegmentResult,
-    EnsureSessionInput,
-    GetSessionContextFrontierInput,
-    GetSessionItemBySourceInput,
-    ListSessionItemRangeInput,
-    ListSessionInstancesInput,
-    ListSessionItemsInput,
-    ListSessionSegmentHandlesInput,
+from crxzipple.modules.session.application.session_metadata import (
     MergeSessionItemMetadataInput,
     MergeSessionMetadataInput,
-    RoutedSessionResult,
-    ResetSessionInput,
-    SessionApplicationService,
+)
+from crxzipple.modules.session.application.segment_compaction import (
+    CompactSessionSegmentInput,
+    CompactSessionSegmentResult,
+)
+from crxzipple.modules.session.application.session_windows import (
     SessionContextFrontier,
     SessionItemRange,
     SessionItemsBundle,
     SessionReplayWindow,
-    SessionResolutionResult,
     SessionSegmentHandle,
     SessionSegmentHandles,
-    SyncRoutedSessionInput,
-    SessionUnitOfWork,
 )
+from crxzipple.modules.session.application.services import (
+    SessionApplicationService,
+)
+from crxzipple.modules.session.application.unit_of_work import SessionUnitOfWork
 from crxzipple.modules.session.application.runtime import (
     SessionRuntimeControlPort,
     SessionRuntimeRunRecord,

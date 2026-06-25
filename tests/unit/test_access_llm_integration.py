@@ -20,6 +20,8 @@ from crxzipple.modules.llm.application import (
 )
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
+    LlmInputItem,
+    LlmInputItemKind,
     LlmMessage,
     LlmMessageRole,
     LlmProviderKind,
@@ -280,6 +282,12 @@ class AccessLlmIntegrationTestCase(unittest.TestCase):
                 llm_id=profile_id,
                 messages=(
                     LlmMessage(role=LlmMessageRole.USER, content="hello"),
+                ),
+                input_items=(
+                    LlmInputItem(
+                        kind=LlmInputItemKind.MESSAGE,
+                        payload={"role": "user", "content": "hello"},
+                    ),
                 ),
             ),
         )

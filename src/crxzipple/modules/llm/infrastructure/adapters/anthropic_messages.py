@@ -10,7 +10,7 @@ from crxzipple.modules.llm.application.adapters import (
     LlmAdapterResponse,
 )
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmMessagePhase,
     LlmMessageRole,
     LlmResponseItem,

@@ -4,6 +4,19 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
+from crxzipple.modules.access.application.read_model_payloads import (
+    add_timestamp_payload as _add_timestamp_payload,
+    normalize_requirement_sets as _normalize_requirement_sets,
+    normalize_slot_bindings as _normalize_slot_bindings,
+    redacted_check_mapping as _redacted_check_mapping,
+    redacted_mapping as _redacted_mapping,
+    requirements_by_consumer as _requirements_by_consumer,
+    safe_masked_preview as _safe_masked_preview,
+    safe_requirement_sets as _safe_requirement_sets,
+    safe_source_ref as _safe_source_ref,
+    setup_flow_hint_payload as _setup_flow_hint_payload,
+    source_metadata as _source_metadata,
+)
 from crxzipple.shared.access import AccessSetupFlowHint
 
 
@@ -456,200 +469,3 @@ class AccessOverviewReadModel:
         }
         _add_timestamp_payload(payload, "generated_at", self.generated_at)
         return payload
-
-
-def _add_timestamp_payload(
-    payload: JsonObject,
-    key: str,
-    value: datetime | None,
-) -> None:
-    if value is not None:
-        payload[key] = value.isoformat()
-
-
-def _normalize_requirement_sets(
-    requirement_sets: tuple[tuple[str, ...], ...],
-) -> tuple[tuple[str, ...], ...]:
-    resolved: list[tuple[str, ...]] = []
-    for requirement_set in requirement_sets:
-        normalized = tuple(
-            dict.fromkeys(
-                str(item).strip()
-                for item in requirement_set
-                if item is not None and str(item).strip()
-            ),
-        )
-        if normalized and normalized not in resolved:
-            resolved.append(normalized)
-    return tuple(resolved)
-
-
-def _normalize_slot_bindings(value: Mapping[str, str]) -> JsonObject:
-    normalized: dict[str, str] = {}
-    for slot, binding_id in value.items():
-        slot_text = str(slot).strip()
-        binding_text = str(binding_id).strip()
-        if slot_text and binding_text:
-            normalized[slot_text] = binding_text
-    return normalized
-
-
-def _redacted_mapping(value: Mapping[str, object]) -> JsonObject:
-    return {str(key): _redacted_value(str(key), item) for key, item in value.items()}
-
-
-def _redacted_check_mapping(value: Mapping[str, object]) -> JsonObject:
-    payload = _redacted_mapping(value)
-    target_type = str(payload.get("target_type") or "")
-    requirement = payload.get("requirement")
-    if (
-        target_type == "credential_binding"
-        and isinstance(requirement, str)
-    ):
-        payload["requirement"] = (
-            _masked_binding_reference(requirement)
-            if _is_safe_binding_reference(requirement)
-            else "literal:***"
-        )
-    return payload
-
-
-def _setup_flow_hint_payload(
-    value: AccessSetupFlowHint | None,
-) -> JsonObject | None:
-    if value is None:
-        return None
-    return {
-        "flow_kind": str(value.flow_kind),
-        "provider": value.provider,
-        "authorization_url": value.authorization_url,
-        "token_url": value.token_url,
-        "device_code_url": value.device_code_url,
-        "callback_url": value.callback_url,
-        "metadata": _redacted_mapping(value.metadata),
-    }
-
-
-def _requirements_by_consumer(
-    requirements: tuple[AccessCredentialRequirementReadModel, ...],
-) -> JsonObject:
-    grouped: dict[str, list[JsonObject]] = {}
-    for requirement in requirements:
-        key = ":".join(
-            (
-                requirement.consumer_module,
-                requirement.consumer_kind,
-                requirement.consumer_id,
-            ),
-        )
-        grouped.setdefault(key, []).append(requirement.to_payload())
-    return grouped
-
-
-def _safe_requirement_sets(
-    requirement_sets: tuple[tuple[str, ...], ...],
-) -> list[list[str]]:
-    return [
-        [_safe_requirement_ref(item) for item in requirement_set]
-        for requirement_set in requirement_sets
-    ]
-
-
-def _safe_requirement_ref(value: str) -> str:
-    normalized = str(value).strip()
-    if not normalized:
-        return ""
-    if normalized.startswith(("env:", "file:", "literal:", "inline:")):
-        return f"{normalized.split(':', 1)[0]}:***"
-    if "(" in normalized and normalized.endswith(")"):
-        prefix = normalized.split("(", 1)[0].strip()
-        return f"{prefix}(***)"
-    return normalized
-
-
-def _safe_source_ref(source_kind: str, source_ref: str) -> str:
-    normalized_kind = source_kind.strip().lower()
-    if normalized_kind in {"env", "file"}:
-        return f"{normalized_kind}:***"
-    if normalized_kind in {"literal", "inline", "inline_credential", "secret"}:
-        return "***"
-    return str(_redacted_value("source_ref", source_ref))
-
-
-def _source_metadata(source_kind: str, source_ref: str) -> JsonObject:
-    normalized_kind = source_kind.strip().lower()
-    normalized_ref = source_ref.strip()
-    metadata: JsonObject = {
-        "source_kind": normalized_kind,
-        "configured": bool(normalized_ref),
-        "source_ref_redacted": bool(normalized_ref),
-    }
-    if normalized_kind == "env" and normalized_ref:
-        metadata["reference_kind"] = "environment_variable"
-    elif normalized_kind == "file" and normalized_ref:
-        metadata["reference_kind"] = "file_path"
-    elif normalized_kind == "oauth_account" and normalized_ref:
-        metadata["source_ref_redacted"] = False
-    return metadata
-
-
-def _safe_masked_preview(source_kind: str, masked_preview: str | None) -> str | None:
-    if masked_preview is None:
-        return None
-    normalized_kind = source_kind.strip().lower()
-    if normalized_kind in {"env", "file"}:
-        return f"{normalized_kind}:***"
-    if normalized_kind in {"literal", "inline", "inline_credential", "secret"}:
-        return "***"
-    return str(_redacted_value("masked_preview", masked_preview))
-
-
-def _redacted_value(key: str, value: object) -> object:
-    if _is_sensitive_key(key):
-        if isinstance(value, str) and _is_safe_binding_reference(value):
-            return _masked_binding_reference(value)
-        return "***" if value is not None else None
-    if isinstance(value, Mapping):
-        return _redacted_mapping(value)
-    if isinstance(value, (list, tuple)):
-        return [_redacted_value("", item) for item in value]
-    if isinstance(value, str) and _is_safe_binding_reference(value):
-        return _masked_binding_reference(value)
-    return value
-
-
-def _is_sensitive_key(key: str) -> bool:
-    normalized = key.strip().lower()
-    return normalized in {
-        "access_token",
-        "api_key",
-        "authorization",
-        "canonical_ref",
-        "client_secret",
-        "code",
-        "code_verifier",
-        "device_code",
-        "id_token",
-        "password",
-        "refresh_token",
-        "secret",
-        "secret_value",
-        "source_ref",
-        "state",
-        "token",
-        "value",
-    }
-
-
-def _is_safe_binding_reference(value: str) -> bool:
-    normalized = value.strip()
-    return normalized.startswith(("env:", "file:"))
-
-
-def _masked_binding_reference(value: str) -> str:
-    normalized = value.strip()
-    if normalized.startswith("env:"):
-        return "env:***"
-    if normalized.startswith("file:"):
-        return "file:***"
-    return "***"

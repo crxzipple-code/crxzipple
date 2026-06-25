@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Protocol
 
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmResponseEvent, LlmResponseItem
+from crxzipple.modules.llm.domain.response_values import (
+    LlmResponseEvent,
+    LlmResponseItem,
+)
 
 
 class LlmProfileRepository(Protocol):
@@ -31,6 +34,7 @@ class LlmInvocationRepository(Protocol):
         self,
         *,
         llm_id: str | None = None,
+        run_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[LlmInvocation]:

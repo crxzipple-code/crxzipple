@@ -4,7 +4,7 @@ import hashlib
 import re
 from typing import Any
 
-from crxzipple.modules.llm.domain.value_objects import ToolSchema
+from crxzipple.modules.llm.domain import ToolSchema
 
 OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 OPENAI_TOOL_NAME_MAX_LENGTH = 64

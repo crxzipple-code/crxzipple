@@ -154,7 +154,9 @@ def build_cli() -> typer.Typer:
         )
         sessions = [
             _session_to_payload(session)
-            for session in container.require(AppKey.PROCESS_SERVICE).list_sessions()
+            for session in container.require(
+                AppKey.PROCESS_SERVICE,
+            ).list_sessions_metadata()
             if _matches_filters(
                 session,
                 session_key=session_key,
@@ -185,15 +187,14 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            container.require(AppKey.PROCESS_SERVICE).get_session(process_id=process_id)
+            output = container.require(AppKey.PROCESS_SERVICE).read_output(
+                process_id=process_id,
+                stdout_offset=stdout_offset,
+                stderr_offset=stderr_offset,
+                limit=limit,
+            )
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
-        output = container.require(AppKey.PROCESS_SERVICE).read_output(
-            process_id=process_id,
-            stdout_offset=stdout_offset,
-            stderr_offset=stderr_offset,
-            limit=limit,
-        )
         echo_data(_output_to_payload(output))
 
     @app.command("terminate")

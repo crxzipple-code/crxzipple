@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import os
+import threading
 from typing import Any, Mapping
 
 from crxzipple.shared.time import coerce_utc_datetime
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback keeps in-process safety.
+    fcntl = None  # type: ignore[assignment]
 
 
 JsonObject = dict[str, Any]
@@ -60,10 +67,28 @@ class FileBackedAccessOAuthTokenStore:
         self._root_dir = Path(root_dir).expanduser()
         self._tokens_dir = self._root_dir / "oauth_tokens"
         self._tokens_dir.mkdir(parents=True, exist_ok=True)
+        self._lock_guard = threading.Lock()
+        self._process_locks: dict[Path, threading.Lock] = {}
 
     def storage_key_for_account(self, account_id: str) -> str:
         safe_account_id = _safe_storage_part(account_id)
         return f"oauth_tokens/{safe_account_id}.json"
+
+    @contextmanager
+    def token_lock(self, storage_key: str):
+        token_path = self._path_for_key(storage_key)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = token_path.with_suffix(token_path.suffix + ".lock")
+        process_lock = self._process_lock_for(lock_path)
+        with process_lock:
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def write_token(
         self,
@@ -115,6 +140,15 @@ class FileBackedAccessOAuthTokenStore:
         if not safe_parts:
             raise ValueError("OAuth token storage key is invalid.")
         return self._root_dir.joinpath(*safe_parts)
+
+    def _process_lock_for(self, lock_path: Path) -> threading.Lock:
+        resolved = lock_path.resolve(strict=False)
+        with self._lock_guard:
+            lock = self._process_locks.get(resolved)
+            if lock is None:
+                lock = threading.Lock()
+                self._process_locks[resolved] = lock
+            return lock
 
 
 def _safe_storage_part(value: str) -> str:

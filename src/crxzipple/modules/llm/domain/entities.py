@@ -3,24 +3,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from crxzipple.modules.llm.domain.exceptions import LlmValidationError
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain.continuation_values import LlmContinuationSignal
+from crxzipple.modules.llm.domain.enums import (
     LlmApiFamily,
     LlmCapability,
-    LlmContinuationSignal,
-    LlmDefaults,
-    LlmErrorPayload,
-    LlmInputItem,
     LlmInvocationStatus,
-    LlmMessage,
     LlmModelFamily,
     LlmProviderKind,
-    LlmResponseItem,
-    LlmResult,
     LlmSourceKind,
-    ToolSchema,
-    utcnow,
 )
+from crxzipple.modules.llm.domain.error_values import LlmErrorPayload
+from crxzipple.modules.llm.domain.exceptions import LlmValidationError
+from crxzipple.modules.llm.domain.message_values import (
+    LlmInputItem,
+    LlmMessage,
+    ToolSchema,
+)
+from crxzipple.modules.llm.domain.profile_values import LlmDefaults
+from crxzipple.modules.llm.domain.response_values import LlmResponseItem, utcnow
+from crxzipple.modules.llm.domain.result_values import LlmResult
 
 from crxzipple.shared.domain import AggregateRoot
 
@@ -82,6 +83,13 @@ def _looks_like_credential_source(value: str) -> bool:
     )
 
 
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass(kw_only=True)
 class LlmInvocation(AggregateRoot[str]):
     llm_id: str
@@ -93,6 +101,10 @@ class LlmInvocation(AggregateRoot[str]):
     request_policy: dict[str, object] = field(default_factory=dict)
     request_overrides: dict[str, object] = field(default_factory=dict)
     request_metadata: dict[str, object] = field(default_factory=dict)
+    run_id: str | None = None
+    agent_id: str | None = None
+    session_key: str | None = None
+    active_session_id: str | None = None
     status: LlmInvocationStatus = LlmInvocationStatus.CREATED
     result: LlmResult | None = None
     response_items: tuple[LlmResponseItem, ...] = field(default_factory=tuple)
@@ -121,6 +133,10 @@ class LlmInvocation(AggregateRoot[str]):
         self.request_policy = dict(self.request_policy)
         self.request_overrides = dict(self.request_overrides)
         self.request_metadata = dict(self.request_metadata)
+        self.run_id = _optional_text(self.run_id)
+        self.agent_id = _optional_text(self.agent_id)
+        self.session_key = _optional_text(self.session_key)
+        self.active_session_id = _optional_text(self.active_session_id)
         self.provider_request_payload_preview = dict(
             self.provider_request_payload_preview,
         )

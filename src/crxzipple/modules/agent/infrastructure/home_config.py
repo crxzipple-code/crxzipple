@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from crxzipple.modules.agent.domain.entities import AgentProfile
@@ -28,7 +30,7 @@ def write_agent_home_config(profile: AgentProfile, *, home_dir: str) -> Path:
     root = Path(home_dir).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     path = root / "agent.json"
-    path.write_text(render_agent_home_config(profile, root=root), encoding="utf-8")
+    _write_text_atomically(path, render_agent_home_config(profile, root=root))
     return path
 
 
@@ -334,3 +336,23 @@ def _agent_config_mtime(home_dir: str) -> datetime:
         return datetime.fromtimestamp(config_path.stat().st_mtime, tz=timezone.utc)
     except OSError:
         return datetime.now(timezone.utc)
+
+
+def _write_text_atomically(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_path_raw = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    temp_path = Path(temp_path_raw)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()

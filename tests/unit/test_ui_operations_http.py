@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-import io
 import json
 import os
 from pathlib import Path
@@ -10,8 +9,6 @@ import subprocess
 import tempfile
 from typing import Any
 from uuid import uuid4
-
-from PIL import Image
 
 from crxzipple.interfaces.runtime_container import (
     AssemblyTarget,
@@ -34,19 +31,15 @@ from crxzipple.modules.operations.application.projections import (
 )
 from crxzipple.modules.daemon import DaemonInstance
 from crxzipple.modules.process.domain import ProcessSession, ProcessStatus
-from crxzipple.modules.llm.application import InvokeLlmInput, LlmAdapterResponse
+from crxzipple.modules.llm.application import InvokeLlmInput
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmInputItem,
     LlmInputItemKind,
     LlmMessage,
-    LlmMessagePhase,
     LlmMessageRole,
-    LlmResponseItem,
-    LlmResponseItemKind,
     LlmResult,
     LlmUsage,
-    ToolCallIntent,
 )
 from crxzipple.modules.orchestration.domain import (
     ExecutionChain,
@@ -60,7 +53,6 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationRunStage,
     OrchestrationRunStatus,
-    PendingApprovalRequest,
 )
 from crxzipple.modules.session.application import (
     AppendSessionItemInput,
@@ -2721,7 +2713,10 @@ class UiOperationsHttpTestCase(HttpModuleTestCase):
                 reply_address={
                     "channel_type": "webhook",
                     "channel_account_id": "ops",
-                    "webhook_url": "https://example.invalid/channels/ops",
+                    "webhook_callback_url": (
+                        "https://example.invalid/channels/ops?token=secret"
+                    ),
+                    "metadata": {"access_token": "reply-secret-token"},
                 },
                 agent_id="assistant",
                 session_key="agent:assistant:webhook:ui-ops",
@@ -2755,6 +2750,15 @@ class UiOperationsHttpTestCase(HttpModuleTestCase):
                     "run_id": "run-channel-ui-ops",
                     "status": "http_503",
                     "attempt_count": 3,
+                    "callback_url": "https://example.invalid/callback?token=secret",
+                    "outbound": {
+                        "reply_address": {
+                            "webhook_callback_url": (
+                                "https://example.invalid/callback?token=secret"
+                            ),
+                        },
+                        "metadata": {"access_token": "dead-letter-secret-token"},
+                    },
                 },
                 trace={"trace_id": "trace-channels-ops"},
             ),
@@ -2842,9 +2846,15 @@ class UiOperationsHttpTestCase(HttpModuleTestCase):
             interaction_details["webhook:ops:event:ui-ops"]["events"]["total"],
             1,
         )
-        serialized_payload = json.dumps(payload, ensure_ascii=False).lower()
+        business_payload = dict(payload)
+        business_payload.pop("projection_freshness", None)
+        serialized_payload = json.dumps(business_payload, ensure_ascii=False).lower()
         self.assertNotIn("projec" + "ted", serialized_payload)
         self.assertNotIn("projec" + "tion", serialized_payload)
+        self.assertIn("[redacted]", serialized_payload)
+        self.assertNotIn("reply-secret-token", serialized_payload)
+        self.assertNotIn("dead-letter-secret-token", serialized_payload)
+        self.assertNotIn("token=secret", serialized_payload)
         self.assertGreaterEqual(payload["contracts"]["total"], 1)
 
         filtered_response = self.client.get(
@@ -3176,20 +3186,26 @@ class UiOperationsHttpTestCase(HttpModuleTestCase):
 
         self.assertEqual(events_response.status_code, 200)
         events_payload = events_response.json()
-        self.assertEqual(len(events_payload), 1)
         self.assertEqual(
-            events_payload[0]["trace"]["session_item_id"],
+            [item["name"] for item in events_payload],
+            [
+                "orchestration.run.queued",
+                "orchestration.execution.llm_step_completed",
+            ],
+        )
+        self.assertEqual(
+            events_payload[1]["trace"]["session_item_id"],
             visible_item.id,
         )
         self.assertEqual(
-            events_payload[0]["payload"]["session_item_ids"],
+            events_payload[1]["payload"]["session_item_ids"],
             [visible_item.id],
         )
 
         self.assertEqual(summary_response.status_code, 200)
         summary_payload = summary_response.json()
-        self.assertEqual(summary_payload["event_count"], 1)
-        self.assertEqual(summary_payload["key_event_count"], 1)
+        self.assertEqual(summary_payload["event_count"], 2)
+        self.assertEqual(summary_payload["key_event_count"], 2)
         self.assertIn(
             {"type": "session_item_id", "id": visible_item.id},
             summary_payload["linked_entities"],

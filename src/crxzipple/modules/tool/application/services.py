@@ -229,8 +229,13 @@ class ToolApplicationService:
     def get_tool_run(self, run_id: str) -> ToolRun:
         return self.submission_service.get_tool_run(run_id)
 
-    def list_tool_runs(self, *, tool_id: str | None = None) -> list[ToolRun]:
-        return self.submission_service.list_tool_runs(tool_id=tool_id)
+    def list_tool_runs(
+        self,
+        *,
+        tool_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[ToolRun]:
+        return self.submission_service.list_tool_runs(tool_id=tool_id, limit=limit)
 
     def list_tool_runs_for_orchestration_runs(
         self,

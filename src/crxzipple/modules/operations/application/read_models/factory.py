@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
 from crxzipple.modules.operations.application.read_models.access import (
     AccessOperationsReadModelProvider,
 )
@@ -24,6 +21,9 @@ from crxzipple.modules.operations.application.read_models.events import (
 from crxzipple.modules.operations.application.read_models.facade import (
     OperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.factory_context import (
+    OperationsSourceReadModelContext,
+)
 from crxzipple.modules.operations.application.read_models.llm import (
     LlmOperationsReadModelProvider,
 )
@@ -33,35 +33,6 @@ from crxzipple.modules.operations.application.read_models.memory import (
 from crxzipple.modules.operations.application.read_models.modules import (
     OperationsModuleQuerySet,
     OperationsModuleReadModelProvider,
-)
-from crxzipple.modules.operations.application.read_models.ports import (
-    OperationsAccessReadinessPort,
-    OperationsAgentProfilePort,
-    OperationsArtifactReadPort,
-    OperationsBrowserProfilePort,
-    OperationsChannelInteractionPort,
-    OperationsChannelProfilePort,
-    OperationsChannelRuntimePort,
-    OperationsContextSliceBuilderPort,
-    OperationsContextObservationSnapshotPort,
-    OperationsContextTreePort,
-    OperationsContextWorkspacePort,
-    OperationsDaemonManagerPort,
-    OperationsDaemonRegistryPort,
-    OperationsEventContractRegistryPort,
-    OperationsEventDefinitionRegistryPort,
-    OperationsEventStreamPort,
-    OperationsLlmQueryPort,
-    OperationsMemoryQueryPort,
-    OperationsMemoryWatchRegistryPort,
-    OperationsObservationReadPort,
-    OperationsObserverRuntimePort,
-    OperationsProcessQueryPort,
-    OperationsRemoteToolRuntimeRegistryPort,
-    OperationsRuntimeBootstrapConfigPort,
-    OperationsSettingsQueryPort,
-    OperationsSkillCatalogPort,
-    OperationsToolQueryPort,
 )
 from crxzipple.modules.operations.application.read_models.orchestration import (
     OrchestrationOperationsReadModelProvider,
@@ -73,60 +44,6 @@ from crxzipple.modules.operations.application.read_models.tool import (
     ToolOperationsReadModelProvider,
 )
 from crxzipple.shared.runtime_metrics import get_runtime_metrics_registry
-
-if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application import (
-        OrchestrationExecutorLeaseQueryPort,
-        OrchestrationRunQueryPort,
-    )
-
-
-@dataclass(slots=True)
-class OperationsSourceReadModelContext:
-    runtime_bootstrap_config: OperationsRuntimeBootstrapConfigPort
-    events_service: OperationsEventStreamPort | None
-    event_contract_registry: OperationsEventContractRegistryPort
-    event_definition_registry: OperationsEventDefinitionRegistryPort
-    operations_observation_store: OperationsObservationReadPort
-    access_governance_repository: Any | None
-    settings_query_service: OperationsSettingsQueryPort | None
-    settings_environment: str | None
-    orchestration_run_query_service: OrchestrationRunQueryPort
-    orchestration_executor_lease_query: OrchestrationExecutorLeaseQueryPort
-    tool_service: OperationsToolQueryPort
-    access_service: OperationsAccessReadinessPort
-    artifact_service: OperationsArtifactReadPort
-    remote_tool_registry: OperationsRemoteToolRuntimeRegistryPort
-    llm_service: OperationsLlmQueryPort
-    agent_service: OperationsAgentProfilePort
-    memory_query_service: OperationsMemoryQueryPort
-    memory_watch_registry: OperationsMemoryWatchRegistryPort | None
-    context_workspace_service: OperationsContextWorkspacePort
-    context_tree_service: OperationsContextTreePort
-    context_observation_snapshot_service: OperationsContextObservationSnapshotPort
-    context_slice_builder: OperationsContextSliceBuilderPort
-    skill_manager: OperationsSkillCatalogPort
-    browser_profile_service: OperationsBrowserProfilePort
-    channel_profile_service: OperationsChannelProfilePort
-    channel_runtime_manager: OperationsChannelRuntimePort
-    channel_interaction_service: OperationsChannelInteractionPort
-    daemon_service: OperationsDaemonRegistryPort
-    daemon_manager: OperationsDaemonManagerPort
-    process_service: OperationsProcessQueryPort
-    operations_observer_runtime_event_service: (
-        OperationsObserverRuntimePort | None
-    ) = None
-
-    def attach_operations_observer_runtime(
-        self,
-        runtime: OperationsObserverRuntimePort | None,
-    ) -> None:
-        self.operations_observer_runtime_event_service = runtime
-
-    def current_operations_observer_runtime(
-        self,
-    ) -> OperationsObserverRuntimePort | None:
-        return self.operations_observer_runtime_event_service
 
 
 def build_operations_source_read_model_provider(

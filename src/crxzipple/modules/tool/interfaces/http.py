@@ -610,8 +610,12 @@ async def execute_tool(
 def list_tool_runs(
     tool_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> list[ToolRunResponse]:
-    tool_runs = container.require(AppKey.TOOL_SERVICE).list_tool_runs(tool_id=tool_id)
+    tool_runs = container.require(AppKey.TOOL_SERVICE).list_tool_runs(
+        tool_id=tool_id,
+        limit=limit,
+    )
     return [_to_run_response(tool_run) for tool_run in tool_runs]
 
 

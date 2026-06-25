@@ -5,6 +5,12 @@ from crxzipple.modules.tool.domain import (
     ToolRunResult,
     ToolWorkerStatus,
 )
+from crxzipple.modules.orchestration.domain.exceptions import (
+    OrchestrationRunNotFoundError,
+)
+from crxzipple.modules.tool.application.result_envelope import (
+    TOOL_RESULT_ENVELOPE_METADATA_KEY,
+)
 from crxzipple.shared.domain.events import Event
 
 from tests.unit.tool_test_support import *  # noqa: F403
@@ -206,6 +212,77 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.queued", event_names)
+
+    def test_background_run_externalizes_large_text_result_to_artifact_refs(self) -> None:
+        tool = self.seed_tool(
+            tool_id="background_large_text_tool",
+            name="Background Large Text Tool",
+            description="Returns a large text payload from a background worker.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="background_large_text_tool",
+        )
+        large_text = "background header\n" + ("x" * 24_000)
+
+        async def large_text_tool(_arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(large_text)
+
+        self.local_runtime_registry.register(tool, large_text_tool)
+        queued_run = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="background_large_text_tool",
+                    arguments={},
+                    mode=ToolMode.BACKGROUND,
+                    call_id="call-background-large-text",
+                    tool_surface_id="tool_surface:background-large-text",
+                ),
+            ),
+        )
+
+        completed = process_next_background_tool_run(
+            self.container,
+            worker_id="worker-background-large-text",
+        )
+
+        self.assertIsNotNone(completed)
+        assert completed is not None
+        self.assertEqual(completed.id, queued_run.id)
+        self.assertEqual(completed.status, ToolRunStatus.SUCCEEDED)
+        self.assertEqual(completed.worker_id, "worker-background-large-text")
+        self.assertEqual(completed.call_id, "call-background-large-text")
+        self.assertEqual(completed.tool_surface_id, "tool_surface:background-large-text")
+        assert completed.result is not None
+        result_text = completed.result.blocks[0]["text"]
+        self.assertIn("[large tool result externalized]", result_text)
+        self.assertLess(len(result_text), len(large_text))
+        artifact_ids = completed.result.metadata.get("artifact_ids")
+        self.assertIsInstance(artifact_ids, list)
+        assert isinstance(artifact_ids, list)
+        self.assertEqual(completed.result.metadata.get("large_text_artifact_ids"), artifact_ids)
+        envelope = completed.result.metadata.get(TOOL_RESULT_ENVELOPE_METADATA_KEY)
+        self.assertIsInstance(envelope, dict)
+        assert isinstance(envelope, dict)
+        self.assertEqual(envelope["status"], "ok")
+        self.assertTrue(envelope["truncated"])
+        self.assertEqual(envelope["provider_replay_payload"]["artifact_refs"], artifact_ids)
+        self.assertEqual(completed.result_envelope_payload["artifact_refs"][0]["artifact_id"], artifact_ids[0])
+        artifact = self.artifact_service.get_artifact(str(artifact_ids[0]))
+        self.assertEqual(artifact.mime_type, "text/plain")
+        self.assertEqual(artifact.metadata["source"], "tool.large_text_result")
+        self.assertEqual(self.artifact_service.resolve_variant(artifact.id).path.read_text(), large_text)
+        with self.uow_factory() as uow:
+            assignment = uow.tool_run_assignments.get_latest_for_run(queued_run.id)
+            worker = uow.tool_workers.get("worker-background-large-text")
+        self.assertIsNotNone(assignment)
+        assert assignment is not None
+        self.assertEqual(assignment.status, ToolRunAssignmentStatus.SUCCEEDED)
+        self.assertIsNotNone(worker)
+        assert worker is not None
+        self.assertEqual(worker.current_in_flight, 0)
+        self.assertEqual(
+            self.dispatch_service.get_task(queued_run.id).status,
+            DispatchTaskStatus.COMPLETED,
+        )
 
     def test_background_claim_and_heartbeat_keep_dispatch_lease_in_sync(self) -> None:
         queued_run = asyncio.run(
@@ -433,6 +510,57 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             [assignment.status if assignment is not None else None for assignment in assignments],
             [ToolRunAssignmentStatus.ASSIGNED, ToolRunAssignmentStatus.ASSIGNED],
         )
+
+    def test_scheduler_does_not_assign_beyond_worker_inflight_limit(self) -> None:
+        worker_id = "worker-single-slot"
+        self.tool_worker_service.register_worker(
+            worker_id=worker_id,
+            max_in_flight=1,
+        )
+        first_run = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="echo",
+                    arguments={"message": "first"},
+                    mode=ToolMode.BACKGROUND,
+                ),
+            ),
+        )
+        second_run = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="echo",
+                    arguments={"message": "second"},
+                    mode=ToolMode.BACKGROUND,
+                ),
+            ),
+        )
+
+        first_assignment = self.tool_scheduler_service.assign_next_available(
+            worker_id=worker_id,
+        )
+        second_assignment = self.tool_scheduler_service.assign_next_available(
+            worker_id=worker_id,
+        )
+
+        self.assertIsNotNone(first_assignment)
+        assert first_assignment is not None
+        self.assertEqual(first_assignment.id, first_run.id)
+        self.assertIsNone(second_assignment)
+        with self.uow_factory() as uow:
+            worker = uow.tool_workers.get(worker_id)
+            assigned = uow.tool_run_assignments.get_latest_for_run(first_run.id)
+            blocked = uow.tool_run_assignments.get_latest_for_run(second_run.id)
+            second_dispatch_task = uow.dispatch_tasks.get(second_run.id)
+
+        self.assertIsNotNone(worker)
+        assert worker is not None
+        self.assertEqual(worker.current_in_flight, 1)
+        self.assertIsNotNone(assigned)
+        self.assertIsNone(blocked)
+        self.assertIsNotNone(second_dispatch_task)
+        assert second_dispatch_task is not None
+        self.assertEqual(second_dispatch_task.status, DispatchTaskStatus.QUEUED)
 
     def test_scheduler_allows_image_capability_to_fill_worker_slots(self) -> None:
         self.seed_tool(
@@ -919,6 +1047,20 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(persisted.max_attempts, 3)
         dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.FAILED)
+        with self.uow_factory() as uow:
+            assignments = uow.tool_run_assignments.list_for_run(queued_run.id)
+            worker = uow.tool_workers.get("worker-retry")
+        self.assertEqual(len(assignments), 3)
+        self.assertEqual(
+            {assignment.status for assignment in assignments},
+            {ToolRunAssignmentStatus.FAILED},
+        )
+        self.assertTrue(
+            all("boom: retry me" in (assignment.terminal_reason or "") for assignment in assignments),
+        )
+        self.assertIsNotNone(worker)
+        assert worker is not None
+        self.assertEqual(worker.current_in_flight, 0)
 
     def test_recovers_abandoned_background_run_when_lease_expires(self) -> None:
         queued_run = asyncio.run(
@@ -968,6 +1110,57 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(persisted.error_message, "Worker lease expired before completion.")
         dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.QUEUED)
+
+    def test_recovered_dispatch_failure_exhausts_retry_without_orchestration_side_effect(
+        self,
+    ) -> None:
+        queued_run = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="echo",
+                    arguments={"message": "recover exhausted"},
+                    mode=ToolMode.BACKGROUND,
+                    metadata={"orchestration_run_id": "orch-run-not-owned-by-tool"},
+                ),
+            ),
+        )
+        claimed = assign_next_background_tool_run(
+            self.container,
+            worker_id="worker-recovery-exhausted",
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        with self.uow_factory() as uow:
+            run = uow.tool_runs.get(queued_run.id)
+            assert run is not None
+            run.max_attempts = run.attempt_count
+            uow.tool_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+
+        recovered = self.tool_worker_service.handle_recovered_dispatch_task(
+            tool_run_id=queued_run.id,
+            reason="lease expired after final attempt",
+        )
+
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered.status, ToolRunStatus.FAILED)
+        self.assertIn("retry budget exhausted", recovered.error_message)
+        dispatch_task = self.dispatch_service.get_task(queued_run.id)
+        self.assertEqual(dispatch_task.status, DispatchTaskStatus.FAILED)
+        with self.uow_factory() as uow:
+            assignment = uow.tool_run_assignments.get_latest_for_run(queued_run.id)
+            worker = uow.tool_workers.get("worker-recovery-exhausted")
+        self.assertIsNotNone(assignment)
+        assert assignment is not None
+        self.assertEqual(assignment.status, ToolRunAssignmentStatus.EXPIRED)
+        self.assertEqual(assignment.terminal_reason, "lease expired after final attempt")
+        self.assertIsNotNone(worker)
+        assert worker is not None
+        self.assertEqual(worker.current_in_flight, 0)
+        with self.assertRaises(OrchestrationRunNotFoundError):
+            self.orchestration_run_query_service.get_run("orch-run-not-owned-by-tool")
 
     def test_can_cancel_queued_background_run(self) -> None:
         queued_run = asyncio.run(

@@ -13,6 +13,20 @@ from crxzipple.modules.ocr.domain import (
 from crxzipple.shared.infrastructure.http import request_url
 
 
+def _json_payload(response, *, invalid_message: str) -> object:  # noqa: ANN001
+    try:
+        return response.json()
+    except Exception as exc:  # noqa: BLE001
+        raise OcrExecutionError(invalid_message) from exc
+
+
+def _optional_json_payload(response) -> object:  # noqa: ANN001
+    try:
+        return response.json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _coerce_float(value: object) -> float | None:
     try:
         return float(value)
@@ -319,7 +333,10 @@ class PPStructureV3Client:
             raise OcrExecutionError(
                 f"PP-StructureV3 healthcheck failed: {exc}",
             ) from exc
-        payload = response.json()
+        payload = _json_payload(
+            response,
+            invalid_message="PP-StructureV3 returned an invalid health payload.",
+        )
         if not isinstance(payload, dict):
             raise OcrExecutionError(
                 "PP-StructureV3 returned an invalid health payload.",
@@ -357,7 +374,14 @@ class PPStructureV3Client:
             raise OcrExecutionError(
                 f"PP-StructureV3 request failed: {exc}",
             ) from exc
-        payload = response.json()
+        payload = (
+            _optional_json_payload(response)
+            if response.status_code >= 400
+            else _json_payload(
+                response,
+                invalid_message="PP-StructureV3 returned an invalid OCR payload.",
+            )
+        )
         if response.status_code >= 400:
             detail = None
             if isinstance(payload, dict):

@@ -1014,7 +1014,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_common._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1109,7 +1109,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._scheduler_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_scheduler._scheduler_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1164,6 +1164,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
     def test_operations_observation_run_command_uses_runtime_owned_run_loop(self) -> None:
             calls: list[dict[str, object]] = []
+            materialize_calls: list[str] = []
 
             class _FakeOperationsObserverRuntime:
                 def run_until_stopped(
@@ -1188,13 +1189,20 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     )
                     return 7
 
+            class _FakeProjectionMaterializer:
+                def materialize_all(self) -> int:
+                    materialize_calls.append("materialize_all")
+                    return 10
+
             class _FakeContainer:
                 def __init__(self) -> None:
                     self._values = {
                         AppKey.OPERATIONS_OBSERVER_RUNTIME_EVENT_SERVICE: (
                             _FakeOperationsObserverRuntime()
                         ),
-                        AppKey.OPERATIONS_PROJECTION_MATERIALIZER: None,
+                        AppKey.OPERATIONS_PROJECTION_MATERIALIZER: (
+                            _FakeProjectionMaterializer()
+                        ),
                     }
 
                 def require(self, key):
@@ -1234,6 +1242,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 )
 
             self.assertEqual(result.exit_code, 0)
+            self.assertEqual(materialize_calls, [])
             self.assertEqual(
                 calls,
                 [
@@ -1403,7 +1412,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_executor._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1454,7 +1463,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_executor._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1501,7 +1510,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._scheduler_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_scheduler._scheduler_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1558,7 +1567,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_executor._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1630,7 +1639,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_common._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1819,7 +1828,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._linked_runtime_containers",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._linked_runtime_containers",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -2081,11 +2090,11 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             with (
                 patch(
-                    "crxzipple.modules.orchestration.interfaces.worker_cli._linked_runtime_containers",
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._linked_runtime_containers",
                     return_value=_FakeContainerContext(),
                 ),
                 patch(
-                    "crxzipple.modules.orchestration.interfaces.worker_cli._register_tool_io_benchmark_runtime",
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._register_tool_io_benchmark_runtime",
                     return_value=(
                         "benchmark.tool_io.fake",
                         "benchmark_tool_io_sleep_fake",
@@ -2217,11 +2226,10 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             fake_scheduler = _FakeSchedulerService()
             fake_daemon_manager = _FakeDaemonManager()
 
-            class _FakeContainerContext:
+            class _FakeAdminContainerContext:
                 def __enter__(self):
                     return _RuntimeCliFakeContainer(
                         {
-                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: fake_scheduler,
                             AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
                                 _FakeRunQueryService()
                             ),
@@ -2232,9 +2240,26 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
-            with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._admin_container",
-                return_value=_FakeContainerContext(),
+            class _FakeSchedulerContainerContext:
+                def __enter__(self):
+                    return _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: fake_scheduler,
+                        },
+                    )
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            with (
+                patch(
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._admin_container",
+                    return_value=_FakeAdminContainerContext(),
+                ),
+                patch(
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._scheduler_container",
+                    return_value=_FakeSchedulerContainerContext(),
+                ),
             ):
                 result = self.runner.invoke(
                     app,
@@ -2302,13 +2327,10 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     del service_key, refresh
                     return ()
 
-            class _FakeContainerContext:
+            class _FakeAdminContainerContext:
                 def __enter__(self):
                     return _RuntimeCliFakeContainer(
                         {
-                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: (
-                                _FakeSchedulerService()
-                            ),
                             AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
                                 _FakeRunQueryService()
                             ),
@@ -2319,9 +2341,28 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
-            with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._admin_container",
-                return_value=_FakeContainerContext(),
+            class _FakeSchedulerContainerContext:
+                def __enter__(self):
+                    return _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: (
+                                _FakeSchedulerService()
+                            ),
+                        },
+                    )
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            with (
+                patch(
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._admin_container",
+                    return_value=_FakeAdminContainerContext(),
+                ),
+                patch(
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._scheduler_container",
+                    return_value=_FakeSchedulerContainerContext(),
+                ),
             ):
                 result = self.runner.invoke(
                     app,
@@ -2388,7 +2429,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._linked_runtime_containers",
+                "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._linked_runtime_containers",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(

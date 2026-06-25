@@ -10,16 +10,17 @@ from crxzipple.modules.event_relay import (
     WorkbenchEventRelayObserver,
 )
 from crxzipple.modules.events import EventsApplicationService
-from crxzipple.modules.operations.application.observation import (
-    OperationsEventObserver,
-    observed_event_from_record,
-)
+from crxzipple.modules.operations.application.observation_event_projection import observed_event_from_record
+from crxzipple.modules.operations.application.observation import OperationsEventObserver
 from crxzipple.modules.operations.application.projections import (
     OPERATIONS_PROJECTION_MODULES,
+    projection_modules_for_observed_modules,
 )
-from crxzipple.modules.operations.application.runtime import (
-    OperationsObserverRuntimeService,
+from crxzipple.modules.operations.application.observer_event_names import (
     operations_observer_event_names,
+)
+from crxzipple.modules.operations.application.observer_runtime_service import (
+    OperationsObserverRuntimeService,
 )
 from crxzipple.modules.orchestration.application import (
     OrchestrationDispatchRecoveryReaction,
@@ -38,7 +39,11 @@ from crxzipple.modules.tool.application import (
 from crxzipple.shared.domain.events import Event
 from crxzipple.shared import ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT
 
-OPERATIONS_STATE_PROJECTION_MODULES: tuple[str, ...] = OPERATIONS_PROJECTION_MODULES
+OPERATIONS_STATE_PROJECTION_MODULES: tuple[str, ...] = tuple(
+    module
+    for module in OPERATIONS_PROJECTION_MODULES
+    if module not in {"context_workspace", "events"}
+)
 OPERATIONS_STATE_PROJECTION_INTERVAL_SECONDS = 300.0
 OPERATIONS_EVENT_PROJECTION_DEBOUNCE_SECONDS = 1.0
 OPERATIONS_EVENT_PROJECTION_MIN_INTERVAL_SECONDS: dict[str, float] = {
@@ -53,6 +58,10 @@ OPERATIONS_EVENT_PROJECTION_MIN_INTERVAL_SECONDS: dict[str, float] = {
     "events": 15.0,
     "daemon": 10.0,
 }
+OPERATIONS_PROJECTION_OBSERVATION_ONLY_EVENT_SUFFIXES: tuple[str, ...] = (
+    ".heartbeated",
+    ".readiness_observed",
+)
 
 
 def event_runtime_factories() -> tuple[ApplicationFactory, ...]:
@@ -320,15 +329,13 @@ def _build_operations_observer_runtime_event_service(ctx):
         nonlocal next_projection_at
 
         pending_projection_modules.update(
-            observed_event_from_record(
-                record,
+            _projection_modules_from_records(
+                records,
                 definition_registry=definition_registry,
-            ).module
-            for record in records
+            ),
         )
         if pending_projection_modules and next_projection_at is None:
             next_projection_at = time.monotonic() + OPERATIONS_EVENT_PROJECTION_DEBOUNCE_SECONDS
-        _flush_due_projection()
 
     def _observe_event_records(records) -> None:  # noqa: ANN001
         observer.observe_event_records(records)
@@ -353,6 +360,25 @@ def _build_operations_observer_runtime_event_service(ctx):
             runtime,
         )
     return runtime
+
+
+def _projection_modules_from_records(records, *, definition_registry) -> tuple[str, ...]:  # noqa: ANN001
+    observed_modules: list[str] = []
+    for record in records:
+        if _is_observation_only_projection_event(record):
+            continue
+        observed_modules.append(
+            observed_event_from_record(
+                record,
+                definition_registry=definition_registry,
+            ).module,
+        )
+    return projection_modules_for_observed_modules(observed_modules)
+
+
+def _is_observation_only_projection_event(record) -> bool:  # noqa: ANN001
+    event_name = str(getattr(record.envelope, "event_name", "") or "").strip()
+    return event_name.endswith(OPERATIONS_PROJECTION_OBSERVATION_ONLY_EVENT_SUFFIXES)
 
 
 __all__ = ["event_runtime_factories"]

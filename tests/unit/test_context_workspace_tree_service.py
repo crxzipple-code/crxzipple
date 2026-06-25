@@ -4,6 +4,9 @@ from hashlib import sha256
 
 import pytest
 
+from crxzipple.app.integration.context_workspace_orchestration.context_slice_projection import (
+    context_slice_projected_input_items,
+)
 from crxzipple.modules.context_workspace.application import (
     CONTEXT_INSTRUCTIONS_NODE_ID,
     CONTEXT_TREE_SCHEMA_VERSION,
@@ -1546,6 +1549,57 @@ def test_context_slice_builder_keeps_non_session_owner_refs_handle_only() -> Non
     assert context_slice.report.loss["unresolved_ref_count"] == 0
 
 
+def test_memory_context_slice_does_not_inline_raw_store_body() -> None:
+    services = _services()
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:memory-raw-store",
+            agent_id="assistant",
+        ),
+    )
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:memory-raw-store",
+            node_id="memory.visible",
+            action=ContextAction.EXPAND,
+        ),
+    )
+    services["tree"].upsert_nodes(
+        ContextNodeUpsertInput(
+            session_key="session:memory-raw-store",
+            action=ContextAction.UPSERT,
+            nodes=(
+                ContextNodeSeed(
+                    node_id="memory.visible.raw-store",
+                    parent_id="memory.visible",
+                    owner="memory",
+                    kind="memory_item",
+                    title="Raw memory store",
+                    summary="Relevant memory citation only.",
+                    content="raw memory store body must not be sent to the LLM",
+                    state=ContextNodeState(included_in_next_slice=True),
+                    owner_ref={"memory_id": "memory-raw-store"},
+                    display_order=10,
+                ),
+            ),
+        ),
+    )
+
+    context_slice = services["slice"].build_slice(
+        session_key="session:memory-raw-store",
+        run_id="run-memory",
+        provider_profile="codex",
+    )
+
+    item = next(
+        item for item in context_slice.items if item.item_id == "memory.visible.raw-store"
+    )
+    assert item.text == ""
+    assert item.content is None
+    assert item.summary == "Relevant memory citation only."
+    assert item.metadata["owner_resolution"] == "handle_only"
+
+
 def test_context_slice_requires_explicit_or_protocol_tool_result_inclusion() -> None:
     services = _services()
     services["workspace"].ensure_workspace(
@@ -1634,6 +1688,125 @@ def test_context_slice_requires_explicit_or_protocol_tool_result_inclusion() -> 
     assert "session.step.item.tool-result-protocol" in item_ids
     assert "session.step.item.tool-result-selected" in item_ids
     assert "session.step.item.tool-result-pinned" in item_ids
+
+
+def test_context_slice_projects_tree_backed_structured_tool_protocol_pair() -> None:
+    class _SessionItem:
+        def __init__(
+            self,
+            *,
+            item_id: str,
+            sequence_no: int,
+            kind: str,
+            role: str,
+            content_payload: dict[str, object],
+            call_id: str,
+            tool_name: str,
+        ) -> None:
+            self.id = item_id
+            self.session_id = "session-instance-1"
+            self.sequence_no = sequence_no
+            self.kind = kind
+            self.role = role
+            self.model_visible = True
+            self.source_kind = "llm_response_item" if kind == "tool_call" else "tool_run"
+            self.source_module = "llm" if kind == "tool_call" else "tool"
+            self.source_id = f"source-{item_id}"
+            self.provider_item_type = None
+            self.call_id = call_id
+            self.tool_name = tool_name
+            self.content_payload = content_payload
+            self.metadata = {}
+
+    services = _services(
+        session_item_resolver=_FakeSessionItemResolver(
+            {
+                "item-call-1": _SessionItem(
+                    item_id="item-call-1",
+                    sequence_no=2,
+                    kind="tool_call",
+                    role="assistant",
+                    call_id="call-weather-1",
+                    tool_name="weather.lookup",
+                    content_payload={
+                        "call_id": "call-weather-1",
+                        "tool_name": "weather.lookup",
+                        "arguments": {"city": "Kunming"},
+                    },
+                ),
+                "item-result-1": _SessionItem(
+                    item_id="item-result-1",
+                    sequence_no=3,
+                    kind="tool_result",
+                    role="tool",
+                    call_id="call-weather-1",
+                    tool_name="weather.lookup",
+                    content_payload={
+                        "tool_call_id": "call-weather-1",
+                        "tool_name": "weather.lookup",
+                        "content": [{"type": "text", "text": "sunny"}],
+                    },
+                ),
+            },
+        ),
+    )
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:structured-tool-pair",
+            agent_id="assistant",
+        ),
+    )
+    services["tree"].upsert_nodes(
+        ContextNodeUpsertInput(
+            session_key="session:structured-tool-pair",
+            action=ContextAction.UPSERT,
+            nodes=(
+                ContextNodeSeed(
+                    node_id="session.item.tool-call",
+                    parent_id="session.current",
+                    owner="session",
+                    kind="session_item",
+                    title="Assistant tool call",
+                    summary="Structured tool call.",
+                    state=ContextNodeState(included_in_next_slice=True),
+                    owner_ref={"session_item_id": "item-call-1"},
+                ),
+                ContextNodeSeed(
+                    node_id="session.item.tool-result",
+                    parent_id="session.current",
+                    owner="session",
+                    kind="session_item",
+                    title="Tool result",
+                    summary="Structured tool result.",
+                    state=ContextNodeState(included_in_next_slice=True),
+                    owner_ref={"session_item_id": "item-result-1"},
+                ),
+            ),
+        ),
+    )
+
+    context_slice = services["slice"].build_slice(
+        session_key="session:structured-tool-pair",
+        run_id="run-structured-tool-pair",
+    )
+
+    projected = context_slice_projected_input_items(context_slice)
+
+    assert [item["kind"] for item in projected] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert projected[0]["payload"] == {
+        "type": "function_call",
+        "call_id": "call-weather-1",
+        "name": "weather.lookup",
+        "arguments": {"city": "Kunming"},
+    }
+    assert projected[1]["payload"] == {
+        "type": "function_call_output",
+        "call_id": "call-weather-1",
+        "output": [{"type": "text", "text": "sunny"}],
+    }
 
 
 class _FakeSessionItem:

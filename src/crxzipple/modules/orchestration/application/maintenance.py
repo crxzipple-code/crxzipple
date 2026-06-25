@@ -198,10 +198,33 @@ class OrchestrationMaintenanceService:
                     },
                 ),
             )
+        try:
+            refreshed_active_session_id = self.session_service.get_session(
+                session_key,
+            ).active_session_id
+        except Exception as exc:
+            return False, self.fail_assignment(
+                FailAssignmentInput(
+                    run_id=run.id,
+                    worker_id=worker_id,
+                    message=(
+                        "Preflight maintenance could not refresh the active "
+                        "session binding after compaction."
+                    ),
+                    code="preflight_maintenance_failed",
+                    details={
+                        "maintenance_run_id": processed_compaction.id,
+                        "maintenance_kind": "session_binding_refresh",
+                        "error": str(exc) or type(exc).__name__,
+                        **trigger,
+                    },
+                ),
+            )
         self._mark_preflight_maintenance_applied(
             run_id=run.id,
             step=run.current_step,
             details=trigger,
+            active_session_id=refreshed_active_session_id,
         )
         return True, None
 
@@ -732,14 +755,20 @@ class OrchestrationMaintenanceService:
         run_id: str,
         step: int,
         details: dict[str, object],
+        active_session_id: str,
     ) -> None:
         with self.uow_factory() as uow:
             run = self._get_run(uow, run_id)
+            run.refresh_active_session_binding(
+                active_session_id=active_session_id,
+                reason="preflight_maintenance_compaction",
+            )
             current_payload = run.metadata.get("preflight_maintenance")
             payload = dict(current_payload) if isinstance(current_payload, dict) else {}
             payload["applied_for_run"] = True
             payload["applied_step"] = step
             payload["applied_details"] = dict(details)
+            payload["active_session_id_after_maintenance"] = active_session_id
             run.metadata["preflight_maintenance"] = payload
             uow.orchestration_runs.add(run)
             uow.collect(run)

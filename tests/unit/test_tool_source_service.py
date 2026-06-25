@@ -259,6 +259,28 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             (),
         )
 
+    def test_create_source_accepts_configured_source_golden_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sources = (
+                _configured_openapi_source(
+                    display_name="Sample OpenAPI",
+                    spec_location="https://example.test/openapi.json",
+                ),
+                _configured_mcp_source(),
+                _configured_cli_source(root=Path(temp_dir)),
+            )
+            for source in sources:
+                created = self.command_service.create_source(source)
+
+                self.assertTrue(created.changed)
+                self.assertEqual(created.source.source_id, source.source_id)
+                self.assertEqual(created.source.kind, source.kind)
+                self.assertEqual(created.source.status.value, "active")
+                self.assertEqual(
+                    self.query_service.list_discovery_runs(source.source_id),
+                    (),
+                )
+
     def test_create_source_rejects_bundled_and_unsupported_sources(self) -> None:
         with self.assertRaises(ToolValidationError):
             self.command_service.create_source(
@@ -286,6 +308,54 @@ class ToolSourceServiceTestCase(unittest.TestCase):
                     },
                 ),
             )
+
+    def test_create_source_rejects_invalid_configured_source_shapes(self) -> None:
+        invalid_sources = (
+            ToolSourceCatalogRecord(
+                source_id="configured.openapi.mismatch",
+                kind=ToolSourceCatalogKind.OPENAPI,
+                display_name="Mismatched OpenAPI",
+                config={
+                    "source": "configured_tool_provider",
+                    "package_kind": "cli",
+                    "provider": {
+                        "name": "sample",
+                        "spec_location": "https://example.test/openapi.json",
+                    },
+                },
+            ),
+            ToolSourceCatalogRecord(
+                source_id="configured.mcp.bad",
+                kind=ToolSourceCatalogKind.MCP,
+                display_name="Bad MCP",
+                config={
+                    "source": "configured_tool_provider",
+                    "package_kind": "mcp",
+                    "provider": {
+                        "name": "bad-mcp",
+                        "command": "python -m bad_mcp",
+                    },
+                },
+            ),
+            ToolSourceCatalogRecord(
+                source_id="configured.cli.bad",
+                kind=ToolSourceCatalogKind.CLI,
+                display_name="Bad CLI",
+                config={
+                    "source": "configured_tool_provider",
+                    "package_kind": "cli",
+                    "provider": {
+                        "name": "bad-cli",
+                        "executable": sys.executable,
+                    },
+                },
+            ),
+        )
+
+        for source in invalid_sources:
+            with self.subTest(source_id=source.source_id):
+                with self.assertRaises(ToolValidationError):
+                    self.command_service.create_source(source)
 
     def test_cli_source_discovers_guided_functions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1231,6 +1301,24 @@ def _configured_cli_source(*, root: Path) -> ToolSourceCatalogRecord:
             },
         },
         runtime_requirements=("cli:configured.cli.python",),
+    )
+
+
+def _configured_mcp_source() -> ToolSourceCatalogRecord:
+    return ToolSourceCatalogRecord(
+        source_id="configured.mcp.sample",
+        kind=ToolSourceCatalogKind.MCP,
+        display_name="Sample MCP",
+        description="Governed MCP source for unit tests.",
+        config={
+            "source": "configured_tool_provider",
+            "package_kind": "mcp",
+            "provider": {
+                "name": "sample-mcp",
+                "command": [sys.executable, "-m", "sample_mcp_server"],
+            },
+        },
+        runtime_requirements=("mcp:configured.mcp.sample",),
     )
 
 

@@ -142,7 +142,7 @@ def test_orchestration_keeps_tool_call_requirement_as_neutral_policy() -> None:
     assert "toolConfig" not in payload.get("provider_options", {})
 
 
-def test_provider_continuation_state_roundtrips_codex_websocket_fingerprints() -> None:
+def test_provider_continuation_state_omits_codex_websocket_until_turn_scoped_transport() -> None:
     invocation = SimpleNamespace(
         id="inv-codex-1",
         provider_request_id="resp_codex_1",
@@ -160,27 +160,8 @@ def test_provider_continuation_state_roundtrips_codex_websocket_fingerprints() -
     state = build_provider_continuation_state_from_invocation(invocation)
     continuation = provider_continuation_from_state(state)
 
-    assert state == {
-        "mode": "provider_native",
-        "provider_family": LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
-        "transport": "websocket",
-        "previous_response_id": "resp_codex_1",
-        "previous_invocation_id": "inv-codex-1",
-        "last_request_had_previous_response_id": False,
-        "input_item_fingerprints": ["fp-user", "fp-call"],
-        "input_item_count": 2,
-        "instructions_fingerprint": "fp-instructions",
-        "tool_fingerprints": ["fp-tool"],
-    }
-    assert continuation is not None
-    assert continuation.previous_response_id == "resp_codex_1"
-    assert continuation.previous_invocation_id == "inv-codex-1"
-    assert continuation.provider_family == LlmApiFamily.OPENAI_CODEX_RESPONSES.value
-    assert continuation.transport == "websocket"
-    assert continuation.input_item_fingerprints == ("fp-user", "fp-call")
-    assert continuation.input_item_count == 2
-    assert continuation.instructions_fingerprint == "fp-instructions"
-    assert continuation.tool_fingerprints == ("fp-tool",)
+    assert state == {}
+    assert continuation is None
 
 
 def test_interactive_tool_schema_surface_uses_request_render_tool_schemas_and_metadata() -> None:
@@ -257,6 +238,55 @@ def test_context_slice_runtime_control_items_do_not_become_llm_input() -> None:
     ]
     assert envelope.request_metadata()["input_item_count"] == 1
     assert "Inspect official flights." not in str(envelope.transcript.to_payload())
+
+
+def test_long_request_render_snapshot_uses_projected_items_not_collapsed_tree_body() -> None:
+    historical_marker = "HISTORICAL_TREE_BODY_MUST_NOT_REPLAY"
+    snapshot = RequestRenderSnapshotRecord(
+        snapshot_id="ctxsnap-long-history",
+        included_node_ids=tuple(f"session.item.{index}" for index in range(200)),
+        collapsed_refs=tuple(
+            {
+                "node_id": f"session.range.{index}",
+                "summary": historical_marker,
+            }
+            for index in range(40)
+        ),
+        metadata={
+            "session_budget_status": "truncated",
+            "context_slice_item_count": 200,
+            "context_slice_projected_input_item_count": 1,
+            "debug_body": f"<context_tree>{historical_marker}</context_tree>",
+        },
+        projected_input_items=_projected_user_input_items(),
+        tool_schemas=(ToolSchema(name="command.exec"),),
+    )
+
+    envelope = RuntimeLlmRequestBuilder().request_envelope(
+        draft=_draft(),
+        request_render_snapshot=snapshot,
+        resolved_tools=ResolvedToolSet(
+            tools=(_resolved_tool("tool.command.exec", schema_name="command.exec"),),
+        ),
+        snapshot_metadata=snapshot.metadata,
+        persist_tool_surface_snapshot=False,
+    )
+
+    payload = envelope.to_payload()
+    metadata = envelope.request_metadata()
+
+    assert [item.payload for item in envelope.transcript.items] == [
+        {"role": "user", "content": "Inspect."},
+    ]
+    assert payload["request_render_snapshot"]["included_node_count"] == 200
+    assert payload["request_render_snapshot"]["collapsed_ref_count"] == 40
+    assert metadata["context_slice_item_count"] == 200
+    assert metadata["context_slice_projected_input_item_count"] == 1
+    assert historical_marker not in str(payload["messages"])
+    assert historical_marker not in str(payload["transcript"])
+    assert historical_marker not in str(payload["request_render_snapshot"])
+    assert historical_marker not in str(metadata)
+    assert "debug_body" not in payload["request_render_snapshot"]
 
 
 def _draft() -> RuntimeLlmRequestDraft:

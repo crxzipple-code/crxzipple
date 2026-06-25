@@ -431,6 +431,42 @@ class SqlAlchemyExecutionStepItemRepository:
         models.sort(key=lambda model: (model.item_index, model.id))
         return [self._to_entity(model) for model in models]
 
+    def list_for_steps(
+        self,
+        step_ids: tuple[str, ...],
+        *,
+        status: ExecutionStepItemStatus | None = None,
+    ) -> list[ExecutionStepItem]:
+        normalized_step_ids = tuple(step_id for step_id in step_ids if step_id.strip())
+        if not normalized_step_ids:
+            return []
+        statement = select(OrchestrationExecutionStepItemModel).where(
+            OrchestrationExecutionStepItemModel.step_id.in_(normalized_step_ids),
+        )
+        if status is not None:
+            statement = statement.where(
+                OrchestrationExecutionStepItemModel.status == status.value,
+            )
+        models = list(
+            self.session.scalars(
+                statement.order_by(
+                    OrchestrationExecutionStepItemModel.step_id.asc(),
+                    OrchestrationExecutionStepItemModel.item_index.asc(),
+                    OrchestrationExecutionStepItemModel.id.asc(),
+                ),
+            ).all(),
+        )
+        known_ids = {model.id for model in models}
+        requested_step_ids = set(normalized_step_ids)
+        for model in self._pending_models.values():
+            if model.id in known_ids or model.step_id not in requested_step_ids:
+                continue
+            if status is not None and model.status != status.value:
+                continue
+            models.append(model)
+        models.sort(key=lambda model: (model.step_id, model.item_index, model.id))
+        return [self._to_entity(model) for model in models]
+
     @staticmethod
     def _to_entity(model: OrchestrationExecutionStepItemModel) -> ExecutionStepItem:
         return ExecutionStepItem(

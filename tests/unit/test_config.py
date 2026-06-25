@@ -7,7 +7,11 @@ import unittest
 
 from crxzipple.core.config import (
     RuntimeDatabaseGuardError,
+    RuntimeEventsBackendGuardError,
+    RuntimeMemoryIndexGuardError,
     load_settings,
+    require_production_memory_index_acknowledgement,
+    require_shared_events_backend,
     require_runtime_database,
 )
 
@@ -283,6 +287,94 @@ max_concurrency: 7
 
         self.assertEqual(settings.events_backend, "redis")
         self.assertEqual(settings.events_redis_url, "redis://127.0.0.1:6379/0")
+
+    def test_shared_events_backend_guard_allows_redis_backend(self) -> None:
+        os.environ["APP_EVENTS_BACKEND"] = "redis"
+
+        settings = load_settings()
+
+        require_shared_events_backend(settings, runtime_name="test runtime")
+
+    def test_shared_events_backend_guard_rejects_file_without_explicit_fallback(
+        self,
+    ) -> None:
+        os.environ["APP_EVENTS_BACKEND"] = "file"
+        os.environ.pop("APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK", None)
+
+        settings = load_settings()
+
+        with self.assertRaises(RuntimeEventsBackendGuardError):
+            require_shared_events_backend(settings, runtime_name="test runtime")
+
+    def test_shared_events_backend_guard_requires_fallback_value_one(self) -> None:
+        os.environ["APP_EVENTS_BACKEND"] = "file"
+        os.environ["APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK"] = "true"
+
+        settings = load_settings()
+
+        self.assertFalse(settings.allow_file_events_runtime_fallback)
+        with self.assertRaises(RuntimeEventsBackendGuardError):
+            require_shared_events_backend(settings, runtime_name="test runtime")
+
+    def test_shared_events_backend_guard_allows_file_with_explicit_fallback(
+        self,
+    ) -> None:
+        os.environ["APP_EVENTS_BACKEND"] = "file"
+        os.environ["APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK"] = "1"
+
+        settings = load_settings()
+
+        require_shared_events_backend(settings, runtime_name="test runtime")
+        self.assertTrue(settings.allow_file_events_runtime_fallback)
+
+    def test_production_memory_index_guard_allows_local_environment(self) -> None:
+        os.environ["APP_ENV"] = "local"
+
+        settings = load_settings()
+
+        require_production_memory_index_acknowledgement(
+            settings,
+            runtime_name="test runtime",
+        )
+
+    def test_production_memory_index_guard_rejects_without_explicit_ack(
+        self,
+    ) -> None:
+        os.environ["APP_ENV"] = "production"
+        os.environ.pop("APP_ALLOW_SQLITE_MEMORY_INDEX_RUNTIME", None)
+
+        settings = load_settings()
+
+        with self.assertRaises(RuntimeMemoryIndexGuardError):
+            require_production_memory_index_acknowledgement(
+                settings,
+                runtime_name="test runtime",
+            )
+
+    def test_production_memory_index_guard_requires_ack_value_one(self) -> None:
+        os.environ["APP_ENV"] = "production"
+        os.environ["APP_ALLOW_SQLITE_MEMORY_INDEX_RUNTIME"] = "true"
+
+        settings = load_settings()
+
+        self.assertFalse(settings.allow_sqlite_memory_index_runtime)
+        with self.assertRaises(RuntimeMemoryIndexGuardError):
+            require_production_memory_index_acknowledgement(
+                settings,
+                runtime_name="test runtime",
+            )
+
+    def test_production_memory_index_guard_allows_explicit_ack(self) -> None:
+        os.environ["APP_ENV"] = "production"
+        os.environ["APP_ALLOW_SQLITE_MEMORY_INDEX_RUNTIME"] = "1"
+
+        settings = load_settings()
+
+        require_production_memory_index_acknowledgement(
+            settings,
+            runtime_name="test runtime",
+        )
+        self.assertTrue(settings.allow_sqlite_memory_index_runtime)
 
     def test_runtime_database_guard_rejects_sqlite_without_explicit_fallback(self) -> None:
         os.environ["APP_DATABASE_URL"] = "sqlite:///tmp/crxzipple-test.db"

@@ -32,11 +32,25 @@ class InMemoryToolRunRepository:
             if (tool_run := self._items.get(run_id)) is not None
         }
 
-    def list(self) -> list[ToolRun]:
-        return list(self._items.values())
+    def list(self, *, limit: int | None = None) -> list[ToolRun]:
+        items = sorted(
+            self._items.values(),
+            key=lambda run: run.created_at,
+            reverse=True,
+        )
+        if limit is not None:
+            return items[:limit]
+        return items
 
-    def list_for_tool(self, tool_id: str) -> list[ToolRun]:
-        return [run for run in self._items.values() if run.tool_id == tool_id]
+    def list_for_tool(self, tool_id: str, *, limit: int | None = None) -> list[ToolRun]:
+        items = [
+            run
+            for run in self.list(limit=None)
+            if run.tool_id == tool_id
+        ]
+        if limit is not None:
+            return items[:limit]
+        return items
 
     def list_for_orchestration_runs(self, run_ids: tuple[str, ...]) -> list[ToolRun]:
         normalized_ids = {run_id for run_id in run_ids if run_id.strip()}

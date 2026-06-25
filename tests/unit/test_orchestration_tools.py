@@ -27,6 +27,7 @@ from crxzipple.modules.llm.application.runtime_request import (
 )
 from crxzipple.modules.llm.application.provider_continuation import (
     build_provider_continuation_state_from_invocation,
+    provider_continuation_from_state,
 )
 from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
@@ -57,7 +58,7 @@ from tests.unit.tool_runtime_test_support import process_next_background_tool_ru
 from tools.skills.local import SkillsToolDeps, skill_read
 
 
-def test_provider_continuation_state_preserves_fallback_metadata() -> None:
+def test_provider_continuation_state_omits_codex_websocket_fallback() -> None:
     class _Invocation:
         id = "llm-invocation-fallback"
         provider_request_id = "resp-fallback"
@@ -81,19 +82,8 @@ def test_provider_continuation_state_preserves_fallback_metadata() -> None:
 
     state = build_provider_continuation_state_from_invocation(_Invocation())
 
-    assert state["mode"] == "provider_native"
-    assert state["provider_family"] == LlmApiFamily.OPENAI_CODEX_RESPONSES.value
-    assert state["transport"] == "websocket"
-    assert state["previous_response_id"] == "resp-fallback"
-    assert state["input_item_fingerprints"] == ["fingerprint-1", "fingerprint-2"]
-    assert state["input_item_count"] == 2
-    assert state["instructions_fingerprint"] == "instructions-fingerprint"
-    assert state["tool_fingerprints"] == ["tool-fingerprint"]
-    assert state["fallback"] is True
-    assert (
-        state["fallback_reason"]
-        == "websocket_continuation_failed_before_output"
-    )
+    assert state == {}
+    assert provider_continuation_from_state(state) is None
 
 
 def _tool_call_response_item(
@@ -1825,6 +1815,44 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             echo_tool_run.metadata["request_render_snapshot_id"],
             echo_invocation.request_metadata["request_render_snapshot_id"],
         )
+        echo_llm_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=echo_invocation.id,
+            ),
+        )
+        self.assertTrue(
+            any(item.kind.value == "llm_invocation" for item in echo_llm_items),
+        )
+        echo_tool_run_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="tool_run",
+                owner_id=echo_tool_run.id,
+            ),
+        )
+        self.assertTrue(
+            any(item.kind.value in {"tool_run", "tool_result"} for item in echo_tool_run_items),
+        )
+        echo_tool_result_item = next(
+            item
+            for item in session_tool_result_items
+            if item.call_id == "item-call-echo-1"
+        )
+        echo_session_owner_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="session_item",
+                owner_id=echo_tool_result_item.id,
+            ),
+        )
+        self.assertTrue(
+            any(item.kind.value == "tool_result" for item in echo_session_owner_items),
+        )
+        final_request_output_call_ids = [
+            item.payload.get("call_id")
+            for item in adapter.requests[-1].input_items
+            if item.kind is LlmInputItemKind.FUNCTION_CALL_OUTPUT
+        ]
+        self.assertIn("item-call-echo-1", final_request_output_call_ids)
         self.assertEqual(
             first_invocation.response_items[0].kind,
             LlmResponseItemKind.TOOL_CALL,
@@ -2329,7 +2357,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.assertIsNotNone(
+        self.assertIsNone(
             filtered_continuation(
                 api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
                 provider=LlmProviderKind.OPENAI_CODEX,
@@ -2350,7 +2378,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-    def test_codex_websocket_provider_native_continuation_allows_additive_tool_surface(
+    def test_codex_websocket_replays_full_history_without_provider_native_continuation(
         self,
     ) -> None:
         adapter = _CodexWebSocketProviderNativeToolContinuationAdapter()
@@ -2454,10 +2482,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
         self.assertGreaterEqual(len(adapter.requests), 2)
         second_request = adapter.requests[1]
-        self.assertIsNotNone(second_request.continuation)
-        assert second_request.continuation is not None
-        self.assertEqual(second_request.continuation.previous_response_id, "resp_first")
-        self.assertEqual(second_request.continuation.transport, "websocket")
+        self.assertIsNone(second_request.continuation)
 
         invocations = self.llm_service.list_invocations(
             llm_id="codex.gpt-5.4-mini",
@@ -2472,18 +2497,21 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         assert isinstance(preview, dict)
         self.assertEqual(preview["api_family"], LlmApiFamily.OPENAI_CODEX_RESPONSES)
         self.assertEqual(preview["transport"], "websocket")
-        self.assertTrue(preview["has_previous_response_id"])
-        self.assertEqual(preview["previous_response_id"], "resp_first")
-        self.assertTrue(preview["input_delta_mode"])
+        self.assertFalse(preview["has_previous_response_id"])
+        self.assertIsNone(preview["previous_response_id"])
+        self.assertFalse(preview["input_delta_mode"])
         payload_preview = preview["payload_preview"]
         assert isinstance(payload_preview, dict)
-        self.assertEqual(payload_preview["previous_response_id"], "resp_first")
+        self.assertNotIn("previous_response_id", payload_preview)
         input_items = payload_preview["input"]
         assert isinstance(input_items, list)
-        self.assertEqual(
-            [item.get("type") for item in input_items],
-            ["function_call", "function_call_output"],
-        )
+        self.assertGreaterEqual(len(input_items), 2)
+        self.assertEqual(input_items[-1].get("role"), "user")
+        runtime_context = input_items[-1].get("content")
+        assert isinstance(runtime_context, list)
+        runtime_context_text = runtime_context[0].get("text")
+        assert isinstance(runtime_context_text, str)
+        self.assertIn("# Runtime Context", runtime_context_text)
 
     def test_provider_native_tool_surface_updates_after_schema_enable(
         self,

@@ -109,8 +109,8 @@ class ToolQueryServiceAdapter:
     def get_tool(self, tool_id: str):
         return self.service.get_tool(tool_id)
 
-    def list_tool_runs(self, *, tool_id: str | None = None):
-        return self.service.list_tool_runs(tool_id=tool_id)
+    def list_tool_runs(self, *, tool_id: str | None = None, limit: int | None = None):
+        return self.service.list_tool_runs(tool_id=tool_id, limit=limit)
 
     def list_tool_runs_for_orchestration_runs(self, run_ids: tuple[str, ...]):
         return self.service.list_tool_runs_for_orchestration_runs(run_ids)

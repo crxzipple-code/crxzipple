@@ -15,7 +15,7 @@ from crxzipple.modules.browser.domain import (
 )
 
 from .engines import CdpControlEngine
-from .engines import _has_expected_remote_allow_origins
+from .engines_cdp_io import has_expected_remote_allow_origins
 
 
 def _probe_launch_policy(
@@ -201,7 +201,7 @@ class BrowserProfileProbeService:
         port_command = str(port_process.get("command", "")).strip()
         expected_headless = bool(plan.system.headless)
         actual_headless = "--headless" in port_command
-        matches_remote_allow_origins = _has_expected_remote_allow_origins(
+        matches_remote_allow_origins = has_expected_remote_allow_origins(
             command=port_command,
             host=plan.system.cdp_host,
             port=int(plan.profile.cdp_port),

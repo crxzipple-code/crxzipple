@@ -113,9 +113,9 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
                     "tool_call_id": "call-network",
                     "status": "succeeded",
                     "metadata": {
-                        "browser_profile": "crxzipple",
-                        "browser_target_id": "tab-east",
-                        "browser_evidence": {"verified_ref": "ref-flight-date"},
+                        "profile": "crxzipple",
+                        "target_id": "tab-east",
+                        "verified_ref": "ref-flight-date",
                     },
                     "details": {"url": "/api/flights", "method": "POST"},
                     "content": [{"type": "text", "text": "flight response"}],

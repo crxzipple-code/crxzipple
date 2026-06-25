@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from crxzipple.modules.llm.application.streaming import LlmStreamEvent
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmContinuationReason,
     LlmContinuationSignal,
     LlmMessagePhase,

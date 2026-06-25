@@ -696,6 +696,53 @@ class DaemonManagerTestCase(unittest.TestCase):
             self.assertEqual(refreshed[0].status, "ready")
             self.assertEqual(refreshed[0].endpoint, "http://127.0.0.1:9222")
 
+    def test_healthcheck_service_marks_process_backed_endpoint_degraded_on_probe_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
+            daemon_service = DaemonApplicationService(
+                service_spec_store=FileBackedDaemonServiceSpecStore(
+                    state_root.config_dir,
+                    bootstrap_specs=(
+                        DaemonServiceSpec(
+                            key="host:browser:crxzipple",
+                            role="host",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="ensure",
+                            restart_policy="on-failure",
+                            healthcheck_policy="cdp-version",
+                            metadata={
+                                "cli_args": ["browser", "host", "run", "--profile", "crxzipple"],
+                                "server_url": "http://127.0.0.1:9222",
+                            },
+                        ),
+                    ),
+                ),
+                instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+            )
+            process_service = _FakeProcessService()
+
+            def _probe_timeout(**_: object) -> None:
+                raise TimeoutError("endpoint probe timed out")
+
+            manager = DaemonManager(
+                daemon_service=daemon_service,
+                process_service=process_service,
+                working_directory=temp_dir,
+                shell_resolver=lambda: "/bin/sh",
+                python_executable="/usr/bin/python3",
+                endpoint_probe=_probe_timeout,
+            )
+            manager.ensure_service("host:browser:crxzipple")
+
+            refreshed = manager.healthcheck_service("host:browser:crxzipple")
+
+            self.assertEqual(len(refreshed), 1)
+            self.assertEqual(refreshed[0].status, "degraded")
+            self.assertEqual(refreshed[0].last_error, "endpoint probe timed out")
+            self.assertEqual(refreshed[0].endpoint, "http://127.0.0.1:9222")
+
     def test_missing_browser_host_runner_session_marks_manifest_stale_without_endpoint_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))

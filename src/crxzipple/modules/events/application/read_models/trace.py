@@ -5,9 +5,12 @@ from datetime import datetime
 from typing import Any
 
 from crxzipple.modules.events.application import EventsApplicationService
+from crxzipple.modules.events.application.read_models.trace_topics import (
+    per_topic_trace_limit,
+    trace_source_topics,
+)
 from crxzipple.modules.events.domain import EventTopicRecord
 from crxzipple.shared import EventDefinitionRegistry
-from crxzipple.shared.domain.events import NAMED_EVENT_TOPIC_PREFIX, named_event_topic
 from crxzipple.shared.runtime_console import TraceContext
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
@@ -163,11 +166,11 @@ class EventTraceReadModelProvider:
         if not normalized_aliases:
             return ()
         records: list[EventTopicRecord] = []
-        per_topic_limit = _per_topic_trace_limit(
+        per_topic_limit = per_topic_trace_limit(
             limit=limit,
             focus_id=normalized_focus_id,
         )
-        for topic in _trace_source_topics(
+        for topic in trace_source_topics(
             events_service=self.events_service,
             registry=self.definition_registry,
         ):
@@ -264,46 +267,6 @@ class EventTraceReadModelProvider:
             cursor=record.cursor,
             payload=payload,
         )
-
-
-def _trace_source_topics(
-    *,
-    events_service: EventsApplicationService,
-    registry: EventDefinitionRegistry,
-) -> tuple[str, ...]:
-    topics: set[str] = set()
-    for definition in registry.list_definitions():
-        definition_topics = definition.topics or (named_event_topic(definition.event_name),)
-        for topic in definition_topics:
-            normalized = _normalized_named_event_topic(topic)
-            if normalized is not None:
-                topics.add(normalized)
-    for topic in events_service.list_event_topics():
-        normalized = _normalized_named_event_topic(topic)
-        if normalized is not None:
-            topics.add(normalized)
-    return tuple(sorted(topics))
-
-
-def _per_topic_trace_limit(*, limit: int, focus_id: str) -> int:
-    if focus_id:
-        return min(max(limit // 2, 50), 100)
-    return min(max(limit, 50), 200)
-
-
-def _normalized_named_event_topic(topic: str) -> str | None:
-    if not isinstance(topic, str):
-        return None
-    normalized = topic.strip()
-    if not normalized:
-        return None
-    if "{" in normalized or "}" in normalized:
-        return None
-    if normalized == NAMED_EVENT_TOPIC_PREFIX or normalized.startswith(
-        f"{NAMED_EVENT_TOPIC_PREFIX}.",
-    ):
-        return normalized
-    return None
 
 
 def _record_matches_alias(record: EventTopicRecord, aliases: set[str]) -> bool:

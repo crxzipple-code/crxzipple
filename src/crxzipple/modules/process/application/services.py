@@ -58,14 +58,23 @@ class ProcessApplicationService:
         stderr_offset: int = 0,
         limit: int = 4000,
     ) -> ProcessOutputWindow:
-        session = self.get_session(process_id=process_id)
+        session = self.repository.refresh(
+            self.repository.get(process_id, include_output=False),
+            include_output=False,
+        )
         normalized_limit = max(int(limit), 1)
         stdout_start = max(int(stdout_offset), 0)
         stderr_start = max(int(stderr_offset), 0)
-        stdout_text = self.repository.read_stdout(process_id)
-        stderr_text = self.repository.read_stderr(process_id)
-        stdout_slice = stdout_text[stdout_start : stdout_start + normalized_limit]
-        stderr_slice = stderr_text[stderr_start : stderr_start + normalized_limit]
+        stdout_slice, next_stdout_offset = self.repository.read_stdout_window(
+            process_id,
+            offset=stdout_start,
+            limit=normalized_limit,
+        )
+        stderr_slice, next_stderr_offset = self.repository.read_stderr_window(
+            process_id,
+            offset=stderr_start,
+            limit=normalized_limit,
+        )
         return ProcessOutputWindow(
             process_id=session.id,
             status=session.status,
@@ -74,8 +83,8 @@ class ProcessApplicationService:
             stderr=stderr_slice,
             stdout_offset=stdout_start,
             stderr_offset=stderr_start,
-            next_stdout_offset=stdout_start + len(stdout_slice),
-            next_stderr_offset=stderr_start + len(stderr_slice),
+            next_stdout_offset=next_stdout_offset,
+            next_stderr_offset=next_stderr_offset,
             started_at=session.started_at,
             ended_at=session.ended_at,
         )

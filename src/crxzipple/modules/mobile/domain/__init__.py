@@ -1,4 +1,4 @@
-from .entities import MobileDeviceRuntimeState
+from .entities import MobileDeviceLease, MobileDeviceRuntimeState
 from .exceptions import (
     MobileExecutionError,
     MobileSessionNotFoundError,
@@ -26,6 +26,7 @@ __all__ = [
     "MobileControlCommand",
     "MobileDeviceCapabilities",
     "MobileDeviceConfig",
+    "MobileDeviceLease",
     "MobileDeviceRuntimeState",
     "MobileExecutionError",
     "MobileExecutionPlan",
@@ -35,4 +36,3 @@ __all__ = [
     "MobileValidationError",
     "ResolvedMobileDevice",
 ]
-

@@ -8,8 +8,9 @@ Date: 2026-06-14
 
 实跑结论：
 
-- Codex WebSocket path 才使用 `previous_response_id + incremental input`。
+- Codex 源码 WebSocket path 支持 `previous_response_id + incremental input`。
 - Codex HTTP path 没有 `previous_response_id`，会发送完整 `input`，长链下会明显触发 TPM 压力。
+- CRXZipple 当前 runtime gate 明确禁用 Codex provider-native continuation；即便底层 WebSocket renderer/transport 能测 `previous_response_id + delta input`，orchestration 默认链路仍走 full clean input / no previous response id。
 - 即使强制 HTTP，Codex 仍能走出较完整的工程探索链：
   - PC 官网被 WAF 拦截后转向移动站。
   - 抓取移动站前端 bundle。
@@ -27,7 +28,7 @@ Date: 2026-06-14
 - 简洁直接的 exec 工具面。
 - 原始 stdout/stderr/network response 反馈。
 - 连续的 `agent_message` 阶段性自我整理。
-- provider-native continuation 降低长链回放成本。
+- provider-native continuation 在 Codex WebSocket 源码路径中能降低长链回放成本；CRXZipple 当前不把它作为默认 runtime 能力启用。
 - Workbench/Trace 对这些 item 的可见性。
 
 本文件作为总纲开发文档，协调已有专项文档：
@@ -54,7 +55,7 @@ Date: 2026-06-14
 5. Orchestration 能按 response item 生命周期推进，而不是只按“有没有 tool call”粗糙判断。
 6. Context Tree 作为 agent 可主动查看/管理的运行面，默认 provider input 改为 Codex-like ResponseItem replay + compact context projection。
 7. Workbench 能展示用户该看的内容，隐藏 provider/internal 细节，但不丢失可审计证据。
-8. 长链任务在 WebSocket continuation 可用时避免全量回放和 token 膨胀。
+8. 长链任务在未来恢复 WebSocket continuation runtime gate 后避免全量回放和 token 膨胀；当前先保证 full clean input 语义正确、可观测、无协议孤儿。
 
 ## 非目标
 
@@ -151,7 +152,7 @@ CRXZipple 当前差距：
 CRXZipple 当前差距：
 
 - 曾错误地把 Codex HTTP 当作支持 `previous_response_id`。
-- 当前已止血，但如果没有真正接入 Codex WebSocket transport，仍会退化到 HTTP 全量回放。
+- 当前已止血；底层 Codex WebSocket renderer/transport 已有受测 delta 能力，但 LLM/orchestration runtime gate 暂时禁用 Codex provider-native continuation，真实运行仍回放 full clean input。
 - Operations 对 normalized request 和 provider actual payload 的区分还需要继续强化。
 
 对齐原则：
@@ -159,7 +160,7 @@ CRXZipple 当前差距：
 - HTTP 和 WebSocket schema 必须分离。
 - continuation capability 必须绑定 provider + transport。
 - 对 OpenAI Responses HTTP、Codex Responses WebSocket、非 Responses provider 分别建能力矩阵。
-- WebSocket 不可用时可以回退 HTTP，但必须在 Operations/Workbench 明确暴露“已退化为 full replay”。
+- Codex runtime gate 恢复前，Operations/Workbench 必须明确暴露当前是 full replay / no previous response id；未来 WebSocket delta 恢复必须走单独变更请求和 turn-scoped transport/fingerprint gate。
 
 ## 5. Context Tree Delivery
 
@@ -238,7 +239,7 @@ LLM Module
   v
 Provider Adapter
   - HTTP full request
-  - WebSocket response.create + previous_response_id + delta
+  - WebSocket response.create + previous_response_id + delta (底层可测能力；当前 Codex runtime gate 关闭)
   - provider-specific item mapping
   |
   v
@@ -297,17 +298,19 @@ Operations / Workbench
   - 记录 `continuation_degraded_reason=http_transport_without_previous_response_id`。
 - Codex WebSocket adapter：
   - 首轮发送 full `response.create`。
-  - 后续 prefix/delta 校验通过时发送 `previous_response_id + delta input`。
+  - 后续 prefix/delta 校验通过时可发送 `previous_response_id + delta input`。
+  - 当前 CRXZipple runtime gate 不向 Codex adapter 传入 provider-native continuation；该路径仅作为底层 adapter/transport 能力受测保留。
   - 校验失败时 full request fallback，并记录原因。
 
 ### 验收
 
 - HTTP Codex 请求 payload preview 不含 `previous_response_id`。
-- WebSocket Codex 第二轮 payload preview 含：
+- 底层 WebSocket Codex renderer/transport 第二轮 payload preview 可含：
   - `message_type=response.create`
   - `previous_response_id`
   - `input_mode=delta`
-- Operations 能显示 transport、input item count、delta item count、fallback reason。
+- 当前 orchestration 默认链路的 Codex invocation preview 应显示 `has_previous_response_id=false`、`input_delta_mode=false` 和 full clean input。
+- Operations 能显示 transport、input item count、delta item count、fallback reason / runtime gate reason。
 
 ## 2. Orchestration Module
 
@@ -337,7 +340,8 @@ Operations / Workbench
   - 后续 provider request 按 model-visible policy 回灌。
 - continuation 处理：
   - 首轮绑定 context render snapshot。
-  - 后续优先 provider-native continuation。
+  - 对支持且已打开 runtime gate 的 provider 后续优先 provider-native continuation。
+  - Codex 当前 runtime gate 关闭，后续继续使用 full clean input replay。
   - 只有 fallback provider 才 transcript replay。
 - evidence / failure facts:
   - 由 owner module 或工具结果显式提供。
@@ -528,7 +532,7 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
   - `raw_payload_ref`
 - model-visible replay policy：
   - 默认包含用户任务 + active task state + structured ResponseItem replay。
-  - provider-native continuation 只发送 delta input。
+  - provider-native continuation 只发送 delta input；当前 Codex runtime gate 关闭时不走该分支。
   - HTTP structured replay 时按 policy 选择 replay items，不把树当 transcript。
   - provider fallback transcript replay 时，按 policy 降级为 compacted messages。
 - user-visible policy：
@@ -538,7 +542,7 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
 ### 验收
 
 - agent progress 可保存但不必作为普通 assistant chat message。
-- provider-native continuation 时不会把所有历史 message 再塞给 provider。
+- provider-native continuation 启用时不会把所有历史 message 再塞给 provider；当前 Codex runtime gate 关闭时应明确显示 full replay。
 - HTTP fallback 时可以生成 compact replay，而不是全量无限增长。
 
 ## 8. Testing And Audit
@@ -547,7 +551,8 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
 
 - LLM adapter:
   - Codex HTTP 不发送 `previous_response_id`。
-  - Codex WebSocket 后续轮发送 `previous_response_id + delta input`。
+  - Codex WebSocket 底层 renderer/transport 后续轮可发送 `previous_response_id + delta input`。
+  - Codex orchestration/runtime 默认链路在 gate 关闭时不传 provider-native continuation。
   - WebSocket prefix mismatch fallback full request。
 - Orchestration:
   - response item stream 保存。
@@ -636,15 +641,16 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
 
 - [x] 新增 Codex WebSocket adapter。
 - [x] 实现 `response.create`。
-- [x] 实现 `previous_response_id + delta input`。
-- [x] 实现 fallback full request。
+- [x] 底层 renderer/transport 实现 `previous_response_id + delta input`。
+- [x] 底层 renderer/transport 实现 fallback full request。
+- [x] Codex runtime gate 当前关闭 provider-native continuation，真实 orchestration 链路回放 full clean input。
 - [x] Operations / Workbench 显示 transport/fallback。
 
 ## Phase 6: Orchestration Loop Governance
 
 - [x] 从 tool-call 二元 loop 升级为 response-item loop：ToolRun 创建已从 `LlmResponseItem(kind=tool_call)` 派生，response item id 进入 execution chain/session refs，legacy `LlmResult.tool_calls` 仅保留兼容 fallback。
 - [x] Orchestration request envelope 生成 provider-neutral input item：`PromptTranscript` 已从 `SessionItem` 直出 `LlmInputItem`，`ProviderPromptRequestBuilder` 优先保留 session item 的 `reasoning` / `function_call` / `function_call_output` / `provider_external_item` 语义，并把 context projection 等新增 prompt message 按 message item 补入；最终通过 `OrchestrationEngineLlmInvoker` 传入 LLM module。
-- [x] 完成 end_turn / pending tool / pending approval / fallback 判断：`provider_end_turn_false` 无 tool call 时继续 follow-up；pending approval/tool wait 已进入 continuation state；Codex WebSocket/HTTP fallback 已进入 provider continuation state 与 Workbench/Operations。
+- [x] 完成 end_turn / pending tool / pending approval / fallback 判断：`provider_end_turn_false` 无 tool call 时继续 follow-up；pending approval/tool wait 已进入 continuation state；Codex 当前不生成 provider-native continuation state，Workbench/Operations 应显示 full replay/no previous response id；未来恢复 WebSocket delta 需单独 gate。
 - [x] evidence ledger 默认路线已取消：通用 agent loop 不再维护跨任务证据裁判账本；Context Tree 默认根已移除 `evidence.frontier`，Session segment 不再自动挂 `Current Evidence Ledger` / browser investigation warning；Context Workspace 不再从 run metadata 生成 `evidence_frontier_node`、snapshot `evidence_frontier` 或 `evidence_delta`；Tool / Session / Context Workspace / Operations 保持各自事实，provider transcript 负责把事实清楚交给模型。
 - [x] loop budget 与纠偏策略已降级为 debug / Operations：`runtime_loop_correction` 不再作为 model-visible system hint 注入 provider input，避免用不可穷举阈值干扰 LLM 自主判断。
 - [x] Context delta 已从 provider-facing request 收敛：默认请求不回放 full tree，不注入 `context_workspace_delta` message，也不在 LLM request metadata 携带 `context_delta` 原文；模型需要树状态时通过显式 `context_tree.*` 工具读取。
@@ -688,7 +694,7 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
 
 | 维度 | Codex HTTP-only 观测 | CRXZipple 当前观测 |
 | --- | --- | --- |
-| Continuation | HTTP path 不携带 `previous_response_id`，全量 `input` 回放，长链会触发 TPM 压力 | Codex HTTP 已禁发 `previous_response_id`；WebSocket path 才使用 provider-native continuation |
+| Continuation | HTTP path 不携带 `previous_response_id`，全量 `input` 回放，长链会触发 TPM 压力；WebSocket 源码 path 支持 delta | 当前 CRXZipple Codex runtime gate 已禁用 provider-native continuation，真实 orchestration 链路应显示 full replay / no previous response id；底层 WebSocket renderer/transport delta 能力仅受测保留 |
 | 探索路线 | PC 官网 WAF 后切移动站，抓 bundle，定位 `/m-base/sale/shoppingv2`，反解 `wbsk_*` 加密，尝试 cookie replay | 真实 run `8ab370783a34472a9414070aec200267` 已能用 `exec` 做动态站点探索并最终不伪造票价 |
 | 最终结果 | 未拿到真实票价，因阿里云 WAF challenge 阻断而拒绝编造 | `status=completed`，final answer 含 verified/gap/unavailable evidence，不声称伪造票价 |
 | 阶段总结 | 工具之间有清晰阶段说明和路径切换原因 | 后端 timeline 已投影 `reasoning_summary=16`、`agent_progress=2`，仍需降低空 reasoning/tool-only streak |
@@ -709,6 +715,7 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
 - 已新增 response-item aware 回归：通过 `llm_response_item_ids` 解引用真实 `LlmResponseItem`，把 `reasoning + tool_call` 区分于纯 tool-only invocation，避免把 provider 已生成的 reasoning summary 误判为无阶段性 progress。
 - 已新增真实 exec runtime probe 回归：执行真实 Python 探测命令，验证 `summary`、`stdout`、`stderr`、`exit_code`、`cwd`、`shell` 等 facts 进入 model-visible envelope。
 - 已修复 raw output 外置后的 envelope merge：当 raw output 被外置为 artifact 后，`read_handles` 以 artifact 为最终可读位置，不再保留已被搬移的 `raw_output_block` handle。
+- 已修复 tree-backed protocol replay：execution chain 的 tool call/result protocol refs 统一指向 session item，Context Slice 对结构化 tool call/result 保留模型投影能力，防止下一轮 request 只剩孤儿 `function_call_output`。
 - `orchestration baseline` CLI 已接入 LLM response item resolver；能从 LLM module 的 persisted response item truth 计算 reasoning/tool-call/assistant item 指标，summary payload 只作为 fallback。
 - Workbench LLM step diagnostics 已改为 response item 优先：有 reasoning summary 文本的 LLM step 会显示 `progress recorded`，tool-only streak 不再被旧 summary 口径误放大。
 - Workbench timeline 前端已把可见 `reasoning_summary` 映射为阶段总结进展项，并按 markdown 渲染正文；hidden reasoning 仍只展示 presence/count，不泄露 raw reasoning。
@@ -718,7 +725,7 @@ Session 不再是单一聊天 message 镜像，而是 response item history 和 
 - Workbench inspector debug 已新增 `Loop Health` 区块，直接复用 response-item aware baseline 的 `loop_health`，展示 warnings、最大/当前 tool-only streak、tool-only 分段数、validation delta 和 validation lag 状态；baseline 不可用时只显示 `unavailable`，不伪造健康状态。
 - `runtime_loop_correction` 已按最新决策从 model-visible hint 降级为 request metadata / Operations debug；它可以帮助用户审计，但不再要求模型按固定阈值改变探索策略。
 - Operations LLM invocation detail 已新增 `runtime_hints` section，把 request metadata 中的 `runtime_loop_correction` 和 `runtime_evidence_frontier` 投影为可读摘要；Workbench linked entity detail 已支持 `llm_invocation`，用户可从 timeline/inspector 链路查看该轮 runtime debug 记录的 loop correction warnings 与 evidence frontier 计数。
-- Operations LLM lifecycle events 已新增 `Transport`、`Continuation`、`Input Delta` 列；`llm.invocation_provider_request_prepared` 能直接显示 `websocket`、`previous_response_id=...`、`mode=true; delta=...; baseline=...`，用于验收 Codex WebSocket incremental request 是否生效。
+- Operations LLM lifecycle events 已新增 `Transport`、`Continuation`、`Input Delta` 列；当前 Codex orchestration 链路应显示 `has_previous_response_id=false`、`input_delta_mode=false`、full replay。底层 WebSocket incremental request 的 `previous_response_id=...` / `delta=...` 仅通过 adapter/transport 回归验收，恢复到 runtime 默认链路前必须先完成 turn-scoped gate 设计。
 - LLM profile warmup 已从内部 service 扩展到 HTTP/CLI/Settings UI/Operations action：`POST /llms/{llm_id}/warmup`、`llm warmup <llm_id>`、LLM Profiles 页面 Warmup 按钮和 `POST /operations/llm/profiles/{llm_id}/warmup` 可在正式长链前验证 Codex WebSocket profile credential/transport/connection reuse。所有入口走 `llm.warmup` 授权动作，且不创建 invocation；Operations 入口额外写 action audit，warmup 成功/跳过/失败仍发布 LLM owner event，并进入 Operations lifecycle event、Provider Access 表和下一步处理建议。
 - `runtime_evidence_frontier` 已按最新决策从 model-visible digest 降级为 request metadata / Operations debug；debug payload 使用 `observed_count / uncertain_count / failed_count`，不再输出 `verified/gap` 行为结论给模型。
 - 已对真实东航长链 run `8ab370783a34472a9414070aec200267` 跑 baseline：

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import io
 import mimetypes
@@ -26,6 +27,23 @@ class ArtifactBinary:
     artifact: Artifact
     path: Path
     variant: ArtifactVariant
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactStorageUsage:
+    artifact_count: int
+    total_bytes: int
+    missing_file_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactCleanupResult:
+    pruned_artifact_ids: tuple[str, ...]
+    artifact_count_before: int
+    artifact_count_after: int
+    total_bytes_before: int
+    total_bytes_after: int
+    missing_file_count_before: int = 0
 
 
 class ArtifactApplicationService:
@@ -88,6 +106,93 @@ class ArtifactApplicationService:
 
     def get_artifact(self, artifact_id: str) -> Artifact:
         return self.store.load_metadata(artifact_id)
+
+    def list_artifacts(self) -> tuple[Artifact, ...]:
+        return tuple(
+            sorted(
+                self.store.list_metadata(),
+                key=lambda artifact: (self._utc_datetime(artifact.created_at), artifact.id),
+                reverse=True,
+            ),
+        )
+
+    def storage_usage(self) -> ArtifactStorageUsage:
+        artifacts = self.store.list_metadata()
+        total_bytes, missing_file_count = self._storage_totals(artifacts)
+        return ArtifactStorageUsage(
+            artifact_count=len(artifacts),
+            total_bytes=total_bytes,
+            missing_file_count=missing_file_count,
+        )
+
+    def cleanup_artifacts(
+        self,
+        *,
+        created_before: datetime | None = None,
+        max_total_bytes: int | None = None,
+    ) -> ArtifactCleanupResult:
+        if max_total_bytes is not None and max_total_bytes < 0:
+            raise ArtifactValidationError("Artifact max_total_bytes cannot be negative.")
+
+        artifacts = self.store.list_metadata()
+        total_bytes_before, missing_file_count_before = self._storage_totals(artifacts)
+        sizes_by_id = {
+            artifact.id: self._artifact_storage_size(artifact)[0]
+            for artifact in artifacts
+        }
+        cutoff = self._utc_datetime(created_before) if created_before else None
+        candidates: list[Artifact] = []
+
+        if cutoff is not None:
+            candidates.extend(
+                artifact
+                for artifact in artifacts
+                if self._utc_datetime(artifact.created_at) < cutoff
+            )
+
+        candidate_ids = {artifact.id for artifact in candidates}
+        projected_total = total_bytes_before - sum(
+            sizes_by_id[artifact_id] for artifact_id in candidate_ids
+        )
+
+        if max_total_bytes is not None and projected_total > max_total_bytes:
+            retained = [
+                artifact
+                for artifact in sorted(
+                    artifacts,
+                    key=lambda item: (self._utc_datetime(item.created_at), item.id),
+                )
+                if artifact.id not in candidate_ids
+            ]
+            for artifact in retained:
+                if projected_total <= max_total_bytes:
+                    break
+                candidates.append(artifact)
+                candidate_ids.add(artifact.id)
+                projected_total -= sizes_by_id[artifact.id]
+
+        pruned_artifact_ids: list[str] = []
+        for artifact in sorted(
+            candidates,
+            key=lambda item: (self._utc_datetime(item.created_at), item.id),
+        ):
+            if self.store.delete_artifact(artifact.id):
+                pruned_artifact_ids.append(artifact.id)
+
+        total_bytes_after = max(
+            0,
+            total_bytes_before - sum(
+                sizes_by_id[artifact_id] for artifact_id in pruned_artifact_ids
+            ),
+        )
+        return ArtifactCleanupResult(
+            pruned_artifact_ids=tuple(pruned_artifact_ids),
+            artifact_count_before=len(artifacts),
+            artifact_count_after=len(artifacts) - len(pruned_artifact_ids),
+            total_bytes_before=total_bytes_before,
+            total_bytes_after=total_bytes_after,
+            missing_file_count_before=missing_file_count_before,
+        )
 
     def resolve_variant(
         self,
@@ -246,3 +351,37 @@ class ArtifactApplicationService:
         raise ArtifactValidationError(
             f"Unsupported image mime type '{mime_type}' for artifact variants.",
         )
+
+    def _storage_totals(self, artifacts: tuple[Artifact, ...]) -> tuple[int, int]:
+        total_bytes = 0
+        missing_file_count = 0
+        for artifact in artifacts:
+            artifact_bytes, artifact_missing = self._artifact_storage_size(artifact)
+            total_bytes += artifact_bytes
+            missing_file_count += artifact_missing
+        return total_bytes, missing_file_count
+
+    def _artifact_storage_size(self, artifact: Artifact) -> tuple[int, int]:
+        total_bytes = 0
+        missing_file_count = 0
+        seen_storage_keys: set[str] = set()
+        for storage_key in (
+            artifact.storage_key,
+            artifact.preview_storage_key,
+            artifact.llm_storage_key,
+        ):
+            if not storage_key or storage_key in seen_storage_keys:
+                continue
+            seen_storage_keys.add(storage_key)
+            path = self.store.resolve_path(storage_key)
+            if path.is_file():
+                total_bytes += path.stat().st_size
+            else:
+                missing_file_count += 1
+        return total_bytes, missing_file_count
+
+    @staticmethod
+    def _utc_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

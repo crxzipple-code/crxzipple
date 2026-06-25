@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from crxzipple.modules.session.application.services import (
+from crxzipple.modules.session.application.session_lifecycle import (
     RoutedSessionResult,
-    SessionApplicationService,
     SyncRoutedSessionInput,
 )
+from crxzipple.modules.session.application.services import SessionApplicationService
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.exceptions import SessionValidationError
 from crxzipple.modules.session.domain.value_objects import (

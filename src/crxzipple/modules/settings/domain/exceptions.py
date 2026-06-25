@@ -17,5 +17,9 @@ class SettingsAlreadyExistsError(SettingsError):
     """Raised when creating a settings record with an existing identifier."""
 
 
+class SettingsConflictError(SettingsError):
+    """Raised when a settings mutation conflicts with the current resource state."""
+
+
 class SettingsPublishError(SettingsError):
     """Raised when publishing or rollback cannot complete."""

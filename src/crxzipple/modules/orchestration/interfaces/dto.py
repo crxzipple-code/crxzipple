@@ -270,6 +270,7 @@ def _request_render_snapshot_metadata_preview(
         "provider_tool_schema_names",
         "visible_input_summary",
         "request_render_timings",
+        "context_slice_builder_timings",
         "runtime_request_snapshot",
         "request_render_snapshot",
         "tool_schema_mirror_budget",

@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from uuid import uuid4
 
 from .exceptions import MobileValidationError
 from .value_objects import _normalize_name, _normalize_optional_text
+
+MobileDeviceLeaseStatus = str
+
+_ALLOWED_LEASE_STATUSES = {"active", "released", "expired"}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -95,3 +105,93 @@ class MobileDeviceRuntimeState:
     @property
     def metadata_copy(self) -> dict[str, Any]:
         return cast(dict[str, Any], dict(self.metadata))
+
+
+@dataclass(slots=True)
+class MobileDeviceLease:
+    id: str
+    device_name: str
+    owner_kind: str
+    owner_id: str
+    status: MobileDeviceLeaseStatus = "active"
+    acquired_at: datetime = field(default_factory=_utcnow)
+    heartbeat_at: datetime | None = None
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        normalized_id = _normalize_name(self.id, label="Mobile lease id")
+        normalized_device = _normalize_name(self.device_name, label="Mobile lease device name")
+        normalized_owner_kind = _normalize_name(self.owner_kind, label="Mobile lease owner kind")
+        normalized_owner_id = _normalize_name(self.owner_id, label="Mobile lease owner id")
+        if normalized_id is None:
+            raise MobileValidationError("Mobile lease id is required.")
+        if normalized_device is None:
+            raise MobileValidationError("Mobile lease device name is required.")
+        if normalized_owner_kind is None:
+            raise MobileValidationError("Mobile lease owner kind is required.")
+        if normalized_owner_id is None:
+            raise MobileValidationError("Mobile lease owner id is required.")
+        self.id = normalized_id
+        self.device_name = normalized_device
+        self.owner_kind = normalized_owner_kind
+        self.owner_id = normalized_owner_id
+        if self.status not in _ALLOWED_LEASE_STATUSES:
+            allowed = ", ".join(sorted(_ALLOWED_LEASE_STATUSES))
+            raise MobileValidationError(f"Mobile lease status must be one of: {allowed}.")
+        self.metadata = dict(self.metadata)
+        if self.heartbeat_at is None:
+            self.heartbeat_at = self.acquired_at
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        device_name: str,
+        owner_kind: str,
+        owner_id: str,
+        ttl_seconds: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> "MobileDeviceLease":
+        timestamp = now or _utcnow()
+        expires_at = (
+            timestamp + timedelta(seconds=max(int(ttl_seconds), 1))
+            if ttl_seconds is not None
+            else None
+        )
+        return cls(
+            id=uuid4().hex,
+            device_name=device_name,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            acquired_at=timestamp,
+            heartbeat_at=timestamp,
+            expires_at=expires_at,
+            metadata=metadata or {},
+        )
+
+    def is_active_at(self, now: datetime | None = None) -> bool:
+        if self.status != "active":
+            return False
+        if self.expires_at is None:
+            return True
+        return self.expires_at > (now or _utcnow())
+
+    def heartbeat(self, *, ttl_seconds: int | None = None, now: datetime | None = None) -> None:
+        if self.status != "active":
+            raise MobileValidationError("Only active mobile leases can be heartbeated.")
+        timestamp = now or _utcnow()
+        self.heartbeat_at = timestamp
+        if ttl_seconds is not None:
+            self.expires_at = timestamp + timedelta(seconds=max(int(ttl_seconds), 1))
+
+    def release(self) -> None:
+        if self.status != "active":
+            return
+        self.status = "released"
+
+    def expire(self) -> None:
+        if self.status != "active":
+            return
+        self.status = "expired"

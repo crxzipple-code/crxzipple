@@ -3,6 +3,7 @@ from .engines import AdbBackedMobileActionEngine, AdbControlEngine
 from .registry import StaticMobileEngineRegistry
 from .state_root import MobileStateRoot, bootstrap_mobile_state_root
 from .stores import (
+    FileBackedMobileDeviceLeaseStore,
     FileBackedMobileRefStore,
     FileBackedMobileRuntimeStateStore,
     FileBackedMobileSystemConfigStore,
@@ -14,6 +15,7 @@ __all__ = [
     "AndroidAdbClient",
     "AndroidUiDump",
     "FileBackedMobileRefStore",
+    "FileBackedMobileDeviceLeaseStore",
     "FileBackedMobileRuntimeStateStore",
     "FileBackedMobileSystemConfigStore",
     "MobileStateRoot",

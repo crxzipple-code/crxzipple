@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import unittest
+from unittest.mock import patch
 
-from tests.unit.cli_test_support import *
+from tests.unit.cli_test_support import CliModuleTestCase, app
 
 
 class ServeCliTestCase(CliModuleTestCase):
@@ -60,6 +62,42 @@ class ServeCliTestCase(CliModuleTestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("Refusing to start HTTP API with SQLite", result.stderr)
         self.assertIn("APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1", result.stderr)
+
+    def test_serve_rejects_file_events_without_explicit_runtime_fallback(self) -> None:
+        env = dict(self.env)
+        env.pop("APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK", None)
+
+        result = self.runner.invoke(
+            app,
+            ["serve", "--host", "127.0.0.1", "--port", "8010"],
+            env=env,
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn(
+            "Refusing to start HTTP API with 'file' events backend",
+            result.stderr,
+        )
+        self.assertIn("APP_ALLOW_FILE_EVENTS_RUNTIME_FALLBACK=1", result.stderr)
+
+    def test_serve_rejects_production_memory_index_without_explicit_ack(self) -> None:
+        env = dict(self.env)
+        env["APP_ENV"] = "production"
+        env.pop("APP_ALLOW_SQLITE_MEMORY_INDEX_RUNTIME", None)
+
+        result = self.runner.invoke(
+            app,
+            ["serve", "--host", "127.0.0.1", "--port", "8010"],
+            env=env,
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn(
+            "Refusing to start HTTP API in production without explicit Memory SQLite "
+            "index acknowledgement",
+            result.stderr,
+        )
+        self.assertIn("APP_ALLOW_SQLITE_MEMORY_INDEX_RUNTIME=1", result.stderr)
 
 
 if __name__ == "__main__":

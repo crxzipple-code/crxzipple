@@ -33,7 +33,7 @@ def upgrade() -> None:
         "ix_session_instances_session_sequence",
         "session_instances",
         ["session_key", "sequence_no"],
-        unique=False,
+        unique=True,
     )
 
 

@@ -79,6 +79,36 @@ from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedToolSet,
     ToolResolver,
 )
+from crxzipple.modules.orchestration.application.tool_execution_records import (
+    PreparedToolExecution,
+    ToolExecutionBatchOutcome,
+    ToolExecutionBatchState,
+    ToolExecutionPlan,
+    ToolRunLink,
+)
+from crxzipple.modules.orchestration.application.tool_dispatch_guard import (
+    TERMINAL_RUN_STATUSES,
+    ToolDispatchGuard,
+)
+from crxzipple.modules.orchestration.application.tool_execution_control import (
+    ToolExecutionControlDecision,
+    tool_execution_control_decision,
+)
+from crxzipple.modules.orchestration.application.tool_execution_grouping import (
+    group_prepared_tool_executions,
+    is_terminal_plan_control_tool,
+)
+from crxzipple.modules.orchestration.application.tool_execution_result_recorder import (
+    ToolExecutionResultRecord,
+    ToolResultMessageItem,
+    record_tool_execution_result,
+    tool_run_link,
+)
+from crxzipple.modules.orchestration.application.tool_resource_policy import (
+    ToolResourcePolicy,
+    resource_policies_conflict,
+    tool_resource_policy,
+)
 from crxzipple.modules.orchestration.application.observers import (
     RUN_OBSERVATION_EVENT_NAMES,
     TOOL_OBSERVATION_SOURCE_EVENT_NAMES,
@@ -245,8 +275,19 @@ __all__ = [
     "release_executor_assignment_capacity",
     "RunExecutionService",
     "SessionsSpawnFollowupService",
+    "TERMINAL_RUN_STATUSES",
     "ToolCatalogPort",
+    "ToolDispatchGuard",
+    "ToolExecutionControlDecision",
+    "PreparedToolExecution",
+    "ToolExecutionBatchOutcome",
+    "ToolExecutionBatchState",
+    "ToolExecutionPlan",
+    "ToolExecutionResultRecord",
     "ToolExecutionPort",
+    "ToolResourcePolicy",
+    "ToolResultMessageItem",
+    "ToolRunLink",
     "OrchestrationDispatchRecoveryReaction",
     "OrchestrationToolTerminalReaction",
     "RUN_OBSERVATION_EVENT_NAMES",
@@ -255,6 +296,13 @@ __all__ = [
     "RuntimeObservationObserver",
     "ToolRunObservationObserver",
     "ToolResolver",
+    "group_prepared_tool_executions",
+    "is_terminal_plan_control_tool",
+    "record_tool_execution_result",
+    "tool_execution_control_decision",
+    "tool_run_link",
+    "resource_policies_conflict",
+    "tool_resource_policy",
     "AUTO_LLM_ID",
     "is_auto_llm_id",
     "normalize_requested_llm_id",

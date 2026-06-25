@@ -23,10 +23,27 @@ _DEFAULT_INPUT_METHOD_KEY = "default_input_method"
 _KNOWN_ACCESSIBILITY_INTERFERERS = ("com.vivo.dr/.WXAssistService",)
 _ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 _INPUT_METHOD_SERVED_CONNECTION_LINE_PREFIX = "mServedInputConnection="
+_MAX_ADB_ERROR_OUTPUT_CHARS = 2_000
 
 
 def _command_output(exc: subprocess.CalledProcessError) -> str:
-    return (exc.stderr or exc.stdout or str(exc)).strip()
+    raw = _coerce_subprocess_output(exc.stderr) or _coerce_subprocess_output(exc.stdout)
+    return _truncate_adb_output(raw or str(exc)).strip()
+
+
+def _coerce_subprocess_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _truncate_adb_output(value: str) -> str:
+    if len(value) <= _MAX_ADB_ERROR_OUTPUT_CHARS:
+        return value
+    omitted = len(value) - _MAX_ADB_ERROR_OUTPUT_CHARS
+    return f"{value[:_MAX_ADB_ERROR_OUTPUT_CHARS]}... [truncated {omitted} chars]"
 
 
 def _extract_xml(raw: str) -> str:

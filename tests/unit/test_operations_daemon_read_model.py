@@ -5,8 +5,10 @@ from unittest import TestCase
 
 from crxzipple.modules.daemon import DaemonInstance, DaemonServiceSpec
 from crxzipple.modules.operations.application.read_models.daemon import (
-    DaemonOperationsQuery,
     DaemonOperationsReadModelProvider,
+)
+from crxzipple.modules.operations.application.read_models.daemon_models import (
+    DaemonOperationsQuery,
 )
 
 

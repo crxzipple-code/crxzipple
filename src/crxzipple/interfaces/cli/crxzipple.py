@@ -6,7 +6,11 @@ from typing import Any
 
 from crxzipple.core.config import (
     RuntimeDatabaseGuardError,
+    RuntimeEventsBackendGuardError,
+    RuntimeMemoryIndexGuardError,
     load_settings,
+    require_production_memory_index_acknowledgement,
+    require_shared_events_backend,
     require_runtime_database,
 )
 from crxzipple.interfaces.cli.formatters import echo_data
@@ -36,7 +40,16 @@ _RUNTIME_CONTAINER_KEY = "runtime_container"
 def guard_runtime_database(settings, *, runtime_name: str) -> None:  # noqa: ANN001
     try:
         require_runtime_database(settings, runtime_name=runtime_name)
-    except RuntimeDatabaseGuardError as exc:
+        require_shared_events_backend(settings, runtime_name=runtime_name)
+        require_production_memory_index_acknowledgement(
+            settings,
+            runtime_name=runtime_name,
+        )
+    except (
+        RuntimeDatabaseGuardError,
+        RuntimeEventsBackendGuardError,
+        RuntimeMemoryIndexGuardError,
+    ) as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from None
 

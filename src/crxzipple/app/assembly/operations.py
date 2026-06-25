@@ -13,9 +13,13 @@ from crxzipple.modules.operations.application.read_models.factory import (
     OperationsSourceReadModelContext,
     build_operations_source_read_model_provider,
 )
-from crxzipple.modules.operations.infrastructure.persistence.repositories import (
+from crxzipple.modules.operations.infrastructure.persistence.action_audit_repository import (
     SqlAlchemyOperationsActionAuditStore,
+)
+from crxzipple.modules.operations.infrastructure.persistence.observation_repository import (
     SqlAlchemyOperationsObservationStore,
+)
+from crxzipple.modules.operations.infrastructure.persistence.projection_repository import (
     SqlAlchemyOperationsProjectionStore,
 )
 

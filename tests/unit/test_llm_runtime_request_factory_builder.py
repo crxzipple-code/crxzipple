@@ -1607,6 +1607,53 @@ def test_request_metadata_carries_budget_fields_from_snapshot_metadata() -> None
     assert "hidden schema body" not in str(metadata)
 
 
+def test_request_envelope_keeps_runtime_context_for_renderer() -> None:
+    builder = RuntimeLlmRequestBuilder()
+    draft = _draft(
+        runtime_context={
+            "agent_id": "assistant",
+            "llm_id": "llm.test",
+            "workspace_dir": "/workspace",
+            "current_step": 29,
+            "max_steps": 30,
+            "remaining_steps": 1,
+            "step_budget_status": "finalize_now",
+            "debug_body": "must not leak",
+        },
+    )
+    snapshot = RequestRenderSnapshotRecord(
+        snapshot_id="ctxsnap-runtime-context",
+        projected_input_items=_projected_user_message("hello"),
+    )
+
+    envelope = builder.request_envelope(
+        draft=draft,
+        request_render_snapshot=snapshot,
+        resolved_tools=ResolvedToolSet(tools=()),
+        snapshot_metadata={},
+        run_id="run-runtime-context",
+        agent_id="assistant",
+    )
+
+    assert envelope.provider_context_messages == ()
+    assert envelope.metadata["run_id"] == "run-runtime-context"
+    assert envelope.metadata["agent_id"] == "assistant"
+    assert envelope.metadata["session_key"] == "session:test"
+    assert envelope.metadata["active_session_id"] == "session-instance-1"
+    assert envelope.metadata["runtime_context"]["run_id"] == "run-runtime-context"
+    assert envelope.metadata["runtime_context"]["agent_id"] == "assistant"
+    assert envelope.metadata["runtime_context"]["session_key"] == "session:test"
+    assert envelope.metadata["runtime_context"]["active_session_id"] == (
+        "session-instance-1"
+    )
+    assert envelope.metadata["runtime_context"]["step_budget_status"] == "finalize_now"
+    assert "must not leak" not in str(envelope.metadata["runtime_context"])
+    assert envelope.renderer_context().to_payload()["run_id"] == "run-runtime-context"
+    assert envelope.renderer_context().to_payload()["step_budget_status"] == (
+        "finalize_now"
+    )
+
+
 def _draft(
     *,
     messages: tuple[LlmMessage, ...] | None = None,
@@ -1621,6 +1668,7 @@ def _draft(
     transcript_policy: dict[str, object] | None = None,
     agent_instruction: str | None = None,
     report: RuntimeRequestReport | None = None,
+    runtime_context: dict[str, object] | None = None,
 ) -> RuntimeLlmRequestDraft:
     return RuntimeLlmRequestDraft(
         llm_id="llm.test",
@@ -1648,6 +1696,7 @@ def _draft(
         runtime_llm_defaults=dict(runtime_llm_defaults or {}),
         llm_defaults=dict(llm_defaults or {}),
         llm_policy=dict(llm_policy or {}),
+        runtime_context=dict(runtime_context or {}),
         tool_schemas=tool_schemas,
         surface_policy=surface_policy or RunSurfacePolicy(),
     )

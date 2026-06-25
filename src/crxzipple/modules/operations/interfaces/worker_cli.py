@@ -151,7 +151,6 @@ def build_cli() -> typer.Typer:
             settings,
             target=AssemblyTarget.OPERATIONS_OBSERVER,
         ) as container:
-            _materialize_all(container)
             processed_events = _runtime(container).run_until_stopped(
                 worker_id=resolved_worker_id,
                 poll_interval_seconds=poll_interval_seconds,

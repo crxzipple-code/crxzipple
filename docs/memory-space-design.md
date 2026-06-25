@@ -176,6 +176,33 @@ File kinds:
 The `archive` kind is a durable memory file kind. It is not the source of truth
 for session transcript history.
 
+## Production Path Ownership
+
+In local development, a memory space may resolve to an agent home or project
+workspace. In production or shared deployments, `storage_root` must be treated as
+an owner-module controlled path, not user-provided free text.
+
+Required production constraints:
+
+- each tenant/user/agent space receives a dedicated storage root under a
+  configured Memory-owned base directory
+- callers pass only a `space_id` or a previously authorized binding; they do not
+  pass arbitrary filesystem paths into Memory runtime methods
+- `.state/memory-binding.json` may select another authorized `space_id`, but it
+  must not escape the configured Memory base directory
+- markdown files remain Memory-owned durable knowledge, while Session remains
+  the transcript source of truth
+- Context Workspace and LLM request renderers may receive selected citations,
+  excerpts, summaries, and handles; they must not receive a raw recursive dump of
+  a memory storage root
+- index files are derived artifacts and may be rebuilt; markdown files are the
+  durable source
+
+Shared writable directories are not a multi-user isolation boundary. A deployment
+that serves multiple users must bind `MemoryUseContext.storage_root` through an
+authenticated owner/tenant resolver before any recall, write, watch, or rebuild
+operation.
+
 ## Migration Notes
 
 Completed direction:

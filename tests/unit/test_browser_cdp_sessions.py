@@ -70,6 +70,20 @@ class BrowserCdpSessionBrokerTestCase(unittest.TestCase):
         self.assertTrue(command_session.detached)
         self.assertTrue(subscription_session.detached)
 
+    def test_command_session_detaches_when_body_raises(self) -> None:
+        broker = BrowserCdpSessionBroker()
+        raw_session = _FakeSession()
+
+        with self.assertRaisesRegex(RuntimeError, "action failed"):
+            with broker.command_session(
+                _FakePage(raw_session),
+                operation="Runtime.evaluate",
+            ) as lease:
+                self.assertFalse(lease.detached)
+                raise RuntimeError("action failed")
+
+        self.assertTrue(raw_session.detached)
+
     def test_cdp_command_errors_are_display_safe_and_actionable(self) -> None:
         broker = BrowserCdpSessionBroker()
         lease = broker.open_command_session(

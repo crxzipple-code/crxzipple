@@ -222,6 +222,27 @@ class SettingsMaterializationTestCase(unittest.TestCase):
         self.assertEqual(runtime.orchestration["run_lease_seconds"], 11)
         self.assertEqual(runtime.tool_worker["max_in_flight"], 2)
 
+    def test_environment_snapshot_is_seeded_not_live_runtime_truth(self) -> None:
+        settings = SimpleNamespace(
+            environment="initial-env",
+            llm_profiles=(),
+            tool_local_paths=(),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            channel_profiles=(),
+            agent_profiles=(),
+        )
+        services = create_bootstrap_settings_services(settings)
+
+        settings.environment = "mutated-env"
+
+        seeded = services.queries.get_effective("initial-env").effective_value
+        self.assertEqual(seeded["environment"], "initial-env")
+        self.assertNotIn(
+            "mutated-env",
+            {resource.id for resource in services.queries.list_resources()},
+        )
+
     def test_missing_kind_returns_empty_or_none(self) -> None:
         services = create_in_memory_settings_services()
         materializer = SettingsEffectiveConfigMaterializer(services.queries)

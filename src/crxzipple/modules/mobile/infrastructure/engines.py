@@ -20,10 +20,21 @@ from crxzipple.modules.mobile.domain import (
     MobileValidationError,
 )
 from crxzipple.modules.ocr.application.services import OcrApplicationService
-from crxzipple.modules.ocr.domain import OcrPoint, OcrResult
 
 from .adb_client import AndroidAdbClient
-from .vision_layout import VisionLayoutCandidate, detect_visual_layout_candidates
+from .snapshot_builders import (
+    snapshot_from_ocr_result as _snapshot_from_ocr_result,
+    snapshot_from_source as _snapshot_from_source,
+    ui_tree_looks_low_quality as _ui_tree_looks_low_quality,
+)
+from .ui_node_resolution import (
+    ResolvedNode as _ResolvedNode,
+    bounds_center as _bounds_center,
+    find_nodes_by_selector as _find_nodes_by_selector,
+    matches_target as _matches_target,
+    resolved_nodes_from_source as _resolved_nodes_from_source,
+)
+from .vision_layout import detect_visual_layout_candidates
 
 _ANDROID_KEYCODES = {
     "TAB": 61,
@@ -34,24 +45,9 @@ _ANDROID_KEYCODES = {
     "A": 29,
     "CTRL_LEFT": 113,
 }
-_BOUNDS_PATTERN = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 _REF_PATTERN = re.compile(r"^g(?P<generation>\d+)-m(?P<index>\d+)$")
 _WAIT_POLL_SECONDS = 0.5
 _SWIPE_DIRECTIONS = frozenset({"up", "down", "left", "right"})
-
-
-@dataclass(frozen=True, slots=True)
-class _ResolvedNode:
-    text: str | None
-    content_desc: str | None
-    resource_id: str | None
-    class_name: str | None
-    xpath: str | None
-    bounds: tuple[int, int, int, int] | None
-    clickable: bool
-    focusable: bool
-    focused: bool
-    enabled: bool
 
 
 def _adb_timeout_seconds(timeout_ms: int | None) -> float:
@@ -76,36 +72,6 @@ def _make_client(plan: MobileExecutionPlan, *, timeout_ms: int | None) -> Androi
         device_serial=serial,
         timeout_seconds=_adb_timeout_seconds(timeout_ms),
     )
-
-
-def _parse_selector(selector: str) -> tuple[str, str]:
-    normalized = selector.strip()
-    if normalized.startswith("xpath="):
-        return "xpath", normalized[6:]
-    if normalized.startswith("id="):
-        return "id", normalized[3:]
-    if normalized.startswith("accessibility_id="):
-        return "accessibility id", normalized[len("accessibility_id=") :]
-    if normalized.startswith("text="):
-        return "text", normalized[5:]
-    if normalized.startswith("//"):
-        return "xpath", normalized
-    return "xpath", normalized
-
-
-def _parse_bounds(raw: str | None) -> tuple[int, int, int, int] | None:
-    if not raw:
-        return None
-    match = _BOUNDS_PATTERN.fullmatch(raw.strip())
-    if match is None:
-        return None
-    left, top, right, bottom = (int(part) for part in match.groups())
-    return left, top, right, bottom
-
-
-def _bounds_center(bounds: tuple[int, int, int, int]) -> tuple[int, int]:
-    left, top, right, bottom = bounds
-    return ((left + right) // 2, (top + bottom) // 2)
 
 
 def _coerce_int(value: object, *, label: str) -> int | None:
@@ -136,126 +102,6 @@ def _swipe_points_for_direction(
     if direction == "left":
         return (right - horizontal_margin, y_mid, left + horizontal_margin, y_mid)
     return (left + horizontal_margin, y_mid, right - horizontal_margin, y_mid)
-
-
-def _is_truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() == "true"
-
-
-def _label_for_node(node: ET.Element) -> str:
-    for key in ("text", "content-desc", "resource-id"):
-        raw = (node.attrib.get(key) or "").strip()
-        if raw:
-            return raw
-    class_name = (node.attrib.get("class") or node.tag or "").strip()
-    return class_name or "node"
-
-
-def _is_interactive_node(node: ET.Element) -> bool:
-    class_name = (node.attrib.get("class") or "").strip()
-    return (
-        _is_truthy(node.attrib.get("clickable"))
-        or _is_truthy(node.attrib.get("focusable"))
-        or class_name.endswith("EditText")
-        or class_name.endswith("Button")
-        or class_name.endswith("CheckBox")
-        or class_name.endswith("Switch")
-    )
-
-
-def _iter_nodes(root: ET.Element) -> tuple[tuple[ET.Element, str], ...]:
-    items: list[tuple[ET.Element, str]] = []
-
-    def walk(node: ET.Element, xpath: str) -> None:
-        items.append((node, xpath))
-        sibling_counts: dict[str, int] = {}
-        for child in list(node):
-            child_tag = child.tag
-            sibling_counts[child_tag] = sibling_counts.get(child_tag, 0) + 1
-            child_xpath = f"{xpath}/{child_tag}[{sibling_counts[child_tag]}]"
-            walk(child, child_xpath)
-
-    walk(root, f"/{root.tag}[1]")
-    return tuple(items)
-
-
-def _resolved_node(node: ET.Element, xpath: str) -> _ResolvedNode:
-    class_name = (node.attrib.get("class") or node.tag or "").strip() or None
-    return _ResolvedNode(
-        text=(node.attrib.get("text") or None),
-        content_desc=(node.attrib.get("content-desc") or None),
-        resource_id=(node.attrib.get("resource-id") or None),
-        class_name=class_name,
-        xpath=xpath,
-        bounds=_parse_bounds(node.attrib.get("bounds")),
-        clickable=_is_truthy(node.attrib.get("clickable")),
-        focusable=_is_truthy(node.attrib.get("focusable")),
-        focused=_is_truthy(node.attrib.get("focused")),
-        enabled=not ((node.attrib.get("enabled") or "").strip().lower() == "false"),
-    )
-
-
-def _coerce_xpath_selector(value: str) -> str:
-    selector = value.strip()
-    if selector.startswith("//"):
-        return f".{selector}"
-    return selector
-
-
-def _find_nodes_by_selector(source: str, selector: str) -> tuple[_ResolvedNode, ...]:
-    root = ET.fromstring(source)
-    items = _iter_nodes(root)
-    using, value = _parse_selector(selector)
-    if using == "id":
-        return tuple(
-            _resolved_node(node, xpath)
-            for node, xpath in items
-            if (node.attrib.get("resource-id") or "").strip() == value
-        )
-    if using == "accessibility id":
-        return tuple(
-            _resolved_node(node, xpath)
-            for node, xpath in items
-            if (node.attrib.get("content-desc") or "").strip() == value
-        )
-    if using == "text":
-        return tuple(
-            _resolved_node(node, xpath)
-            for node, xpath in items
-            if (node.attrib.get("text") or "").strip() == value
-        )
-    if using == "xpath":
-        try:
-            matched = root.findall(_coerce_xpath_selector(value))
-        except SyntaxError as exc:
-            raise MobileValidationError(f"Unsupported xpath selector '{selector}'.") from exc
-        xpath_lookup = {id(node): xpath for node, xpath in items}
-        return tuple(
-            _resolved_node(node, xpath_lookup.get(id(node), ""))
-            for node in matched
-            if isinstance(node, ET.Element)
-        )
-    raise MobileValidationError(f"Unsupported mobile selector strategy '{using}'.")
-
-
-def _resolved_nodes_from_source(source: str) -> tuple[_ResolvedNode, ...]:
-    root = ET.fromstring(source)
-    return tuple(_resolved_node(node, xpath) for node, xpath in _iter_nodes(root))
-
-
-def _matches_target(candidate: _ResolvedNode, target: _ResolvedNode) -> bool:
-    if target.resource_id and candidate.resource_id == target.resource_id:
-        return True
-    if target.xpath and candidate.xpath == target.xpath:
-        return True
-    if (
-        target.bounds is not None
-        and candidate.bounds == target.bounds
-        and target.class_name
-        and candidate.class_name == target.class_name
-    ):
-        return True
-    return False
 
 
 def _verify_typed_text(
@@ -322,253 +168,6 @@ def _clear_and_type_text(
                 for _ in existing_text:
                     client.press_keycode(keycode=_ANDROID_KEYCODES["DEL"])
     client.input_text(text)
-
-
-def _snapshot_from_source(
-    *,
-    source: str,
-    generation: int,
-) -> tuple[str, tuple[MobileStoredRef, ...], str, int]:
-    root = ET.fromstring(source)
-    lines: list[str] = []
-    refs: list[MobileStoredRef] = []
-    text_lines: list[str] = []
-    node_count = 0
-
-    def walk(node: ET.Element, depth: int, xpath: str) -> None:
-        nonlocal node_count
-        node_count += 1
-        label = _label_for_node(node)
-        class_name = (node.attrib.get("class") or node.tag or "").strip()
-        bounds = _parse_bounds(node.attrib.get("bounds"))
-        interactive = _is_interactive_node(node)
-        ref_label: str | None = None
-        if interactive:
-            ref_label = f"g{generation}-m{len(refs) + 1}"
-            refs.append(
-                MobileStoredRef(
-                    ref=ref_label,
-                    generation=generation,
-                    source="ui_tree",
-                    text=node.attrib.get("text"),
-                    content_desc=node.attrib.get("content-desc"),
-                    resource_id=node.attrib.get("resource-id"),
-                    class_name=class_name,
-                    xpath=xpath,
-                    bounds=bounds,
-                    clickable=_is_truthy(node.attrib.get("clickable")),
-                    focusable=_is_truthy(node.attrib.get("focusable")),
-                    focused=_is_truthy(node.attrib.get("focused")),
-                    enabled=not ((node.attrib.get("enabled") or "").strip().lower() == "false"),
-                )
-            )
-        suffix = f" [ref={ref_label}]" if ref_label is not None else ""
-        lines.append(f"{'  ' * depth}- {class_name or 'node'} \"{label}\"{suffix}")
-        label_text = label.strip()
-        if label_text and label_text not in text_lines:
-            text_lines.append(label_text)
-        sibling_counts: dict[str, int] = {}
-        for child in list(node):
-            child_tag = child.tag
-            sibling_counts[child_tag] = sibling_counts.get(child_tag, 0) + 1
-            child_xpath = f"{xpath}/{child_tag}[{sibling_counts[child_tag]}]"
-            walk(child, depth + 1, child_xpath)
-
-    walk(root, 0, f"/{root.tag}[1]")
-    return "\n".join(lines), tuple(refs), "\n".join(text_lines[:200]), node_count
-
-
-def _meaningful_snapshot_lines(text_excerpt: str) -> tuple[str, ...]:
-    meaningful: list[str] = []
-    for raw_line in text_excerpt.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        lowered = line.lower()
-        if lowered in {"hierarchy", "node"}:
-            continue
-        if lowered.startswith("android.widget.") or lowered.startswith("android.view."):
-            continue
-        if ":id/" in lowered:
-            continue
-        meaningful.append(line)
-    return tuple(meaningful)
-
-
-def _ui_tree_looks_low_quality(
-    *,
-    refs: tuple[MobileStoredRef, ...],
-    text_excerpt: str,
-    node_count: int,
-    current_package: str | None,
-) -> bool:
-    if refs:
-        return False
-    meaningful_lines = _meaningful_snapshot_lines(text_excerpt)
-    if node_count <= 3:
-        return True
-    if not meaningful_lines:
-        return True
-    if (current_package or "").startswith("com.tencent.mm") and len(meaningful_lines) <= 2:
-        return True
-    return False
-
-
-def _bounds_from_ocr_polygon(
-    polygon: tuple[OcrPoint, ...],
-) -> tuple[int, int, int, int] | None:
-    if not polygon:
-        return None
-    xs = [int(round(point.x)) for point in polygon]
-    ys = [int(round(point.y)) for point in polygon]
-    if not xs or not ys:
-        return None
-    left = min(xs)
-    right = max(xs)
-    top = min(ys)
-    bottom = max(ys)
-    if right <= left or bottom <= top:
-        return None
-    return (left, top, right, bottom)
-
-
-def _group_ocr_rows(
-    blocks: tuple[tuple[str, tuple[int, int, int, int] | None], ...],
-) -> tuple[tuple[tuple[str, tuple[int, int, int, int] | None], ...], ...]:
-    if not blocks:
-        return ()
-    heights = [
-        bounds[3] - bounds[1]
-        for _, bounds in blocks
-        if bounds is not None and bounds[3] > bounds[1]
-    ]
-    threshold = 40
-    if heights:
-        sorted_heights = sorted(heights)
-        median_height = sorted_heights[len(sorted_heights) // 2]
-        threshold = max(24, int(median_height * 0.8))
-    rows: list[list[tuple[str, tuple[int, int, int, int] | None]]] = []
-    row_tops: list[int] = []
-    for item in blocks:
-        _, bounds = item
-        top = bounds[1] if bounds is not None else (row_tops[-1] if row_tops else 0)
-        if rows and abs(top - row_tops[-1]) <= threshold:
-            rows[-1].append(item)
-            row_tops[-1] = min(row_tops[-1], top)
-            continue
-        rows.append([item])
-        row_tops.append(top)
-    normalized_rows: list[tuple[tuple[str, tuple[int, int, int, int] | None], ...]] = []
-    for row in rows:
-        normalized_rows.append(
-            tuple(
-                sorted(
-                    row,
-                    key=lambda item: item[1][0] if item[1] is not None else 0,
-                )
-            )
-        )
-    return tuple(normalized_rows)
-
-
-def _snapshot_from_ocr_result(
-    *,
-    result: OcrResult,
-    generation: int,
-    vision_candidates: tuple[VisionLayoutCandidate, ...] = (),
-) -> tuple[str, tuple[MobileStoredRef, ...], str, int]:
-    ordered_blocks = tuple(
-        sorted(
-            (
-                (
-                    block.text.strip(),
-                    _bounds_from_ocr_polygon(block.polygon),
-                    block.confidence,
-                )
-                for block in result.blocks
-                if block.text.strip()
-            ),
-            key=lambda item: (
-                item[1][1] if item[1] is not None else 0,
-                item[1][0] if item[1] is not None else 0,
-            ),
-        )
-    )
-    rows = _group_ocr_rows(tuple((text, bounds) for text, bounds, _ in ordered_blocks))
-    refs: list[MobileStoredRef] = []
-    lines = ["- ocr.page"]
-    text_lines: list[str] = []
-    for row_index, row in enumerate(rows, start=1):
-        lines.append(f"  - ocr.row #{row_index}")
-        for text, bounds in row:
-            ref_label: str | None = None
-            if bounds is not None:
-                ref_label = f"g{generation}-m{len(refs) + 1}"
-                refs.append(
-                    MobileStoredRef(
-                        ref=ref_label,
-                        generation=generation,
-                        source="ocr",
-                        text=text,
-                        class_name="ocr.block",
-                        bounds=bounds,
-                        clickable=True,
-                        focusable=False,
-                        focused=False,
-                        enabled=True,
-                    )
-                )
-            suffix = f" [ref={ref_label}]" if ref_label is not None else ""
-            lines.append(f'    - ocr.block "{text}"{suffix}')
-            if text not in text_lines:
-                text_lines.append(text)
-    vision_rows = _group_ocr_rows(
-        tuple(
-            (
-                (candidate.label or candidate.kind).strip(),
-                candidate.bounds,
-            )
-            for candidate in vision_candidates
-        )
-    )
-    if vision_rows:
-        lines.append("  - vision.layout")
-    for row_index, row in enumerate(vision_rows, start=1):
-        lines.append(f"    - vision.row #{row_index}")
-        for label, bounds in row:
-            matched_candidate = next(
-                (
-                    candidate
-                    for candidate in vision_candidates
-                    if candidate.bounds == bounds and (candidate.label or candidate.kind).strip() == label
-                ),
-                None,
-            )
-            if matched_candidate is None:
-                continue
-            ref_label = f"g{generation}-m{len(refs) + 1}"
-            refs.append(
-                MobileStoredRef(
-                    ref=ref_label,
-                    generation=generation,
-                    source="vision",
-                    text=matched_candidate.label,
-                    class_name=matched_candidate.kind,
-                    bounds=matched_candidate.bounds,
-                    clickable=True,
-                    focusable=matched_candidate.kind == "vision.input",
-                    focused=False,
-                    enabled=True,
-                )
-            )
-            lines.append(
-                f'      - {matched_candidate.kind} "{(matched_candidate.label or matched_candidate.kind)}" [ref={ref_label}]'
-            )
-            label_text = (matched_candidate.label or "").strip()
-            if label_text and label_text not in text_lines:
-                text_lines.append(label_text)
-    node_count = 1 + len(rows) + len(ordered_blocks) + (1 if vision_rows else 0) + len(vision_rows) + len(vision_candidates)
-    return "\n".join(lines), tuple(refs), "\n".join(text_lines[:200]), node_count
 
 
 def _ref_generation(ref: str) -> int:

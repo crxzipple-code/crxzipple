@@ -15,7 +15,7 @@ from crxzipple.modules.llm.domain import (
 from crxzipple.modules.llm.infrastructure.adapters.anthropic_messages_renderer import (
     AnthropicMessagesRenderer,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_common import (
     projected_input_items_from_messages,
 )
 from crxzipple.modules.llm.infrastructure.adapters.gemini_generate_content_renderer import (
@@ -147,6 +147,185 @@ def test_renderers_translate_neutral_require_tool_call_policy() -> None:
             "mode": "ANY",
         },
     }
+
+
+def test_provider_renderers_keep_canonical_request_wire_shapes_golden() -> None:
+    request = LlmAdapterRequest(
+        invocation_id="inv-provider-golden",
+        provider_context_messages=(
+            LlmMessage(role=LlmMessageRole.SYSTEM, content="Runtime contract."),
+        ),
+        messages=(),
+        input_items=(
+            LlmInputItem(
+                kind=LlmInputItemKind.MESSAGE,
+                payload={
+                    "role": "user",
+                    "content": "Check official source.",
+                },
+                source="session_item",
+                metadata={
+                    "runtime_input_item_id": "session.item.user",
+                    "session_item_id": "session-item-user",
+                    "debug": "DO_NOT_SEND_DEBUG_BODY",
+                },
+            ),
+        ),
+        tool_schemas=(
+            ToolSchema(
+                name="command.exec",
+                description="Run shell command.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"],
+                },
+            ),
+        ),
+        request_policy={"require_tool_call": True},
+        request_metadata={
+            "request_render_snapshot": {
+                "debug_body": "DO_NOT_SEND_DEBUG_BODY",
+                "context_slice": {
+                    "items": [{"text": "DO_NOT_SEND_DEBUG_BODY"}],
+                },
+            },
+        },
+    )
+
+    codex_payload = OpenAICodexResponsesRenderer(
+        default_base_url="https://api.openai.test/v1",
+        default_instructions="You are Codex.",
+    ).render_http(_profile(), request).payload
+    responses_payload = OpenAIResponsesRenderer(
+        default_base_url="https://api.openai.test/v1",
+    ).render(_profile(), request).payload
+    chat_payload = OpenAIChatCompatibleRequestRenderer(
+        default_base_url="https://chat-compatible.test/v1",
+    ).render(_profile(), request).payload
+    anthropic_payload = AnthropicMessagesRenderer(
+        default_base_url="https://api.anthropic.test/v1",
+    ).render(_profile(), request).payload
+    gemini_payload = GeminiGenerateContentRenderer(
+        default_base_url="https://generativelanguage.googleapis.test/v1beta",
+    ).render(_profile(), request).payload
+
+    openai_input = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Check official source.",
+                },
+            ],
+        },
+    ]
+    openai_tool = {
+        "type": "function",
+        "name": "command_exec",
+        "description": "Run shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
+    }
+    anthropic_tool = {
+        "name": "command.exec",
+        "description": "Run shell command.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
+    }
+    gemini_tool = {
+        "name": "command.exec",
+        "description": "Run shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
+    }
+
+    assert codex_payload == {
+        "model": "gpt-5",
+        "instructions": "Runtime contract.",
+        "input": openai_input,
+        "tools": [openai_tool],
+        "tool_choice": "required",
+        "parallel_tool_calls": True,
+        "store": False,
+        "stream": True,
+        "include": [],
+    }
+    assert responses_payload == {
+        "model": "gpt-5",
+        "input": openai_input,
+        "instructions": "Runtime contract.",
+        "tools": [openai_tool],
+        "tool_choice": "required",
+        "stream": True,
+    }
+    assert chat_payload == {
+        "model": "gpt-5",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Runtime contract.",
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Check official source."}],
+            },
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "command_exec",
+                    "description": "Run shell command.",
+                    "parameters": openai_tool["parameters"],
+                },
+            },
+        ],
+        "tool_choice": "required",
+    }
+    assert anthropic_payload == {
+        "model": "gpt-5",
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Check official source."}],
+            },
+        ],
+        "max_tokens": 1024,
+        "system": "Runtime contract.",
+        "tools": [anthropic_tool],
+        "tool_choice": {"type": "any"},
+    }
+    assert gemini_payload == {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": "Check official source."}],
+            },
+        ],
+        "system_instruction": {"parts": [{"text": "Runtime contract."}]},
+        "tools": [{"functionDeclarations": [gemini_tool]}],
+        "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
+    }
+    assert "DO_NOT_SEND_DEBUG_BODY" not in str(
+        (
+            codex_payload,
+            responses_payload,
+            chat_payload,
+            anthropic_payload,
+            gemini_payload,
+        ),
+    )
 
 
 def test_chat_compatible_renderer_maps_runtime_transcript_input_items_to_messages_and_tools() -> None:

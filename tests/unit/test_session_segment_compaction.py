@@ -4,6 +4,7 @@ import unittest
 
 from crxzipple.modules.session.application import (
     AppendSessionItemInput,
+    BuildSessionReplayWindowInput,
     CompactSessionSegmentInput,
     EnsureSessionInput,
     ListSessionInstancesInput,
@@ -221,6 +222,148 @@ class SessionSegmentCompactionTestCase(unittest.TestCase):
             after.sequence_no,
         )
 
+    def test_replay_window_preserves_protocol_items_after_compaction(self) -> None:
+        session = self._start_session()
+        old_session_id = session.active_session_id
+        tool_call = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_CALL,
+                role="assistant",
+                content_payload={"name": "command.exec"},
+                call_id="call-replay-preserve",
+                tool_name="command.exec",
+            ),
+        )
+        tool_result = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_RESULT,
+                role="tool",
+                content_payload={"output": "ok"},
+                call_id="call-replay-preserve",
+                tool_name="command.exec",
+            ),
+        )
+        summary = self._append_item("summary", kind=SessionItemKind.CONTEXT_COMPACTION)
+
+        self.service.compact_active_segment(
+            CompactSessionSegmentInput(
+                session_key=session.id,
+                session_id=old_session_id,
+                summary_item_id=summary.id,
+                summary_text="Protocol pair summary.",
+                compaction_run_id="run-preserve-protocol-items",
+                archived_through_item_sequence_no=tool_result.sequence_no,
+            ),
+        )
+
+        window = self.service.build_replay_window(
+            BuildSessionReplayWindowInput(session_key=session.id),
+        )
+
+        self.assertEqual(
+            [item.id for item in window.items],
+            [tool_call.id, tool_result.id, summary.id],
+        )
+        self.assertEqual(window.protocol_call_ids, ("call-replay-preserve",))
+        self.assertEqual(window.from_sequence_no, tool_call.sequence_no)
+        self.assertEqual(window.to_sequence_no, summary.sequence_no)
+        by_id = {item.id: item for item in window.items}
+        self.assertEqual(
+            by_id[tool_call.id].metadata["archived_by_compaction_run_id"],
+            "run-preserve-protocol-items",
+        )
+        self.assertEqual(
+            by_id[tool_result.id].metadata["archived_by_compaction_run_id"],
+            "run-preserve-protocol-items",
+        )
+        self.assertNotIn(
+            "archived_by_compaction_run_id",
+            by_id[summary.id].metadata,
+        )
+
+    def test_active_replay_window_stays_on_current_segment_after_compaction(self) -> None:
+        session = self._start_session()
+        old_session_id = session.active_session_id
+        old_tool_call = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_CALL,
+                role="assistant",
+                content_payload={"name": "command.exec"},
+                call_id="call-old-segment",
+                tool_name="command.exec",
+            ),
+        )
+        old_tool_result = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.TOOL_RESULT,
+                role="tool",
+                content_payload={"output": "old"},
+                call_id="call-old-segment",
+                tool_name="command.exec",
+            ),
+        )
+        summary = self._append_item("summary", kind=SessionItemKind.CONTEXT_COMPACTION)
+        compacted = self.service.compact_active_segment(
+            CompactSessionSegmentInput(
+                session_key=session.id,
+                session_id=old_session_id,
+                summary_item_id=summary.id,
+                summary_text="Old protocol pair summary.",
+                compaction_run_id="run-active-replay-window",
+                archived_through_item_sequence_no=old_tool_result.sequence_no,
+            ),
+        )
+        active_tool_call = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                session_id=compacted.active_session_id,
+                kind=SessionItemKind.TOOL_CALL,
+                role="assistant",
+                content_payload={"name": "command.exec"},
+                call_id="call-active-segment",
+                tool_name="command.exec",
+            ),
+        )
+        active_tool_result = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                session_id=compacted.active_session_id,
+                kind=SessionItemKind.TOOL_RESULT,
+                role="tool",
+                content_payload={"output": "active"},
+                call_id="call-active-segment",
+                tool_name="command.exec",
+            ),
+        )
+
+        active_window = self.service.build_replay_window(
+            BuildSessionReplayWindowInput(
+                session_key=session.id,
+                active_session_only=True,
+            ),
+        )
+        full_window = self.service.build_replay_window(
+            BuildSessionReplayWindowInput(session_key=session.id),
+        )
+
+        self.assertEqual(
+            [item.id for item in active_window.items],
+            [active_tool_call.id, active_tool_result.id],
+        )
+        self.assertEqual(active_window.protocol_call_ids, ("call-active-segment",))
+        self.assertEqual(active_window.from_sequence_no, active_tool_call.sequence_no)
+        self.assertEqual(active_window.to_sequence_no, active_tool_result.sequence_no)
+        self.assertEqual(
+            full_window.protocol_call_ids,
+            ("call-old-segment", "call-active-segment"),
+        )
+        self.assertIn(old_tool_call.id, [item.id for item in full_window.items])
+        self.assertIn(old_tool_result.id, [item.id for item in full_window.items])
+
     def test_compact_active_segment_rejects_non_active_session_id(self) -> None:
         session = self._start_session()
         old_session_id = session.active_session_id
@@ -244,6 +387,27 @@ class SessionSegmentCompactionTestCase(unittest.TestCase):
             self.service.get_session(session.id).active_session_id,
             reset.active_session_id,
         )
+
+    def test_compact_active_segment_rejects_closed_active_instance(self) -> None:
+        session = self._start_session()
+        active_session_id = session.active_session_id
+        summary = self._append_item("summary", kind=SessionItemKind.CONTEXT_COMPACTION)
+        active_instance = self.uow.session_instances.get(active_session_id)
+        self.assertIsNotNone(active_instance)
+        assert active_instance is not None
+        active_instance.close(reason="stale-compaction-race")
+        self.uow.session_instances.add(active_instance)
+
+        with self.assertRaises(SessionValidationError):
+            self.service.compact_active_segment(
+                CompactSessionSegmentInput(
+                    session_key=session.id,
+                    session_id=active_session_id,
+                    summary_item_id=summary.id,
+                    summary_text="Should not compact a closed instance.",
+                    compaction_run_id="run-closed-active-instance",
+                ),
+            )
 
 
 if __name__ == "__main__":

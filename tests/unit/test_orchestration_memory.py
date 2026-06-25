@@ -1496,6 +1496,16 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 completed.result_payload["output_text"],
                 "answer after context recovery",
             )
+            refreshed_session = container.require(AppKey.SESSION_SERVICE).get_session(
+                "agent:assistant:main",
+            )
+            self.assertEqual(completed.active_session_id, refreshed_session.active_session_id)
+            self.assertEqual(
+                completed.metadata["preflight_maintenance"][
+                    "active_session_id_after_maintenance"
+                ],
+                refreshed_session.active_session_id,
+            )
 
             completed_runs = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).list_runs(
                 status=OrchestrationRunStatus.COMPLETED,

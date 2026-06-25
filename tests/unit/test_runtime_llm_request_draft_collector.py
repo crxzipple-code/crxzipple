@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
 from crxzipple.modules.agent.domain import AgentProfile
@@ -300,17 +298,25 @@ def test_build_merges_execution_chain_protocol_refs_into_transcript_budget() -> 
     assert {
         ref["owner_module"]
         for ref in transcript_budget["execution_chain_protocol_required_refs"]
-    } == {"orchestration"}
+    } == {"session"}
     protocol_ref_ids = {
         ref.get("execution_step_item_id")
         for ref in transcript_budget["protocol_required_refs"]
     }
     assert {"item-exec-call-1", "item-exec-result-1"} <= protocol_ref_ids
     result_ref = transcript_budget["execution_chain_protocol_required_refs"][1]
+    assert result_ref["owner_kind"] == "session_item"
+    assert result_ref["owner_id"] == "item-result-1"
+    assert result_ref["item_id"] == "item-result-1"
+    assert result_ref["session_item_id"] == "item-result-1"
     assert result_ref["tool_run_id"] == "tool-run-1"
     assert result_ref["result_session_item_id"] == "item-result-1"
     assert result_ref["tool_execution_plan"]["tool_name"] == "weather.lookup"
     call_ref = transcript_budget["execution_chain_protocol_required_refs"][0]
+    assert call_ref["owner_kind"] == "session_item"
+    assert call_ref["owner_id"] == "item-call-1"
+    assert call_ref["item_id"] == "item-call-1"
+    assert call_ref["session_item_id"] == "item-call-1"
     assert call_ref["call_session_item_id"] == "item-call-1"
 
 
@@ -330,7 +336,7 @@ def test_build_memory_flush_uses_maintenance_surface() -> None:
     assert tuple(schema.name for schema in result.tool_schemas) == ("weather.lookup",)
 
 
-def test_build_normal_turn_omits_tool_schemas_on_final_step_budget() -> None:
+def test_build_normal_turn_keeps_tool_schemas_on_final_step_budget() -> None:
     collector = _collector()
     run = _run()
     run.current_step = 23
@@ -340,7 +346,20 @@ def test_build_normal_turn_omits_tool_schemas_on_final_step_budget() -> None:
 
     assert result.runtime_context["remaining_steps"] == 1
     assert result.runtime_context["step_budget_status"] == "finalize_now"
-    assert result.tool_schemas == ()
+    assert tuple(schema.name for schema in result.tool_schemas) == ("weather.lookup",)
+
+
+def test_build_normal_turn_keeps_tool_schemas_before_final_step_budget() -> None:
+    collector = _collector()
+    run = _run()
+    run.current_step = 22
+    run.max_steps = 24
+
+    result = collector.build(run, resolved_tools=_resolved_tools())
+
+    assert result.runtime_context["remaining_steps"] == 2
+    assert result.runtime_context["step_budget_status"] == "critical"
+    assert tuple(schema.name for schema in result.tool_schemas) == ("weather.lookup",)
 
 
 def test_build_memory_flush_prefers_session_fact_items_without_message_read() -> None:

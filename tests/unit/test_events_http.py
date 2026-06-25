@@ -25,6 +25,10 @@ class EventsHttpTestCase(HttpModuleTestCase):
             item["contract_id"]
             for item in payload["topics"]
         }
+        topics_by_id = {
+            item["contract_id"]: item
+            for item in payload["topics"]
+        }
         route_ids = {
             item["contract_id"]
             for item in payload["routes"]
@@ -47,6 +51,10 @@ class EventsHttpTestCase(HttpModuleTestCase):
         }
         surface_ids = {
             item["surface_id"]
+            for item in payload["surfaces"]
+        }
+        surfaces_by_id = {
+            item["surface_id"]: item
             for item in payload["surfaces"]
         }
         self.assertIn("turn.session", topic_ids)
@@ -119,6 +127,13 @@ class EventsHttpTestCase(HttpModuleTestCase):
         self.assertIn("channels.dead_letter", surface_ids)
         self.assertIn("orchestration.observation", surface_ids)
         self.assertIn("orchestration.runtime_observation", surface_ids)
+        self.assertEqual(topics_by_id["turn.session"]["version"], 1)
+        self.assertEqual(
+            definitions_by_id["operations.projection.invalidated"]["version"],
+            1,
+        )
+        self.assertEqual(surfaces_by_id["operations.projection_refresh"]["version"], 1)
+        self.assertEqual(observers_by_id["orchestration.run.observation"]["version"], 1)
         self.assertGreaterEqual(payload["topic_count"], 6)
         self.assertEqual(payload["route_count"], 0)
         self.assertGreaterEqual(payload["definition_count"], 14)

@@ -137,15 +137,20 @@ class OrchestrationRunQueryService:
                     chain.id,
                     status=step_status,
                 )
+                items_by_step: dict[str, list[ExecutionStepItem]] = {
+                    step.id: [] for step in steps
+                }
+                step_items = uow.execution_step_items.list_for_steps(
+                    tuple(step.id for step in steps),
+                    status=item_status,
+                )
+                for item in step_items:
+                    items_by_step.setdefault(item.step_id, []).append(item)
                 for step in steps:
-                    items = uow.execution_step_items.list_for_step(
-                        step.id,
-                        status=item_status,
-                    )
                     step_snapshots.append(
                         ExecutionStepSnapshot(
                             step=step,
-                            items=tuple(items),
+                            items=tuple(items_by_step.get(step.id, ())),
                         ),
                     )
                 snapshots.append(

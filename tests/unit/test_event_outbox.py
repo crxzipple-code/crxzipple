@@ -205,3 +205,37 @@ def test_event_outbox_publisher_restart_retries_failed_records() -> None:
     assert delivered_record is not None
     assert delivered_record.status is EventOutboxStatus.DELIVERED
     assert delivered_record.attempts == 1
+
+
+def test_event_outbox_failure_state_exposes_retry_visibility() -> None:
+    session_factory = _session_factory()
+    event = Event(name="dummy.visibility.requested", payload={"value": 5})
+
+    with session_factory() as session:
+        repo = SqlAlchemyEventOutboxRepository(session)
+        repo.add(EventOutboxRecord.from_event(event))
+        session.commit()
+
+    result = EventOutboxPublisherService(
+        session_factory=session_factory,
+        event_bus=FailingEventBus(),
+        retry_base_delay_seconds=10,
+        retry_max_delay_seconds=10,
+    ).publish_available(limit=10)
+
+    assert result.published == 0
+    assert result.failed == 1
+    with session_factory() as session:
+        repo = SqlAlchemyEventOutboxRepository(session)
+        failed_records = repo.list(status=EventOutboxStatus.FAILED, limit=10)
+        publishable_now = repo.list_publishable(
+            limit=10,
+            now=datetime.now(timezone.utc),
+        )
+
+    assert [record.id for record in failed_records] == [event.id]
+    failed_record = failed_records[0]
+    assert failed_record.error_message == "publisher unavailable"
+    assert failed_record.attempts == 1
+    assert failed_record.available_at > failed_record.updated_at
+    assert event.id not in {record.id for record in publishable_now}

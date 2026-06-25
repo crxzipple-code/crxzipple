@@ -83,6 +83,14 @@ class ExecutionStepItemRepository(Protocol):
     ) -> list[ExecutionStepItem]:
         ...
 
+    def list_for_steps(
+        self,
+        step_ids: tuple[str, ...],
+        *,
+        status: ExecutionStepItemStatus | None = None,
+    ) -> list[ExecutionStepItem]:
+        ...
+
 
 class OrchestrationRunRepository(Protocol):
     def add(self, run: OrchestrationRun) -> None:

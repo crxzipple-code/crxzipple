@@ -157,6 +157,21 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["module"], "orchestration")
+        self.assertEqual(payload["projection_diagnostics"]["module"], "orchestration")
+        self.assertGreaterEqual(
+            payload["projection_diagnostics"]["processed_item_count"],
+            1,
+        )
+        self.assertGreaterEqual(payload["projection_diagnostics"]["elapsed_ms"], 0)
+        owner_source_modules = {
+            item["module"]
+            for item in payload["projection_diagnostics"]["owner_sources"]
+        }
+        self.assertTrue(
+            {"orchestration", "dispatch", "operations"}.issubset(
+                owner_source_modules,
+            ),
+        )
         self.assertNotIn("sections", payload)
         self.assertEqual(payload["role"]["scope"], "orchestration")
         self.assertTrue(payload["role"]["can_operate"])

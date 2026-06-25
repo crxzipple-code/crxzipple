@@ -2567,25 +2567,25 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         self.assertIn("$nuxt", runtime_text)
         self.assertIn("Framework signals: nuxt", runtime_text)
         self.assertNotIn("Evidence path:", runtime_text)
-        self.assertNotIn("evidence_path_key", runtime_result.metadata["browser_evidence"])
-        self.assertEqual(runtime_result.metadata["browser_evidence"]["runtime_globals"], ["$nuxt"])
+        self.assertNotIn("evidence_path_key", runtime_result.metadata)
+        self.assertEqual(runtime_result.metadata["runtime_globals"], ["$nuxt"])
         self.assertIn("/portal/v3/shopping/briefInfo", script_text)
         self.assertIn("getShopping(payload)", script_text)
         self.assertNotIn("Evidence path:", script_text)
-        self.assertNotIn("evidence_path_key", script_result.metadata["browser_evidence"])
+        self.assertNotIn("evidence_path_key", script_result.metadata)
         self.assertEqual(
-            script_result.metadata["browser_evidence"]["api_client_path"],
+            script_result.metadata["api_client_path"],
             "$nuxt.$http.shopping.getShopping",
         )
         self.assertIn("Replay suitability", replay_text)
         self.assertIn("MU5815", replay_text)
         self.assertNotIn("Evidence path:", replay_text)
-        self.assertNotIn("evidence_path_key", replay_result.metadata["browser_evidence"])
+        self.assertNotIn("evidence_path_key", replay_result.metadata)
         self.assertEqual(
-            replay_result.metadata["browser_evidence"]["source_request_id"],
+            replay_result.metadata["source_request_id"],
             "req-brief-info",
         )
         self.assertEqual(
-            replay_result.metadata["browser_evidence"]["request_diff_changed_fields"],
+            replay_result.metadata["request_diff_changed_fields"],
             ["json.depCityCode", "json.arrCityCode", "json.depDate"],
         )

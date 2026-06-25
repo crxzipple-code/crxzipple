@@ -730,7 +730,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
             side_effect=_fake_request,
         ):
             response = self.client.post(
@@ -1135,6 +1135,73 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(
             interaction.reply_address["webhook_callback_url"],
             "https://example.test/callback",
+        )
+
+    def test_webhook_inbound_endpoint_reuses_idempotent_submission(self) -> None:
+        container = self.client.app.state.container
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _SequentialTextAdapter("webhook idempotent answer"),
+        )
+        container.require(AppKey.LLM_SERVICE).register_profile(
+            RegisterLlmProfileInput(
+                id="test-llm-idempotent",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4-mini",
+            ),
+        )
+        container.require(AppKey.AGENT_SERVICE).register_profile(
+            RegisterAgentProfileInput(
+                id="assistant-idempotent",
+                name="Assistant Idempotent",
+                instruction_policy=AgentInstructionPolicy(
+                    system_prompt="Be helpful.",
+                ),
+                llm_routing_policy=AgentLlmRoutingPolicy(
+                    default_llm_id="test-llm-idempotent",
+                ),
+                runtime_preferences=AgentRuntimePreferences(),
+            ),
+        )
+        body = {
+            "content": {"blocks": [{"type": "text", "text": "hello once"}]},
+            "callback_url": "https://example.test/callback-once",
+            "idempotency_key": "webhook-idempotency-1",
+            "agent_id": "assistant-idempotent",
+            "conversation_id": "ext-conv-idempotent-1",
+            "peer_id": "ext-user-idempotent-1",
+        }
+
+        first = self.client.post(
+            "/channels/webhook/inbound/default",
+            json=body,
+        )
+        second = self.client.post(
+            "/channels/webhook/inbound/default",
+            json={
+                **body,
+                "callback_url": "https://example.test/changed-callback",
+            },
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_payload = first.json()
+        second_payload = second.json()
+        self.assertEqual(second_payload["run_id"], first_payload["run_id"])
+        self.assertEqual(
+            second_payload["callback_url"],
+            "https://example.test/callback-once",
+        )
+        interactions = container.require(
+            AppKey.CHANNEL_INFRASTRUCTURE,
+        ).interaction_service.list_interactions(channel_type="webhook")
+        self.assertEqual(len(interactions), 1)
+        self.assertEqual(interactions[0].run_id, first_payload["run_id"])
+        self.assertEqual(
+            interactions[0].metadata["idempotency_key"],
+            "webhook-idempotency-1",
         )
 
     def test_webhook_inbound_endpoint_validates_signature_when_configured(self) -> None:
@@ -1622,6 +1689,14 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                     "status": "http_503",
                     "attempt_count": 3,
                     "callback_url": "https://example.test/callback",
+                    "outbound": {
+                        "reply_address": {
+                            "webhook_callback_url": "https://example.test/callback?token=secret",
+                        },
+                        "metadata": {
+                            "access_token": "secret-token",
+                        },
+                    },
                 },
             ),
         )
@@ -1648,6 +1723,15 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
             ),
         )
         self.assertEqual(record["payload"]["outbound_id"], "out-dead-1")
+        self.assertEqual(record["payload"]["callback_url"], "[redacted]")
+        self.assertEqual(
+            record["payload"]["outbound"]["reply_address"]["webhook_callback_url"],
+            "[redacted]",
+        )
+        self.assertEqual(
+            record["payload"]["outbound"]["metadata"]["access_token"],
+            "[redacted]",
+        )
         self.assertEqual(
             record["payload"]["event_name"],
             "channel.observation.dead_lettered",

@@ -20,16 +20,22 @@ if TYPE_CHECKING:
     from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
     from crxzipple.modules.session.domain.entities import Session
     from crxzipple.modules.session.domain.value_objects import SessionItem
-    from crxzipple.modules.session.application.services import (
+    from crxzipple.modules.session.application.item_append import (
         AppendSessionItemInput,
         AppendSessionItemsInput,
+    )
+    from crxzipple.modules.session.application.segment_compaction import (
         CompactSessionSegmentInput,
         CompactSessionSegmentResult,
+    )
+    from crxzipple.modules.session.application.session_queries import (
         GetSessionItemBySourceInput,
         ListSessionItemsInput,
-        MergeSessionItemMetadataInput,
-        SessionItemsBundle,
     )
+    from crxzipple.modules.session.application.session_metadata import (
+        MergeSessionItemMetadataInput,
+    )
+    from crxzipple.modules.session.application.session_windows import SessionItemsBundle
     from crxzipple.modules.session.application.resolution import (
         ResolveSessionInput,
         ResolvedSessionBundle,
@@ -113,7 +119,7 @@ class SessionCompactionStatePort(SessionCatalogPort, Protocol):
         ...
 
 
-class SessionMaintenancePort(Protocol):
+class SessionMaintenancePort(SessionLookupPort, Protocol):
     def get_item(self, item_id: str) -> "SessionItem":
         ...
 

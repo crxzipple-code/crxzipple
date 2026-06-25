@@ -22,6 +22,12 @@ def _normalize_text_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(item.strip() for item in values if isinstance(item, str) and item.strip())
 
 
+def _normalize_version(value: int) -> int:
+    if not isinstance(value, int) or value < 1:
+        raise ValueError("event contract version must be a positive integer.")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class EventTopicContract:
     contract_id: str
@@ -34,6 +40,7 @@ class EventTopicContract:
     durability: EventContractDurability = "persistent"
     ordering: str | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -60,10 +67,12 @@ class EventTopicContract:
         object.__setattr__(self, "producers", _normalize_text_tuple(self.producers))
         object.__setattr__(self, "consumers", _normalize_text_tuple(self.consumers))
         object.__setattr__(self, "notes", _normalize_text_tuple(self.notes))
+        object.__setattr__(self, "version", _normalize_version(self.version))
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "contract_id": self.contract_id,
+            "version": self.version,
             "topic_pattern": self.topic_pattern,
             "owner": self.owner,
             "description": self.description,
@@ -88,6 +97,7 @@ class EventRouteContract:
     source_kinds: tuple[EventKind, ...] = field(default_factory=tuple)
     target_kind: EventKind | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -132,10 +142,12 @@ class EventRouteContract:
             ),
         )
         object.__setattr__(self, "notes", _normalize_text_tuple(self.notes))
+        object.__setattr__(self, "version", _normalize_version(self.version))
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "contract_id": self.contract_id,
+            "version": self.version,
             "source_topic_pattern": self.source_topic_pattern,
             "target_topic_pattern": self.target_topic_pattern,
             "owner": self.owner,

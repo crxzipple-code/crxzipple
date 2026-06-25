@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from crxzipple.modules.operations.application.read_models.diagnostics import (
     build_loop_regression_baseline,
 )
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmResponseItem,
     LlmResponseItemKind,
 )

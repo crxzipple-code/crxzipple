@@ -14,7 +14,7 @@ from crxzipple.modules.llm.domain import (
 from crxzipple.modules.llm.infrastructure.adapters.anthropic_messages_renderer import (
     AnthropicMessagesRenderer,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_common import (
     projected_input_items_from_messages,
 )
 

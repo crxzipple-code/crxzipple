@@ -313,11 +313,21 @@ def test_operations_source_read_model_context_is_explicitly_typed() -> None:
         / "read_models"
         / "factory.py"
     ).read_text(encoding="utf-8")
+    factory_context = (
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "operations"
+        / "application"
+        / "read_models"
+        / "factory_context.py"
+    ).read_text(encoding="utf-8")
 
     assert "from types import SimpleNamespace" not in operations_assembly
     assert "operations_projection_context = SimpleNamespace(" not in operations_assembly
     assert "OperationsSourceReadModelContext(" in operations_assembly
-    assert "class OperationsSourceReadModelContext" in factory
+    assert "class OperationsSourceReadModelContext" in factory_context
     assert "def build_operations_source_read_model_provider(\n    context: OperationsSourceReadModelContext," in factory
     assert 'getattr(context, "settings_query_service"' not in factory
     assert 'getattr(container, "settings_query_service"' not in factory

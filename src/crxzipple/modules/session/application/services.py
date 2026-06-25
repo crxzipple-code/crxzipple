@@ -1,10 +1,66 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from datetime import datetime, time, timedelta, timezone
-from typing import Any, Callable, Protocol
-from uuid import uuid4
+from typing import Callable
 
+from crxzipple.modules.session.application.item_append import (
+    AppendSessionItemInput,
+    AppendSessionItemsInput,
+    build_session_item,
+)
+from crxzipple.modules.session.application.item_events import session_item_fact_payload
+from crxzipple.modules.session.application.reset_policy import evaluate_session_reset
+from crxzipple.modules.session.application.session_instance_lifecycle import (
+    build_session_entity,
+    build_session_instance,
+    ensure_session_instance_exists,
+    infer_session_kind,
+    next_session_instance_sequence,
+    runtime_binding_payload,
+    sync_instance_runtime_binding,
+)
+from crxzipple.modules.session.application.session_lifecycle import (
+    EnsureSessionInput,
+    ResetSessionInput,
+    RoutedSessionResult,
+    SessionResolutionResult,
+    SyncRoutedSessionInput,
+)
+from crxzipple.modules.session.application.session_metadata import (
+    MergeSessionItemMetadataInput,
+    merge_session_item_metadata,
+)
+from crxzipple.modules.session.application.session_queries import (
+    BuildSessionMaintenanceWindowInput,
+    BuildSessionReplayWindowInput,
+    GetSessionContextFrontierInput,
+    GetSessionItemBySourceInput,
+    ListSessionInstancesInput,
+    ListSessionItemRangeInput,
+    ListSessionItemsInput,
+    ListSessionSegmentHandlesInput,
+)
+from crxzipple.modules.session.application.segment_compaction import (
+    CompactSessionSegmentInput,
+    CompactSessionSegmentResult,
+    archive_through_sequence_no,
+    build_compacted_item,
+    compacted_segment_metadata,
+    compacted_segment_result,
+    ensure_summary_item_belongs_to_segment,
+    normalize_segment_compaction_input,
+)
+from crxzipple.modules.session.application.session_windows import (
+    SessionContextFrontier,
+    SessionItemRange,
+    SessionItemsBundle,
+    SessionReplayWindow,
+    SessionSegmentHandles,
+    build_context_frontier,
+    build_item_range,
+    build_replay_window,
+    build_segment_handle,
+)
+from crxzipple.modules.session.application.unit_of_work import SessionUnitOfWork
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.exceptions import (
     SessionInstanceNotFoundError,
@@ -12,320 +68,13 @@ from crxzipple.modules.session.domain.exceptions import (
     SessionNotFoundError,
     SessionValidationError,
 )
-from crxzipple.modules.session.domain.repositories import (
-    SessionInstanceRepository,
-    SessionItemRepository,
-    SessionRepository,
-)
 from crxzipple.modules.session.domain.value_objects import (
-    SessionKind,
     SessionItem,
-    SessionItemKind,
-    SessionItemPhase,
-    SessionKeyResolution,
     SessionOrigin,
     SessionReply,
-    SessionResetDecision,
-    SessionResetPolicy,
     utcnow,
 )
-from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.domain.events import Event
-from crxzipple.shared.time import format_datetime_utc as _format_datetime_utc
-
-
-def _session_item_fact_payload(item: SessionItem) -> dict[str, object]:
-    return {
-        "item_id": item.id,
-        "session_key": item.session_key,
-        "session_id": item.session_id,
-        "sequence_no": item.sequence_no,
-        "kind": item.kind.value,
-        "phase": item.phase.value,
-        "role": item.role,
-        "source_module": item.source_module,
-        "source_kind": item.source_kind,
-        "source_id": item.source_id,
-        "provider_item_id": item.provider_item_id,
-        "provider_item_type": item.provider_item_type,
-        "call_id": item.call_id,
-        "tool_name": item.tool_name,
-        "model_visible": item.model_visible,
-        "user_visible": item.user_visible,
-        "chat_visible": item.chat_visible,
-        "trace_visible": item.trace_visible,
-        "item": item.to_payload(),
-    }
-
-
-@dataclass(frozen=True, slots=True)
-class EnsureSessionInput:
-    key: str
-    agent_id: str
-    workspace: str | None = None
-    status: str = "active"
-    channel: str | None = None
-    chat_type: str | None = None
-    origin: SessionOrigin | None = None
-    reply: SessionReply | None = None
-    metadata: dict[str, object] | None = None
-    active_session_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AppendSessionItemInput:
-    session_key: str
-    kind: SessionItemKind
-    content_payload: dict[str, object] = field(default_factory=dict)
-    role: str | None = None
-    phase: SessionItemPhase = SessionItemPhase.UNKNOWN
-    source_module: str | None = None
-    source_kind: str | None = None
-    source_id: str | None = None
-    provider_item_id: str | None = None
-    provider_item_type: str | None = None
-    call_id: str | None = None
-    tool_name: str | None = None
-    model_visible: bool = True
-    user_visible: bool = True
-    chat_visible: bool = True
-    trace_visible: bool = True
-    metadata: dict[str, object] = field(default_factory=dict)
-    session_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AppendSessionItemsInput:
-    items: tuple[AppendSessionItemInput, ...] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True, slots=True)
-class ListSessionItemsInput:
-    session_key: str
-    limit: int | None = None
-    active_session_only: bool = False
-    after_sequence_no: int | None = None
-    before_sequence_no: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class BuildSessionReplayWindowInput:
-    session_key: str
-    limit: int | None = None
-    active_session_only: bool = False
-    after_sequence_no: int | None = None
-    before_sequence_no: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class BuildSessionMaintenanceWindowInput:
-    session_key: str
-    limit: int | None = None
-    active_session_only: bool = False
-    after_sequence_no: int | None = None
-    before_sequence_no: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ListSessionItemRangeInput:
-    session_key: str
-    session_id: str
-    from_sequence_no: int | None = None
-    to_sequence_no: int | None = None
-    limit: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ListSessionSegmentHandlesInput:
-    session_key: str
-    include_active: bool = True
-    limit: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ResetSessionInput:
-    session_key: str
-    status: str | None = None
-    metadata: dict[str, object] = field(default_factory=dict)
-    active_session_id: str | None = None
-    reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MergeSessionMetadataInput:
-    session_key: str
-    metadata: dict[str, object] = field(default_factory=dict)
-    touch_activity: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class MergeSessionItemMetadataInput:
-    item_id: str
-    metadata: dict[str, object] = field(default_factory=dict)
-    touch_activity: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class GetSessionItemBySourceInput:
-    session_key: str
-    session_id: str
-    source_module: str
-    source_kind: str
-    source_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class SessionItemsBundle:
-    session: Session
-    items: tuple[SessionItem, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class SessionReplayWindow:
-    session: Session
-    items: tuple[SessionItem, ...]
-    active_session_only: bool = False
-    from_sequence_no: int | None = None
-    to_sequence_no: int | None = None
-    item_count: int = 0
-    protocol_call_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class SessionItemRange:
-    session: Session
-    session_id: str
-    items: tuple[SessionItem, ...]
-    from_sequence_no: int | None = None
-    to_sequence_no: int | None = None
-    item_count: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class SessionSegmentHandle:
-    session_id: str
-    sequence_no: int
-    kind: str
-    status: str
-    summary_text: str | None = None
-    summary_item_id: str | None = None
-    archived_item_count: int | None = None
-    archived_through_item_sequence_no: int | None = None
-    opened_at: str | None = None
-    closed_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionSegmentHandles:
-    session: Session
-    active_session_id: str
-    handles: tuple[SessionSegmentHandle, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class GetSessionContextFrontierInput:
-    session_key: str
-    active_item_limit: int | None = None
-    historical_instance_limit: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionContextFrontier:
-    session: Session
-    active_instance: SessionInstance
-    instances: tuple[SessionInstance, ...]
-    active_items: tuple[SessionItem, ...]
-    from_sequence_no: int | None = None
-    to_sequence_no: int | None = None
-    active_item_count: int = 0
-    protocol_call_ids: tuple[str, ...] = ()
-    segment_handles: tuple[SessionSegmentHandle, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class CompactSessionSegmentInput:
-    session_key: str
-    session_id: str
-    summary_text: str
-    compaction_run_id: str
-    summary_item_id: str | None = None
-    archived_through_item_sequence_no: int | None = None
-    reason: str | None = "compaction"
-
-
-@dataclass(frozen=True, slots=True)
-class CompactSessionSegmentResult:
-    session: Session
-    compacted_session_id: str
-    active_session_id: str
-    archived_item_count: int = 0
-    archived_through_item_sequence_no: int | None = None
-    compacted_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ListSessionInstancesInput:
-    session_key: str
-
-
-@dataclass(frozen=True, slots=True)
-class SyncRoutedSessionInput:
-    key_resolution: SessionKeyResolution
-    agent_id: str
-    workspace: str | None = None
-    status: str = "active"
-    origin: SessionOrigin = field(default_factory=SessionOrigin)
-    reply: SessionReply = field(default_factory=SessionReply)
-    metadata: dict[str, object] = field(default_factory=dict)
-    ensure: bool = False
-    touch_activity: bool = True
-    reset_policy: SessionResetPolicy | None = None
-    now: datetime | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RoutedSessionResult:
-    resolution: SessionResolutionResult
-    session: Session | None = None
-    active_instance: SessionInstance | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionResolutionResult:
-    key: str
-    kind: SessionKind
-    created: bool
-    reset: bool
-    reset_reason: str | None = None
-
-
-class SessionUnitOfWork(Protocol):
-    sessions: SessionRepository
-    session_items: SessionItemRepository
-    session_instances: SessionInstanceRepository
-
-    def __enter__(self) -> "SessionUnitOfWork":
-        ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: Any,
-    ) -> None:
-        ...
-
-    def collect(self, aggregate: AggregateRoot[Any]) -> None:
-        ...
-
-    def flush(self) -> None:
-        ...
-
-    def commit(self) -> None:
-        ...
-
-    def rollback(self) -> None:
-        ...
 
 
 class SessionApplicationService:
@@ -334,15 +83,21 @@ class SessionApplicationService:
         uow_factory: Callable[[], SessionUnitOfWork],
         *,
         workspace_defaults_resolver: Callable[[str], str | None] | None = None,
+        append_sequence_conflict_detector: Callable[[Exception], bool] | None = None,
+        append_sequence_retry_limit: int = 2,
     ) -> None:
         self.uow_factory = uow_factory
         self.workspace_defaults_resolver = workspace_defaults_resolver
+        self.append_sequence_conflict_detector = (
+            append_sequence_conflict_detector or (lambda exc: False)
+        )
+        self.append_sequence_retry_limit = max(0, append_sequence_retry_limit)
 
     def ensure_session(self, data: EnsureSessionInput) -> Session:
         with self.uow_factory() as uow:
             session = uow.sessions.get(data.key)
             if session is None:
-                session = self._build_session(
+                session = build_session_entity(
                     key=data.key,
                     agent_id=data.agent_id,
                     workspace=self._resolve_new_session_workspace(
@@ -357,10 +112,10 @@ class SessionApplicationService:
                     metadata=data.metadata,
                     active_session_id=data.active_session_id,
                 )
-                instance = self._build_instance(
+                instance = build_session_instance(
                     session=session,
                     sequence_no=1,
-                    kind=self._infer_session_kind(
+                    kind=infer_session_kind(
                         session.id,
                         chat_type=session.chat_type,
                     ),
@@ -375,7 +130,7 @@ class SessionApplicationService:
                         payload={
                             "session_key": session.id,
                             "active_session_id": session.active_session_id,
-                            **self._runtime_binding_payload(session),
+                            **runtime_binding_payload(session),
                         },
                     ),
                 )
@@ -389,17 +144,17 @@ class SessionApplicationService:
                     metadata=data.metadata,
                     workspace=data.workspace,
                 )
-                self._ensure_instance_exists(
+                ensure_session_instance_exists(
                     uow,
                     session=session,
-                    kind=self._infer_session_kind(
+                    kind=infer_session_kind(
                         session.id,
                         chat_type=session.chat_type,
                     ),
                 )
                 active_instance = uow.session_instances.get(session.active_session_id)
                 if active_instance is not None:
-                    self._sync_instance_runtime_binding(active_instance, session=session)
+                    sync_instance_runtime_binding(active_instance, session=session)
                     uow.session_instances.add(active_instance)
                 session.record_event(
                     Event(
@@ -407,7 +162,7 @@ class SessionApplicationService:
                         payload={
                             "session_key": session.id,
                             "active_session_id": session.active_session_id,
-                            **self._runtime_binding_payload(session),
+                            **runtime_binding_payload(session),
                         },
                     ),
                 )
@@ -443,7 +198,7 @@ class SessionApplicationService:
                 )
 
             if session is None:
-                session = self._build_session(
+                session = build_session_entity(
                     key=data.key_resolution.key,
                     agent_id=data.agent_id,
                     workspace=self._resolve_new_session_workspace(
@@ -460,7 +215,7 @@ class SessionApplicationService:
                     updated_at=now,
                     last_reset_at=now,
                 )
-                active_instance = self._build_instance(
+                active_instance = build_session_instance(
                     session=session,
                     sequence_no=1,
                     kind=data.key_resolution.kind,
@@ -476,7 +231,7 @@ class SessionApplicationService:
                         payload={
                             "session_key": session.id,
                             "active_session_id": session.active_session_id,
-                            **self._runtime_binding_payload(session),
+                            **runtime_binding_payload(session),
                             "session_kind": data.key_resolution.kind.value,
                         },
                     ),
@@ -494,7 +249,7 @@ class SessionApplicationService:
                     active_instance=active_instance,
                 )
 
-            reset_decision = _evaluate_session_reset(
+            reset_decision = evaluate_session_reset(
                 updated_at=session.updated_at,
                 policy=data.reset_policy,
                 now=now,
@@ -510,8 +265,8 @@ class SessionApplicationService:
                 updated_at=now if data.touch_activity else session.updated_at,
             )
             if active_instance is None:
-                next_sequence = self._next_instance_sequence(uow, session.id)
-                active_instance = self._build_instance(
+                next_sequence = next_session_instance_sequence(uow, session.id)
+                active_instance = build_session_instance(
                     session=session,
                     sequence_no=next_sequence,
                     kind=data.key_resolution.kind,
@@ -520,7 +275,7 @@ class SessionApplicationService:
                 )
                 uow.session_instances.add(active_instance)
             else:
-                self._sync_instance_runtime_binding(active_instance, session=session)
+                sync_instance_runtime_binding(active_instance, session=session)
                 uow.session_instances.add(active_instance)
 
             if reset_decision.should_reset:
@@ -538,9 +293,9 @@ class SessionApplicationService:
                 next_sequence = (
                     next_sequence + 1
                     if next_sequence is not None
-                    else self._next_instance_sequence(uow, session.id)
+                    else next_session_instance_sequence(uow, session.id)
                 )
-                active_instance = self._build_instance(
+                active_instance = build_session_instance(
                     session=session,
                     sequence_no=next_sequence,
                     kind=data.key_resolution.kind,
@@ -554,7 +309,7 @@ class SessionApplicationService:
                         payload={
                             "session_key": session.id,
                             "active_session_id": session.active_session_id,
-                            **self._runtime_binding_payload(session),
+                            **runtime_binding_payload(session),
                             "reason": reset_decision.reason,
                         },
                     ),
@@ -573,7 +328,7 @@ class SessionApplicationService:
                         payload={
                             "session_key": session.id,
                             "active_session_id": session.active_session_id,
-                            **self._runtime_binding_payload(session),
+                            **runtime_binding_payload(session),
                             "session_kind": data.key_resolution.kind.value,
                         },
                     ),
@@ -622,7 +377,7 @@ class SessionApplicationService:
             )
             active_instance = uow.session_instances.get(session.active_session_id)
             if active_instance is not None:
-                self._sync_instance_runtime_binding(active_instance, session=session)
+                sync_instance_runtime_binding(active_instance, session=session)
                 uow.session_instances.add(active_instance)
             session.record_event(
                 Event(
@@ -630,7 +385,7 @@ class SessionApplicationService:
                     payload={
                         "session_key": session.id,
                         "active_session_id": session.active_session_id,
-                        **self._runtime_binding_payload(session),
+                        **runtime_binding_payload(session),
                     },
                 ),
             )
@@ -694,22 +449,12 @@ class SessionApplicationService:
                     ),
                 ),
             )
-            sequence_numbers = [item.sequence_no for item in items]
-            return SessionItemRange(
+            return build_item_range(
                 session=session,
                 session_id=data.session_id,
                 items=items,
-                from_sequence_no=(
-                    min(sequence_numbers)
-                    if sequence_numbers
-                    else from_sequence_no
-                ),
-                to_sequence_no=(
-                    max(sequence_numbers)
-                    if sequence_numbers
-                    else to_sequence_no
-                ),
-                item_count=len(items),
+                from_sequence_no=from_sequence_no,
+                to_sequence_no=to_sequence_no,
             )
 
     def list_segment_handles(
@@ -735,7 +480,9 @@ class SessionApplicationService:
             return SessionSegmentHandles(
                 session=session,
                 active_session_id=session.active_session_id,
-                handles=tuple(_segment_handle(instance) for instance in selected_instances),
+                handles=tuple(
+                    build_segment_handle(instance) for instance in selected_instances
+                ),
             )
 
     def get_context_frontier(
@@ -769,35 +516,12 @@ class SessionApplicationService:
                     limit=active_item_limit,
                 ),
             )
-            sequence_numbers = [item.sequence_no for item in active_items]
-            protocol_call_ids = tuple(
-                dict.fromkeys(
-                    item.call_id
-                    for item in active_items
-                    if item.call_id
-                    and item.kind
-                    in {SessionItemKind.TOOL_CALL, SessionItemKind.TOOL_RESULT}
-                ),
-            )
-            historical_instances = tuple(
-                instance for instance in instances if instance.id != active_instance.id
-            )
-            if historical_instance_limit is not None:
-                historical_instances = historical_instances[-historical_instance_limit:]
-            segment_handles = tuple(
-                _segment_handle(instance)
-                for instance in (*historical_instances, active_instance)
-            )
-            return SessionContextFrontier(
+            return build_context_frontier(
                 session=session,
                 active_instance=active_instance,
                 instances=instances,
                 active_items=active_items,
-                from_sequence_no=min(sequence_numbers) if sequence_numbers else None,
-                to_sequence_no=max(sequence_numbers) if sequence_numbers else None,
-                active_item_count=len(active_items),
-                protocol_call_ids=protocol_call_ids,
-                segment_handles=segment_handles,
+                historical_instance_limit=historical_instance_limit,
             )
 
     def get_instance(self, instance_id: str) -> SessionInstance:
@@ -817,6 +541,18 @@ class SessionApplicationService:
                     f"Session item '{item_id}' was not found.",
                 )
             return item
+
+    def get_items(self, item_ids: tuple[str, ...]) -> dict[str, SessionItem]:
+        normalized_ids = tuple(
+            dict.fromkeys(item_id.strip() for item_id in item_ids if item_id.strip()),
+        )
+        if not normalized_ids:
+            return {}
+        with self.uow_factory() as uow:
+            return {
+                item.id: item
+                for item in uow.session_items.get_many(normalized_ids)
+            }
 
     def get_item_by_source(
         self,
@@ -841,9 +577,7 @@ class SessionApplicationService:
                 raise SessionItemNotFoundError(
                     f"Session item '{data.item_id}' was not found.",
                 )
-            metadata = dict(item.metadata)
-            metadata.update(data.metadata)
-            updated_item = replace(item, metadata=metadata)
+            updated_item = merge_session_item_metadata(item, data.metadata)
             uow.session_items.add(updated_item)
             session = uow.sessions.get(updated_item.session_key)
             if session is not None and data.touch_activity:
@@ -862,6 +596,22 @@ class SessionApplicationService:
     ) -> tuple[SessionItem, ...]:
         if not data.items:
             return ()
+        attempts = self.append_sequence_retry_limit + 1
+        for attempt in range(attempts):
+            try:
+                return self._append_items_once(data)
+            except Exception as exc:
+                if (
+                    not self.append_sequence_conflict_detector(exc)
+                    or attempt >= self.append_sequence_retry_limit
+                ):
+                    raise
+        raise RuntimeError("Session append retry loop exited unexpectedly.")
+
+    def _append_items_once(
+        self,
+        data: AppendSessionItemsInput,
+    ) -> tuple[SessionItem, ...]:
         with self.uow_factory() as uow:
             first = data.items[0]
             session = uow.sessions.get(first.session_key)
@@ -870,9 +620,17 @@ class SessionApplicationService:
                     f"Session '{first.session_key}' was not found.",
                 )
             target_session_id = first.session_id or session.active_session_id
-            if uow.session_instances.get(target_session_id) is None:
+            target_instance = uow.session_instances.get(target_session_id)
+            if target_instance is None:
                 raise SessionInstanceNotFoundError(
                     f"Session instance '{target_session_id}' was not found.",
+                )
+            if (
+                target_instance.id != session.active_session_id
+                or target_instance.status != "active"
+            ):
+                raise SessionValidationError(
+                    "Session items can only be appended to the active session instance.",
                 )
             repository = uow.session_items
             next_sequence_no = repository.max_sequence_no(
@@ -890,7 +648,7 @@ class SessionApplicationService:
                     raise SessionValidationError(
                         "Batched session items must share a session_id.",
                     )
-                session_item = self._build_item(
+                session_item = build_session_item(
                     item,
                     session_key=session.id,
                     session_id=target_session_id,
@@ -908,70 +666,18 @@ class SessionApplicationService:
                 session.record_event(
                     Event(
                         name="session.item.appended",
-                        payload=_session_item_fact_payload(item),
+                        payload=session_item_fact_payload(item),
                     ),
                 )
             uow.collect(session)
             uow.commit()
             return tuple(items)
 
-    def _build_item(
-        self,
-        data: AppendSessionItemInput,
-        *,
-        session_key: str,
-        session_id: str,
-        sequence_no: int,
-    ) -> SessionItem:
-        return SessionItem(
-            id=str(uuid4()),
-            session_key=session_key,
-            session_id=session_id,
-            sequence_no=sequence_no,
-            kind=data.kind,
-            role=data.role,
-            phase=data.phase,
-            content_payload=dict(data.content_payload),
-            source_module=data.source_module,
-            source_kind=data.source_kind,
-            source_id=data.source_id,
-            provider_item_id=data.provider_item_id,
-            provider_item_type=data.provider_item_type,
-            call_id=data.call_id,
-            tool_name=data.tool_name,
-            model_visible=data.model_visible,
-            user_visible=data.user_visible,
-            chat_visible=data.chat_visible,
-            trace_visible=data.trace_visible,
-            metadata=dict(data.metadata),
-        )
-
     def compact_active_segment(
         self,
         data: CompactSessionSegmentInput,
     ) -> CompactSessionSegmentResult:
-        normalized_session_id = data.session_id.strip()
-        normalized_summary_item_id = (data.summary_item_id or "").strip()
-        normalized_summary_text = data.summary_text.strip()
-        normalized_compaction_run_id = data.compaction_run_id.strip()
-        normalized_reason = (data.reason or "compaction").strip() or "compaction"
-        if not normalized_session_id:
-            raise SessionValidationError("Compaction session_id cannot be empty.")
-        if not normalized_summary_item_id:
-            raise SessionValidationError(
-                "Compaction summary item id cannot be empty.",
-            )
-        if not normalized_summary_text:
-            raise SessionValidationError("Compaction summary_text cannot be empty.")
-        if not normalized_compaction_run_id:
-            raise SessionValidationError("Compaction run id cannot be empty.")
-        if (
-            data.archived_through_item_sequence_no is not None
-            and data.archived_through_item_sequence_no < 0
-        ):
-            raise SessionValidationError(
-                "Compaction archived_through_item_sequence_no cannot be negative.",
-            )
+        compaction = normalize_segment_compaction_input(data)
 
         with self.uow_factory() as uow:
             session = uow.sessions.get(data.session_key)
@@ -979,76 +685,63 @@ class SessionApplicationService:
                 raise SessionNotFoundError(
                     f"Session '{data.session_key}' was not found.",
                 )
-            if normalized_session_id != session.active_session_id:
+            if compaction.session_id != session.active_session_id:
                 raise SessionValidationError(
                     "Session segment compaction requires the current active session_id.",
                 )
-            current_instance = uow.session_instances.get(normalized_session_id)
+            current_instance = uow.session_instances.get(compaction.session_id)
             if current_instance is None:
                 raise SessionInstanceNotFoundError(
-                    f"Session instance '{normalized_session_id}' was not found.",
+                    f"Session instance '{compaction.session_id}' was not found.",
                 )
-            summary_item: SessionItem | None = None
-            summary_item = uow.session_items.get(normalized_summary_item_id)
+            if current_instance.status != "active":
+                raise SessionValidationError(
+                    "Session segment compaction requires an active session instance.",
+                )
+            summary_item = uow.session_items.get(compaction.summary_item_id)
             if summary_item is None:
                 raise SessionItemNotFoundError(
-                    f"Session item '{normalized_summary_item_id}' was not found.",
+                    f"Session item '{compaction.summary_item_id}' was not found.",
                 )
-            if (
-                summary_item.session_key != session.id
-                or summary_item.session_id != normalized_session_id
-            ):
-                raise SessionValidationError(
-                    "Compaction summary item must belong to the active session segment.",
-                )
+            ensure_summary_item_belongs_to_segment(
+                session=session,
+                summary_item=summary_item,
+                compaction=compaction,
+            )
 
-            archive_through_item = data.archived_through_item_sequence_no
-            if archive_through_item is None and summary_item is not None:
-                archive_through_item = max(summary_item.sequence_no - 1, 0)
+            archive_through_item = archive_through_sequence_no(
+                compaction=compaction,
+                summary_item=summary_item,
+            )
             archived_item_count = 0
             if archive_through_item is not None:
                 items = uow.session_items.list(
                     session_key=session.id,
-                    session_id=normalized_session_id,
+                    session_id=compaction.session_id,
                 )
                 for item in items:
-                    if item.id == normalized_summary_item_id:
-                        continue
-                    if item.sequence_no > archive_through_item:
-                        continue
-                    metadata = dict(item.metadata)
-                    metadata["archived_reason"] = normalized_reason
-                    metadata["archived_by_compaction_run_id"] = (
-                        normalized_compaction_run_id
+                    archived_item = build_compacted_item(
+                        item,
+                        compaction=compaction,
+                        archived_through_item_sequence_no=archive_through_item,
                     )
-                    metadata["compacted_segment_id"] = normalized_session_id
-                    metadata["archived_through_item_sequence_no"] = (
-                        archive_through_item
-                    )
-                    if normalized_summary_item_id:
-                        metadata["summary_item_id"] = normalized_summary_item_id
-                    archived_item = replace(item, metadata=metadata)
+                    if archived_item is None:
+                        continue
                     uow.session_items.add(archived_item)
                     archived_item_count += 1
 
             compacted_at = utcnow()
             current_instance.close(
-                reason=normalized_reason,
+                reason=compaction.reason,
                 closed_at=compacted_at,
             )
             instance_metadata = dict(current_instance.metadata)
-            segment_metadata: dict[str, object] = {
-                "kind": "compacted",
-                "summary_text": normalized_summary_text,
-                "compaction_run_id": normalized_compaction_run_id,
-                "archived_item_count": archived_item_count,
-                "archived_through_item_sequence_no": archive_through_item,
-                "compacted_at": _format_datetime_utc(compacted_at),
-                "reason": normalized_reason,
-            }
-            if summary_item is not None:
-                segment_metadata["summary_item_id"] = summary_item.id
-            instance_metadata["segment"] = segment_metadata
+            instance_metadata["segment"] = compacted_segment_metadata(
+                compaction=compaction,
+                archived_item_count=archived_item_count,
+                archived_through_item_sequence_no=archive_through_item,
+                compacted_at=compacted_at,
+            )
             current_instance.metadata = instance_metadata
             uow.session_instances.add(current_instance)
 
@@ -1056,9 +749,9 @@ class SessionApplicationService:
                 status=session.status,
                 happened_at=compacted_at,
             )
-            next_instance = self._build_instance(
+            next_instance = build_session_instance(
                 session=session,
-                sequence_no=self._next_instance_sequence(uow, session.id),
+                sequence_no=next_session_instance_sequence(uow, session.id),
                 kind=current_instance.kind,
                 instance_id=session.active_session_id,
                 opened_at=session.last_reset_at,
@@ -1069,23 +762,22 @@ class SessionApplicationService:
                     name="session.segment.compacted",
                     payload={
                         "session_key": session.id,
-                        "closed_session_id": normalized_session_id,
+                        "closed_session_id": compaction.session_id,
                         "active_session_id": session.active_session_id,
                         "archived_item_count": archived_item_count,
-                        "compaction_run_id": normalized_compaction_run_id,
+                        "compaction_run_id": compaction.compaction_run_id,
                     },
                 ),
             )
             uow.sessions.add(session)
             uow.collect(session)
             uow.commit()
-            return CompactSessionSegmentResult(
+            return compacted_segment_result(
                 session=session,
-                compacted_session_id=normalized_session_id,
-                active_session_id=session.active_session_id,
+                compaction=compaction,
                 archived_item_count=archived_item_count,
                 archived_through_item_sequence_no=archive_through_item,
-                compacted_at=_format_datetime_utc(compacted_at),
+                compacted_at=compacted_at,
             )
 
     def list_items(
@@ -1136,26 +828,9 @@ class SessionApplicationService:
                 before_sequence_no=before_sequence_no,
             ),
         )
-        sequence_numbers = [
-            item.sequence_no
-            for item in bundle.items
-        ]
-        protocol_call_ids = tuple(
-            dict.fromkeys(
-                item.call_id
-                for item in bundle.items
-                if item.call_id
-                and item.kind in {SessionItemKind.TOOL_CALL, SessionItemKind.TOOL_RESULT}
-            ),
-        )
-        return SessionReplayWindow(
-            session=bundle.session,
-            items=bundle.items,
+        return build_replay_window(
+            bundle,
             active_session_only=active_session_only,
-            from_sequence_no=min(sequence_numbers) if sequence_numbers else None,
-            to_sequence_no=max(sequence_numbers) if sequence_numbers else None,
-            item_count=len(bundle.items),
-            protocol_call_ids=protocol_call_ids,
         )
 
     def get_session_with_items(
@@ -1197,10 +872,10 @@ class SessionApplicationService:
                 status=data.status,
                 metadata=data.metadata,
             )
-            next_instance = self._build_instance(
+            next_instance = build_session_instance(
                 session=session,
-                sequence_no=self._next_instance_sequence(uow, session.id),
-                kind=self._infer_session_kind(
+                sequence_no=next_session_instance_sequence(uow, session.id),
+                kind=infer_session_kind(
                     session.id,
                     chat_type=session.chat_type,
                 ),
@@ -1214,7 +889,7 @@ class SessionApplicationService:
                     payload={
                         "session_key": session.id,
                         "active_session_id": session.active_session_id,
-                        **self._runtime_binding_payload(session),
+                        **runtime_binding_payload(session),
                         "reason": data.reason or "manual",
                     },
                 ),
@@ -1223,114 +898,6 @@ class SessionApplicationService:
             uow.collect(session)
             uow.commit()
             return session
-
-    def _build_session(
-        self,
-        *,
-        key: str,
-        agent_id: str,
-        workspace: str | None,
-        status: str,
-        channel: str | None,
-        chat_type: str | None,
-        origin: SessionOrigin,
-        reply: SessionReply,
-        metadata: dict[str, object] | None,
-        active_session_id: str | None = None,
-        created_at: datetime | None = None,
-        updated_at: datetime | None = None,
-        last_reset_at: datetime | None = None,
-    ) -> Session:
-        timestamp = created_at or utcnow()
-        session = Session(
-            id=key,
-            agent_id=agent_id,
-            active_session_id=active_session_id or str(uuid4()),
-            status=status,
-            channel=(channel.strip() or None) if channel else None,
-            chat_type=(chat_type.strip() or None) if chat_type else None,
-            origin=origin,
-            reply=reply,
-            metadata=dict(metadata or {}),
-            created_at=timestamp,
-            updated_at=updated_at or timestamp,
-            last_reset_at=last_reset_at or timestamp,
-        )
-        session.sync_runtime_binding(
-            agent_id=agent_id,
-            workspace=workspace,
-        )
-        return session
-
-    def _build_instance(
-        self,
-        *,
-        session: Session,
-        sequence_no: int,
-        kind: SessionKind,
-        instance_id: str | None = None,
-        opened_at: datetime | None = None,
-    ) -> SessionInstance:
-        return SessionInstance(
-            id=instance_id or str(uuid4()),
-            session_key=session.id,
-            sequence_no=sequence_no,
-            kind=kind,
-            opened_at=opened_at or utcnow(),
-            metadata=self._build_runtime_binding_metadata(session),
-        )
-
-    def _ensure_instance_exists(
-        self,
-        uow: SessionUnitOfWork,
-        *,
-        session: Session,
-        kind: SessionKind,
-    ) -> None:
-        if uow.session_instances.get(session.active_session_id) is not None:
-            return
-        instance = self._build_instance(
-            session=session,
-            sequence_no=self._next_instance_sequence(uow, session.id),
-            kind=kind,
-            instance_id=session.active_session_id,
-            opened_at=session.last_reset_at,
-        )
-        uow.session_instances.add(instance)
-
-    @staticmethod
-    def _build_runtime_binding_metadata(session: Session) -> dict[str, object]:
-        binding = session.runtime_binding()
-        binding_payload = binding.to_payload()
-        metadata: dict[str, object] = {
-            "runtime_binding": binding_payload,
-        }
-        if binding.agent_id is not None:
-            metadata["agent_id"] = binding.agent_id
-        if binding.workspace is not None:
-            metadata["workspace"] = binding.workspace
-        return metadata
-
-    @staticmethod
-    def _runtime_binding_payload(session: Session) -> dict[str, object]:
-        binding = session.runtime_binding()
-        payload: dict[str, object] = {}
-        if binding.agent_id is not None:
-            payload["agent_id"] = binding.agent_id
-        if binding.workspace is not None:
-            payload["workspace"] = binding.workspace
-        return payload
-
-    def _sync_instance_runtime_binding(
-        self,
-        instance: SessionInstance,
-        *,
-        session: Session,
-    ) -> None:
-        metadata = dict(instance.metadata)
-        metadata.pop("llm_id", None)
-        metadata.update(self._build_runtime_binding_metadata(session))
-        instance.metadata = metadata
 
     def _resolve_new_session_workspace(
         self,
@@ -1349,126 +916,3 @@ class SessionApplicationService:
         if resolved is None:
             return None
         return resolved.strip() or None
-
-    def _next_instance_sequence(
-        self,
-        uow: SessionUnitOfWork,
-        session_key: str,
-    ) -> int:
-        return uow.session_instances.max_sequence_no(session_key=session_key) + 1
-
-    @staticmethod
-    def _infer_session_kind(
-        session_key: str,
-        *,
-        chat_type: str | None = None,
-    ) -> SessionKind:
-        if ":thread:" in session_key:
-            return SessionKind.THREAD
-        if ":group:" in session_key:
-            return SessionKind.GROUP
-        if ":channel:" in session_key:
-            return SessionKind.CHANNEL
-        if ":dm:" in session_key:
-            return SessionKind.DIRECT
-        if chat_type == SessionKind.THREAD.value:
-            return SessionKind.THREAD
-        if chat_type == SessionKind.CHANNEL.value:
-            return SessionKind.CHANNEL
-        if chat_type == SessionKind.GROUP.value:
-            return SessionKind.GROUP
-        return SessionKind.MAIN
-
-
-def _segment_handle(instance: SessionInstance) -> SessionSegmentHandle:
-    segment = instance.metadata.get("segment")
-    segment_payload = segment if isinstance(segment, dict) else {}
-    return SessionSegmentHandle(
-        session_id=instance.id,
-        sequence_no=instance.sequence_no,
-        kind=str(segment_payload.get("kind") or instance.kind.value),
-        status=instance.status,
-        summary_text=_optional_str(segment_payload.get("summary_text")),
-        summary_item_id=_optional_str(segment_payload.get("summary_item_id")),
-        archived_item_count=_optional_int(segment_payload.get("archived_item_count")),
-        archived_through_item_sequence_no=_optional_int(
-            segment_payload.get("archived_through_item_sequence_no"),
-        ),
-        opened_at=_format_datetime_utc(instance.opened_at),
-        closed_at=(
-            _format_datetime_utc(instance.closed_at)
-            if instance.closed_at is not None
-            else None
-        ),
-    )
-
-
-def _optional_str(value: object) -> str | None:
-    if value in (None, ""):
-        return None
-    return str(value)
-
-
-def _optional_int(value: object) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
-def _idle_expiry(updated_at: datetime, idle_minutes: int) -> datetime:
-    return updated_at + timedelta(minutes=idle_minutes)
-
-
-def _daily_expiry(updated_at: datetime, daily_reset_hour_utc: int) -> datetime:
-    normalized = updated_at.astimezone(timezone.utc)
-    boundary = datetime.combine(
-        normalized.date(),
-        time(hour=daily_reset_hour_utc, tzinfo=timezone.utc),
-    )
-    if normalized >= boundary:
-        boundary += timedelta(days=1)
-    return boundary
-
-
-def _evaluate_session_reset(
-    *,
-    updated_at: datetime,
-    policy: SessionResetPolicy | None,
-    now: datetime,
-) -> SessionResetDecision:
-    if policy is None:
-        return SessionResetDecision(should_reset=False)
-
-    candidates: list[tuple[str, datetime]] = []
-    if policy.idle_minutes is not None:
-        if policy.idle_minutes <= 0:
-            raise SessionValidationError(
-                "Session idle_minutes must be greater than zero.",
-            )
-        candidates.append(("idle", _idle_expiry(updated_at, policy.idle_minutes)))
-    if policy.daily_reset_hour_utc is not None:
-        if not 0 <= policy.daily_reset_hour_utc <= 23:
-            raise SessionValidationError(
-                "Session daily_reset_hour_utc must be between 0 and 23.",
-            )
-        candidates.append(
-            ("daily", _daily_expiry(updated_at, policy.daily_reset_hour_utc)),
-        )
-
-    if not candidates:
-        return SessionResetDecision(should_reset=False)
-
-    reason, expires_at = min(candidates, key=lambda item: item[1])
-    if now >= expires_at:
-        return SessionResetDecision(
-            should_reset=True,
-            reason=reason,
-            expires_at=expires_at,
-        )
-    return SessionResetDecision(
-        should_reset=False,
-        expires_at=expires_at,
-    )

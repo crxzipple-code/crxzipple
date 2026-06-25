@@ -8,6 +8,13 @@ from pydantic import BaseModel
 
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
+from crxzipple.modules.authorization.domain import (
+    AuthorizationContext,
+    AuthorizationDeniedError,
+    AuthorizationRequest,
+    AuthorizationResource,
+    AuthorizationSubject,
+)
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.artifacts.domain.exceptions import (
     ArtifactNotFoundError,
@@ -78,8 +85,16 @@ async def upload_artifact(
 @router.get("/{artifact_id}", response_model=ArtifactResponse)
 def get_artifact(
     artifact_id: str,
+    request: Request,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ArtifactResponse:
+    _authorize_artifact_read(
+        container,
+        request=request,
+        artifact_id=artifact_id,
+        variant=None,
+        as_attachment=False,
+    )
     try:
         artifact = container.require(AppKey.ARTIFACT_SERVICE).get_artifact(artifact_id)
     except ArtifactNotFoundError as exc:
@@ -90,10 +105,12 @@ def get_artifact(
 @router.get("/{artifact_id}/original")
 def get_artifact_original(
     artifact_id: str,
+    request: Request,
     container: Annotated[AppContainer, Depends(get_container)],
 ):
     return _variant_response(
         container,
+        request=request,
         artifact_id=artifact_id,
         variant=ArtifactVariant.ORIGINAL,
         as_attachment=False,
@@ -103,10 +120,12 @@ def get_artifact_original(
 @router.get("/{artifact_id}/preview")
 def get_artifact_preview(
     artifact_id: str,
+    request: Request,
     container: Annotated[AppContainer, Depends(get_container)],
 ):
     return _variant_response(
         container,
+        request=request,
         artifact_id=artifact_id,
         variant=ArtifactVariant.PREVIEW,
         as_attachment=False,
@@ -116,10 +135,12 @@ def get_artifact_preview(
 @router.get("/{artifact_id}/download")
 def download_artifact(
     artifact_id: str,
+    request: Request,
     container: Annotated[AppContainer, Depends(get_container)],
 ):
     return _variant_response(
         container,
+        request=request,
         artifact_id=artifact_id,
         variant=ArtifactVariant.ORIGINAL,
         as_attachment=True,
@@ -129,10 +150,18 @@ def download_artifact(
 def _variant_response(
     container: AppContainer,
     *,
+    request: Request,
     artifact_id: str,
     variant: ArtifactVariant,
     as_attachment: bool,
 ) -> FileResponse:
+    _authorize_artifact_read(
+        container,
+        request=request,
+        artifact_id=artifact_id,
+        variant=variant,
+        as_attachment=as_attachment,
+    )
     try:
         resolved = container.require(AppKey.ARTIFACT_SERVICE).resolve_variant(
             artifact_id,
@@ -146,3 +175,43 @@ def _variant_response(
         filename=resolved.artifact.name,
         content_disposition_type="attachment" if as_attachment else "inline",
     )
+
+
+def _authorize_artifact_read(
+    container: AppContainer,
+    *,
+    request: Request,
+    artifact_id: str,
+    variant: ArtifactVariant | None,
+    as_attachment: bool,
+) -> None:
+    if not container.has(AppKey.AUTHORIZATION_SERVICE):
+        return
+    subject_type = request.headers.get("x-crxzipple-subject-type") or "anonymous"
+    subject_id = request.headers.get("x-crxzipple-subject-id")
+    authorization_request = AuthorizationRequest(
+        subject=AuthorizationSubject(
+            type=subject_type.strip() or "anonymous",
+            id=(subject_id or "").strip() or None,
+            attrs={"interface": "http"},
+        ),
+        action="artifact.read",
+        resource=AuthorizationResource(
+            kind="artifact",
+            id=artifact_id,
+            attrs={
+                "variant": variant.value if variant is not None else "metadata",
+                "as_attachment": as_attachment,
+            },
+        ),
+        context=AuthorizationContext(
+            attrs={
+                "interface": "http",
+                "path": request.url.path,
+            },
+        ),
+    )
+    try:
+        container.require(AppKey.AUTHORIZATION_SERVICE).authorize(authorization_request)
+    except AuthorizationDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None

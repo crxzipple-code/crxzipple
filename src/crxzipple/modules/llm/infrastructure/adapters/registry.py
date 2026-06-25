@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from crxzipple.modules.llm.application.adapters import LlmAdapter
-from crxzipple.modules.llm.domain.value_objects import LlmApiFamily
+from crxzipple.modules.llm.domain import LlmApiFamily
 
 
 class LlmAdapterRegistry:

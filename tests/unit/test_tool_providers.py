@@ -1099,7 +1099,7 @@ local_tools:
             text,
         )
         self.assertNotIn("Evidence path:", text)
-        self.assertNotIn("evidence_path_key", result.metadata["browser_evidence"])
+        self.assertNotIn("evidence_path_key", result.metadata)
 
     def test_browser_action_trace_handler_normalizes_wrapped_action_payload(self) -> None:
         class _Store:

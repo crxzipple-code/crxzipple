@@ -28,12 +28,13 @@ from crxzipple.modules.session.domain import (
     SessionResetPolicy,
     SessionRouteContext,
 )
+from crxzipple.modules.session.domain.exceptions import SessionValidationError
 from crxzipple.modules.session.infrastructure import (
     InMemorySessionItemRepository,
     InMemorySessionInstanceRepository,
     InMemorySessionRepository,
 )
-from crxzipple.modules.session.domain.value_objects import utcnow
+from crxzipple.modules.session.domain.value_objects import SessionItem, utcnow
 
 
 class _FakeSessionUnitOfWork:
@@ -334,6 +335,62 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(second.source_kind, "tool_run")
         self.assertEqual(second.source_id, "run-1")
         self.assertEqual([item.sequence_no for item in history], [1, 2])
+
+    def test_append_item_retries_sequence_conflict_with_fresh_sequence(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        original_add_many = self.uow.session_items.add_many_new
+        conflict_state = {"remaining": 1}
+
+        def add_many_with_competing_writer(items: tuple[SessionItem, ...]) -> None:
+            if conflict_state["remaining"]:
+                conflict_state["remaining"] = 0
+                original_add_many(
+                    (
+                        SessionItem(
+                            id="competing-user-message",
+                            session_key=session.id,
+                            session_id=session.active_session_id,
+                            sequence_no=1,
+                            kind=SessionItemKind.USER_MESSAGE,
+                            role="user",
+                            content_payload={"text": "external append"},
+                        ),
+                    ),
+                )
+                raise RuntimeError("session sequence conflict")
+            original_add_many(items)
+
+        self.uow.session_items.add_many_new = add_many_with_competing_writer
+        service = SessionApplicationService(
+            lambda: self.uow,
+            append_sequence_conflict_detector=lambda exc: (
+                str(exc) == "session sequence conflict"
+            ),
+        )
+
+        item = service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                content_payload={"text": "retry append"},
+            ),
+        )
+        history = sorted(
+            service.list_items(ListSessionItemsInput(session_key=session.id)),
+            key=lambda history_item: history_item.sequence_no,
+        )
+
+        self.assertEqual(conflict_state["remaining"], 0)
+        self.assertEqual(item.sequence_no, 2)
+        self.assertEqual([history_item.sequence_no for history_item in history], [1, 2])
+        self.assertEqual(history[0].id, "competing-user-message")
+        self.assertEqual(history[1].id, item.id)
 
     def test_append_items_batches_sequence_assignment(self) -> None:
         session = self.service.ensure_session(
@@ -673,6 +730,65 @@ class SessionServiceTestCase(unittest.TestCase):
             [handle.session_id for handle in all_handles.handles],
             [compacted.active_session_id],
         )
+
+    def test_append_item_rejects_closed_session_segment(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        old_session_id = session.active_session_id
+        old_item = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "old request"},
+            ),
+        )
+        summary = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                kind=SessionItemKind.CONTEXT_COMPACTION,
+                role="assistant",
+                content_payload={"text": "Old segment summary."},
+            ),
+        )
+        compacted = self.service.compact_active_segment(
+            CompactSessionSegmentInput(
+                session_key=session.id,
+                session_id=old_session_id,
+                summary_text="Old segment summary.",
+                summary_item_id=summary.id,
+                archived_through_item_sequence_no=old_item.sequence_no,
+                compaction_run_id="run-closed-segment-append",
+            ),
+        )
+
+        with self.assertRaises(SessionValidationError):
+            self.service.append_item(
+                AppendSessionItemInput(
+                    session_key=session.id,
+                    session_id=old_session_id,
+                    kind=SessionItemKind.USER_MESSAGE,
+                    role="user",
+                    content_payload={"text": "stale append"},
+                ),
+            )
+
+        current = self.service.append_item(
+            AppendSessionItemInput(
+                session_key=session.id,
+                session_id=compacted.active_session_id,
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "current append"},
+            ),
+        )
+
+        self.assertEqual(current.session_id, compacted.active_session_id)
+        self.assertEqual(current.sequence_no, 1)
 
     def test_merge_item_metadata_keeps_item_inside_session_service(self) -> None:
         session = self.service.ensure_session(

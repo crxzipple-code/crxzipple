@@ -502,6 +502,46 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
         )
         self.assertIn(("cdp.detach",), page.operations)
 
+    def test_cdp_raw_detaches_session_when_command_fails(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        class _FailingSession:
+            def send(self, method, params=None):  # noqa: ANN001, ANN201
+                page.operations.append(("cdp.send", method, dict(params or {})))
+                raise RuntimeError("Protocol error: target closed")
+
+            def detach(self) -> None:
+                page.operations.append(("cdp.detach",))
+
+        def _new_cdp_session(_page):  # noqa: ANN001, ANN202
+            page.operations.append(("context.new_cdp_session", _page.target_id))
+            return _FailingSession()
+
+        page.browser_context.new_cdp_session = _new_cdp_session
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="cdp-raw",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "method": "Runtime.evaluate",
+                "params": {"expression": "1 + 1"},
+            },
+        )
+
+        with self.assertRaises(BrowserValidationError):
+            self.engine.execute(
+                plan=self._plan(command),
+                runtime_state=self.runtime_state,
+                tab=self.tab,
+                command=command,
+            )
+
+        self.assertIn(
+            ("cdp.send", "Runtime.evaluate", {"expression": "1 + 1"}),
+            page.operations,
+        )
+        self.assertIn(("cdp.detach",), page.operations)
+
     def test_runtime_inspect_returns_page_runtime_facts(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
         page.runtime_globals = {
@@ -1315,6 +1355,47 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
             len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
             131072,
         )
+
+    def test_network_inspect_detaches_cdp_session_when_command_fails(self) -> None:
+        class _Page:
+            url = "https://example.com/app"
+
+            def evaluate(self, _expression, _payload):  # noqa: ANN001, ANN201
+                return {
+                    "url": self.url,
+                    "entries": [],
+                    "entry_count": 0,
+                    "limit": 25,
+                }
+
+        class _Broker:
+            def __init__(self) -> None:
+                self.detached: list[object] = []
+
+            def open_command_session(self, _page):  # noqa: ANN001, ANN201
+                return object()
+
+            def send_command(self, _session, method, _params):  # noqa: ANN001, ANN201
+                if method == "Performance.enable":
+                    raise RuntimeError("CDP timeout")
+                return {}
+
+            def detach(self, session):  # noqa: ANN001
+                self.detached.append(session)
+
+        broker = _Broker()
+        service = BrowserNetworkInsightService(cdp_session_broker=broker)
+
+        payload = service.execute(
+            page=_Page(),
+            payload={
+                "include_cdp_tree": True,
+                "include_performance_metrics": True,
+            },
+        )
+
+        self.assertEqual(len(broker.detached), 1)
+        self.assertEqual(payload["errors"][0]["source"], "Performance.getMetrics")
 
     def test_emulation_set_applies_target_scoped_cdp_overrides(self) -> None:
         command = BrowserPageActionCommand(

@@ -209,6 +209,59 @@ class BrowserProfileAllocatorTestCase(unittest.TestCase):
             ["tab-1"],
         )
 
+    def test_allocator_recycles_only_released_allocation_targets(self) -> None:
+        class _Recycler:
+            def __init__(self) -> None:
+                self.closed: list[tuple[str, str]] = []
+
+            def close_owned_target(self, *, profile_name: str, target_id: str) -> None:
+                self.closed.append((profile_name, target_id))
+
+        recycler = _Recycler()
+        allocator = BrowserProfileAllocatorService(
+            allocation_store=self.allocation_store,
+            pool_store=self.pool_store,
+            system_config_store=self.system_store,
+            runtime_state_store=self.runtime_store,
+            target_recycler=recycler,
+        )
+        current_time = datetime.now(timezone.utc)
+        first = allocator.allocate(
+            profile_name="crawler-a",
+            consumer_kind="manual",
+            consumer_id="manual-a",
+            now=current_time,
+        )
+        second = allocator.allocate(
+            profile_name="crawler-b",
+            consumer_kind="manual",
+            consumer_id="manual-b",
+            now=current_time,
+        )
+        allocator.remember_allocation_target(
+            allocation_id=first.allocation_id,
+            target_id="tab-shared",
+        )
+        allocator.remember_allocation_target(
+            allocation_id=second.allocation_id,
+            target_id="tab-shared",
+        )
+
+        allocator.release_allocation(
+            allocation_id=first.allocation_id,
+            reason="done",
+            now=current_time + timedelta(seconds=5),
+        )
+
+        self.assertEqual(recycler.closed, [("crawler-a", "tab-shared")])
+        still_active = self.allocation_store.get_allocation(
+            allocation_id=second.allocation_id,
+        )
+        self.assertIsNotNone(still_active)
+        assert still_active is not None
+        self.assertEqual(still_active.status, "active")
+        self.assertEqual(still_active.owned_target_ids, ("tab-shared",))
+
     def test_allocator_honors_profile_target_cleanup_policy(self) -> None:
         class _Recycler:
             def __init__(self) -> None:

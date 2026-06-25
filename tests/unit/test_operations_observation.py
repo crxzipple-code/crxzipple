@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
+from threading import Event as StopEvent
 import unittest
 
 from sqlalchemy import create_engine
@@ -15,15 +16,18 @@ from crxzipple.modules.events import EventsApplicationService, InMemoryEventsBac
 from crxzipple.modules.events.domain import EventTopicRecord
 from crxzipple.modules.browser.application.events import BROWSER_OPERATION_EVENT_NAMES
 from crxzipple.modules.memory.application.events import MEMORY_OPERATION_EVENT_NAMES
-from crxzipple.app.assembly.event_runtime import OPERATIONS_STATE_PROJECTION_MODULES
-from crxzipple.modules.operations.application.observation import (
+from crxzipple.app.assembly.event_runtime import (
+    OPERATIONS_STATE_PROJECTION_MODULES,
+    _projection_modules_from_records,
+)
+from crxzipple.modules.operations.application.observation_models import (
     OperationsModuleObservation,
     OperationsObserverHeartbeat,
     OperationsObservedEvent,
     OperationsObservationSnapshot,
     OperationsProjection,
-    observed_event_from_record,
 )
+from crxzipple.modules.operations.application.observation_event_projection import observed_event_from_record
 from crxzipple.modules.operations.application.projections import (
     OPERATIONS_PROJECTION_MODULES,
     OPERATIONS_PROJECTION_INVALIDATED_EVENT,
@@ -43,11 +47,15 @@ from crxzipple.modules.operations.application.read_models.skills import (
 )
 from crxzipple.modules.operations.application.read_models.events import (
     EventsOperationsReadModelProvider,
-    _health as events_operations_health,
 )
-from crxzipple.modules.operations.application.runtime import (
-    OperationsObserverRuntimeService,
+from crxzipple.modules.operations.application.read_models.events_page_projection import (
+    events_health as events_operations_health,
+)
+from crxzipple.modules.operations.application.observer_event_names import (
     operations_observer_event_names,
+)
+from crxzipple.modules.operations.application.observer_runtime_service import (
+    OperationsObserverRuntimeService,
 )
 from crxzipple.modules.skills.application.events import (
     SKILL_DRAFT_APPLIED_EVENT,
@@ -63,12 +71,11 @@ from crxzipple.modules.access.application.events import (
     ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
     ACCESS_OPERATION_EVENT_NAMES,
 )
-from crxzipple.modules.operations.infrastructure import (
+from crxzipple.modules.operations.infrastructure.observation_store import (
     FileBackedOperationsObservationStore,
 )
 from crxzipple.modules.orchestration.domain import (
     ExecutionChain,
-    ExecutionChainStatus,
     ExecutionOwnerReference,
     ExecutionStep,
     ExecutionStepItem,
@@ -87,7 +94,7 @@ from crxzipple.modules.operations.infrastructure.persistence import (
     SqlAlchemyOperationsActionAuditStore,
     SqlAlchemyOperationsProjectionStore,
 )
-from crxzipple.modules.operations.interfaces.http import (
+from crxzipple.modules.operations.interfaces.http_action_audit import (
     _operations_action_audit_payload,
     _validated_operations_action,
 )
@@ -327,6 +334,74 @@ class OperationsObservationTestCase(unittest.TestCase):
 
         self.assertNotIn(OPERATIONS_PROJECTION_INVALIDATED_EVENT, names)
 
+    def test_projection_scheduler_skips_observation_only_noise(self) -> None:
+        timestamp = datetime(2026, 6, 23, 9, 0, tzinfo=timezone.utc)
+        records = (
+            EventTopicRecord(
+                cursor="1",
+                envelope=Event(
+                    name="orchestration.executor.lease.heartbeated",
+                    payload={"worker_id": "worker-1", "status": "online"},
+                    occurred_at=timestamp,
+                ),
+            ),
+            EventTopicRecord(
+                cursor="2",
+                envelope=Event(
+                    name="memory.engine.readiness_observed",
+                    payload={"status": "ready"},
+                    occurred_at=timestamp,
+                ),
+            ),
+            EventTopicRecord(
+                cursor="3",
+                envelope=Event(
+                    name="llm.invocation_succeeded",
+                    payload={
+                        "invocation_id": "llm-1",
+                        "run_id": "run-1",
+                        "status": "succeeded",
+                    },
+                    occurred_at=timestamp,
+                ),
+            ),
+        )
+
+        modules = _projection_modules_from_records(
+            records,
+            definition_registry=build_event_definition_registry(),
+        )
+
+        self.assertEqual(modules, ("llm",))
+
+    def test_projection_scheduler_maps_observed_modules_to_projection_modules(self) -> None:
+        timestamp = datetime(2026, 6, 23, 9, 0, tzinfo=timezone.utc)
+        records = (
+            EventTopicRecord(
+                cursor="1",
+                envelope=Event(
+                    name="browser.operation.completed",
+                    payload={"status": "completed"},
+                    occurred_at=timestamp,
+                ),
+            ),
+            EventTopicRecord(
+                cursor="2",
+                envelope=Event(
+                    name="session.item.appended",
+                    payload={"status": "appended"},
+                    occurred_at=timestamp,
+                ),
+            ),
+        )
+
+        modules = _projection_modules_from_records(
+            records,
+            definition_registry=build_event_definition_registry(),
+        )
+
+        self.assertEqual(modules, ("browser", "daemon"))
+
     def test_operations_observer_runs_maintenance_after_processing_events(self) -> None:
         events = EventsApplicationService(InMemoryEventsBackend())
         topic = named_event_topic("operations.maintenance.test")
@@ -359,6 +434,44 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(processed, 1)
         self.assertEqual(len(handled), 1)
         self.assertGreaterEqual(len(maintenance_calls), 1)
+
+    def test_observer_runtime_records_processed_heartbeat_before_maintenance(
+        self,
+    ) -> None:
+        events = EventsApplicationService(InMemoryEventsBackend())
+        topic = named_event_topic("operations.heartbeat.order.test")
+        events.publish(
+            Event(
+                name="operations.heartbeat.order.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.heartbeat.order.test"},
+            ),
+        )
+        calls: list[str] = []
+        runtime = OperationsObserverRuntimeService(
+            events_service=events,
+            heartbeat_handler=lambda heartbeat: calls.append(
+                f"heartbeat:{heartbeat.status}:{heartbeat.processed_events}",
+            ),
+            maintenance_handler=lambda: calls.append("maintenance"),
+        )
+        runtime.subscribe_topic(
+            topic,
+            subscription_id="operations.heartbeat.order.test",
+            handler=lambda record: None,
+        )
+
+        processed = runtime.run_until_stopped(
+            worker_id="maintenance-test",
+            poll_interval_seconds=0.01,
+            max_events=1,
+        )
+
+        self.assertEqual(processed, 1)
+        processed_heartbeat_index = calls.index("heartbeat:running:1")
+        maintenance_index = calls.index("maintenance")
+        self.assertLess(processed_heartbeat_index, maintenance_index)
 
     def test_operations_observer_can_start_new_subscription_at_topic_tail(self) -> None:
         events = EventsApplicationService(InMemoryEventsBackend())
@@ -446,12 +559,20 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(restarted_runtime.process_available_events(), 2)
         self.assertEqual(replayed, ["second", "third"])
 
-    def test_operations_state_projection_maintenance_covers_all_modules(self) -> None:
+    def test_operations_state_projection_maintenance_excludes_high_cardinality_events(
+        self,
+    ) -> None:
         self.assertEqual(
             OPERATIONS_STATE_PROJECTION_MODULES,
-            OPERATIONS_PROJECTION_MODULES,
+            tuple(
+                module
+                for module in OPERATIONS_PROJECTION_MODULES
+                if module not in {"context_workspace", "events"}
+            ),
         )
         self.assertIn("browser", OPERATIONS_STATE_PROJECTION_MODULES)
+        self.assertNotIn("context_workspace", OPERATIONS_STATE_PROJECTION_MODULES)
+        self.assertNotIn("events", OPERATIONS_STATE_PROJECTION_MODULES)
 
     def test_events_operations_health_treats_stuck_consumers_as_warning(self) -> None:
         health = events_operations_health(
@@ -1106,7 +1227,36 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(payload["kinds"], ["page", "overview"])
         self.assertEqual(payload["source"], "operations-observer")
 
-    def test_materializer_maps_skill_events_to_skills_and_events_projections(
+    def test_projection_materializer_logs_page_failures_without_reserved_fields(
+        self,
+    ) -> None:
+        projection_store = _FakeProjectionStore()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FailingToolPageSourceProvider(),
+            projection_store=projection_store,
+        )
+
+        materialized = materializer.materialize_modules(("tool",))
+
+        self.assertEqual(materialized, 0)
+        self.assertEqual(projection_store.records, {})
+
+    def test_projection_materializer_ignores_invalidation_publish_failures(
+        self,
+    ) -> None:
+        projection_store = _FakeProjectionStore()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=projection_store,
+            events_service=_FailingPublishEventsService(),
+        )
+
+        materialized = materializer.materialize_modules(("orchestration",))
+
+        self.assertEqual(materialized, 1)
+        self.assertIn(("orchestration", "page"), projection_store.records)
+
+    def test_materializer_maps_skill_events_to_skills_projection(
         self,
     ) -> None:
         store = self._projection_store()
@@ -1117,17 +1267,32 @@ class OperationsObservationTestCase(unittest.TestCase):
 
         materialized = materializer.materialize_observed_modules(("skills",))
 
-        self.assertEqual(materialized, 2)
+        self.assertEqual(materialized, 1)
         skills_page = store.get_projection(module="skills", kind="page")
         events_page = store.get_projection(module="events", kind="page")
         self.assertIsNotNone(skills_page)
-        self.assertIsNotNone(events_page)
+        self.assertIsNone(events_page)
         assert skills_page is not None
-        assert events_page is not None
         self.assertEqual(skills_page.payload["module"], "skills")
+
+    def test_materializer_maps_events_events_to_events_projection(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_observed_modules(("events",))
+
+        self.assertEqual(materialized, 1)
+        events_page = store.get_projection(module="events", kind="page")
+        self.assertIsNotNone(events_page)
+        assert events_page is not None
         self.assertEqual(events_page.payload["module"], "events")
 
-    def test_materializer_maps_browser_events_to_browser_daemon_and_events(
+    def test_materializer_maps_browser_events_to_browser_and_daemon(
         self,
     ) -> None:
         store = self._projection_store()
@@ -1138,19 +1303,59 @@ class OperationsObservationTestCase(unittest.TestCase):
 
         materialized = materializer.materialize_observed_modules(("browser",))
 
-        self.assertEqual(materialized, 3)
+        self.assertEqual(materialized, 2)
         browser_page = store.get_projection(module="browser", kind="page")
         daemon_page = store.get_projection(module="daemon", kind="page")
         events_page = store.get_projection(module="events", kind="page")
         self.assertIsNotNone(browser_page)
         self.assertIsNotNone(daemon_page)
-        self.assertIsNotNone(events_page)
+        self.assertIsNone(events_page)
         assert browser_page is not None
         assert daemon_page is not None
-        assert events_page is not None
         self.assertEqual(browser_page.payload["module"], "browser")
         self.assertEqual(daemon_page.payload["module"], "daemon")
-        self.assertEqual(events_page.payload["module"], "events")
+
+    def test_materializer_does_not_refresh_context_workspace_for_orchestration_events(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_observed_modules(("orchestration",))
+
+        self.assertEqual(materialized, 1)
+        orchestration_page = store.get_projection(module="orchestration", kind="page")
+        context_workspace_page = store.get_projection(
+            module="context_workspace",
+            kind="page",
+        )
+        self.assertIsNotNone(orchestration_page)
+        self.assertIsNone(context_workspace_page)
+
+    def test_materializer_maps_context_workspace_events_to_context_workspace_projection(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_observed_modules(
+            ("context_workspace",),
+        )
+
+        self.assertEqual(materialized, 1)
+        context_workspace_page = store.get_projection(
+            module="context_workspace",
+            kind="page",
+        )
+        self.assertIsNotNone(context_workspace_page)
+        assert context_workspace_page is not None
+        self.assertEqual(context_workspace_page.payload["module"], "context_workspace")
 
     def test_observer_runtime_runs_maintenance_before_idle_wait(self) -> None:
         events_service = EventsApplicationService(InMemoryEventsBackend())
@@ -1202,9 +1407,10 @@ class OperationsObservationTestCase(unittest.TestCase):
             subscription_id="operations.observer.llm.invocation_succeeded.test",
             handler=lambda record: observed.append(record.envelope.event_name),
         )
+        runtime.process_available_events(event_driven=True)
         events_service.publish(Event(name="tool.run.succeeded", payload={"run_id": "tool-1"}))
         events_service.publish(Event(name="llm.invocation_succeeded", payload={"id": "llm-1"}))
-        runtime._wakeup_topics.add(named_event_topic("tool.run.succeeded"))
+        runtime.wait_for_events(timeout_seconds=0.01, stop_event=StopEvent())
 
         processed = runtime.process_available_events(event_driven=True)
 
@@ -2028,6 +2234,22 @@ class _FakeProjectionStore:
             del self.records[key]
             removed += 1
         return removed
+
+
+class _FailingToolPageSourceProvider:
+    def tool_page(self, query: object) -> object:
+        del query
+        raise RuntimeError("tool page unavailable")
+
+    def module_overview(self, module: str) -> object | None:
+        del module
+        return None
+
+
+class _FailingPublishEventsService:
+    def publish(self, event: Event) -> None:
+        del event
+        raise RuntimeError("publish unavailable")
 
 
 class _FakeOrchestrationRunQuery:

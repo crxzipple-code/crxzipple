@@ -93,10 +93,10 @@ class ToolRunRepository(Protocol):
     def get_many(self, run_ids: tuple[str, ...]) -> dict[str, ToolRun]:
         ...
 
-    def list(self) -> list[ToolRun]:
+    def list(self, *, limit: int | None = None) -> list[ToolRun]:
         ...
 
-    def list_for_tool(self, tool_id: str) -> list[ToolRun]:
+    def list_for_tool(self, tool_id: str, *, limit: int | None = None) -> list[ToolRun]:
         ...
 
     def list_for_orchestration_runs(self, run_ids: tuple[str, ...]) -> list[ToolRun]:

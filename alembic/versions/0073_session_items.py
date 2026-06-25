@@ -48,7 +48,7 @@ def upgrade() -> None:
         "ix_session_items_session_sequence",
         "session_items",
         ["session_key", "session_id", "sequence_no"],
-        unique=False,
+        unique=True,
     )
     op.create_index(
         "ix_session_items_source",

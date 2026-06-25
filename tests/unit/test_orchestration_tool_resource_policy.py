@@ -10,6 +10,7 @@ from crxzipple.modules.orchestration.application.engine_session_recorder import 
     SessionProtocolRecord,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import (
+    AskableEffect,
     ResolvedTool,
     ResolvedToolSet,
     ToolExecutionDecision,
@@ -20,6 +21,7 @@ from crxzipple.modules.tool.domain import (
     Tool,
     ToolExecutionPolicy,
     ToolExecutionTarget,
+    ToolMode,
     ToolRun,
     ToolRunResult,
 )
@@ -95,15 +97,38 @@ class _AllowingToolResolver:
         return ToolExecutionDecision(mode="allow")
 
 
+class _ApprovalAfterFirstToolResolver(_AllowingToolResolver):
+    def execution_decision(
+        self,
+        *_args: object,
+        **kwargs: object,
+    ) -> ToolExecutionDecision:
+        tool = kwargs.get("tool")
+        tool_id = getattr(tool, "id", "")
+        if tool_id == "approval.tool":
+            return ToolExecutionDecision(
+                mode="approval_required",
+                approval=AskableEffect(
+                    id="effect-approval-tool",
+                    label="Run approval tool",
+                    description="Approval test effect",
+                    tool_ids=("approval.tool",),
+                ),
+            )
+        return ToolExecutionDecision(mode="allow")
+
+
 class _RecordingToolExecutionPort:
     def __init__(
         self,
         *,
         result_metadata_by_tool_id: dict[str, dict[str, object]] | None = None,
+        queued_tool_ids: set[str] | None = None,
     ) -> None:
         self.batches: list[tuple[ExecuteToolInput, ...]] = []
         self._counter = 0
         self.result_metadata_by_tool_id = dict(result_metadata_by_tool_id or {})
+        self.queued_tool_ids = set(queued_tool_ids or set())
 
     async def execute(self, data: ExecuteToolInput) -> ToolRun:
         return (await self.execute_many((data,)))[0]
@@ -128,6 +153,10 @@ class _RecordingToolExecutionPort:
                 metadata=dict(item.metadata),
                 target=target,
             )
+            if item.tool_id in self.queued_tool_ids:
+                tool_run.queue()
+                runs.append(tool_run)
+                continue
             tool_run.succeed(
                 ToolRunResult.text(
                     "ok",
@@ -333,6 +362,53 @@ def test_repeated_command_probe_observation_is_recorded_in_run_metadata() -> Non
     assert "command_fingerprint" in repeated[0]
 
 
+def test_tool_probe_observation_uses_executor_port_boundary() -> None:
+    class RecordingProbeObservationPort:
+        def __init__(self) -> None:
+            self.records: list[tuple[str, str]] = []
+
+        def record_tool_call(
+            self,
+            run: OrchestrationRun,
+            *,
+            tool_id: str,
+            tool_call: ToolCallIntent,
+        ) -> None:
+            self.records.append((tool_id, tool_call.id))
+
+    recorder = RecordingProbeObservationPort()
+    executor, _execution_port, resolved_tools = _executor_for_tool(
+        tool_id="web.fetch_text",
+        execution_policy=ToolExecutionPolicy(
+            mutates_state=False,
+            supports_parallel=True,
+        ),
+    )
+    executor.probe_observation_recorder = recorder
+    run = _run()
+
+    asyncio.run(
+        executor.execute_tool_calls_async(
+            run,
+            session_key="agent:assistant:main",
+            active_session_id="session-1",
+            resolved_tools=resolved_tools,
+            tool_calls=(
+                ToolCallIntent(
+                    id="call-fetch-1",
+                    name="web.fetch_text",
+                    arguments={"url": "https://example.com/a"},
+                ),
+            ),
+            append_tool_call_messages=False,
+            append_tool_result_messages=False,
+        ),
+    )
+
+    assert recorder.records == [("web.fetch_text", "call-fetch-1")]
+    assert "repeated_probe_observation" not in run.metadata
+
+
 def test_unspecified_browser_profile_uses_wildcard_resource_key() -> None:
     executor, execution_port, resolved_tools = _executor_for_tool(
         tool_id="browser.click",
@@ -443,6 +519,118 @@ def test_terminal_context_tree_plan_stops_remaining_tool_batch() -> None:
     ] == ["call-plan-done"]
 
 
+def test_approval_required_flushes_prepared_tools_before_returning_pending_request() -> None:
+    recorder = _FakeSessionRecorder()
+    execution_port = _RecordingToolExecutionPort()
+    executor = OrchestrationEngineToolExecutor(
+        session_recorder=recorder,
+        tool_resolver=_ApprovalAfterFirstToolResolver(),
+        tool_execution_port=execution_port,
+    )
+    resolved_tools = ResolvedToolSet(
+        tools=(
+            _resolved_tool(
+                "allowed.tool",
+                execution_policy=ToolExecutionPolicy(),
+            ),
+            _resolved_tool(
+                "approval.tool",
+                execution_policy=ToolExecutionPolicy(),
+            ),
+        ),
+    )
+
+    outcome = asyncio.run(
+        executor.execute_tool_calls_async(
+            _run(),
+            session_key="agent:assistant:main",
+            active_session_id="session-1",
+            resolved_tools=resolved_tools,
+            tool_calls=(
+                ToolCallIntent(
+                    id="call-allowed",
+                    name="allowed.tool",
+                    arguments={"value": "ready"},
+                ),
+                ToolCallIntent(
+                    id="call-approval",
+                    name="approval.tool",
+                    arguments={"value": "needs approval"},
+                ),
+            ),
+            append_tool_call_messages=True,
+            append_tool_call_session_items=True,
+            append_tool_result_messages=True,
+        ),
+    )
+
+    assert [item.tool_id for batch in execution_port.batches for item in batch] == [
+        "allowed.tool",
+    ]
+    assert [run.tool_id for run in outcome.inline_runs] == ["allowed.tool"]
+    assert [run.tool_id for _call, run in outcome.background_runs] == []
+    assert outcome.pending_approval_request is not None
+    assert outcome.pending_approval_request.request_id == "call-approval"
+    assert outcome.pending_approval_request.tool_name == "approval.tool"
+    assert [
+        [tool_call.id for tool_call in batch]
+        for batch in recorder.tool_call_batches
+    ] == [["call-allowed"], ["call-approval"]]
+
+
+def test_queued_tool_run_is_recorded_as_background_without_result_session_item() -> None:
+    recorder = _FakeSessionRecorder()
+    execution_port = _RecordingToolExecutionPort(
+        queued_tool_ids={"background.tool"},
+    )
+    executor = OrchestrationEngineToolExecutor(
+        session_recorder=recorder,
+        tool_resolver=_AllowingToolResolver(),
+        tool_execution_port=execution_port,
+    )
+    resolved_tools = ResolvedToolSet(
+        tools=(
+            _resolved_tool(
+                "background.tool",
+                execution_policy=ToolExecutionPolicy(),
+                target=ToolExecutionTarget(mode=ToolMode.BACKGROUND),
+            ),
+        ),
+    )
+
+    outcome = asyncio.run(
+        executor.execute_tool_calls_async(
+            _run(),
+            session_key="agent:assistant:main",
+            active_session_id="session-1",
+            resolved_tools=resolved_tools,
+            tool_calls=(
+                ToolCallIntent(
+                    id="call-background",
+                    name="background.tool",
+                    arguments={"value": "queue"},
+                ),
+            ),
+            append_tool_call_messages=True,
+            append_tool_call_session_items=True,
+            append_tool_result_messages=True,
+        ),
+    )
+
+    assert outcome.inline_runs == ()
+    assert [(call.id, run.tool_id) for call, run in outcome.background_runs] == [
+        ("call-background", "background.tool"),
+    ]
+    assert outcome.tool_result_session_item_ids == ()
+    assert recorder.tool_result_batches == []
+    assert len(outcome.tool_run_links) == 1
+    link = outcome.tool_run_links[0]
+    assert link.tool_call_id == "call-background"
+    assert link.background is True
+    assert link.result_session_item_id is None
+    assert link.call_session_item_id == "tool-call-item-call-background"
+
+
 def test_cancelled_run_does_not_dispatch_tool_calls() -> None:
     executor, execution_port, resolved_tools = _executor_for_tool(
         tool_id="web.fetch_text",
@@ -551,6 +739,7 @@ def _resolved_tool(
     tool_id: str,
     *,
     execution_policy: ToolExecutionPolicy,
+    target: ToolExecutionTarget | None = None,
 ) -> ResolvedTool:
     tool = Tool(
         id=tool_id,
@@ -561,7 +750,7 @@ def _resolved_tool(
     return ResolvedTool(
         tool=tool,
         schema=ToolSchema(name=tool_id, description=tool.description),
-        target=ToolExecutionTarget(),
+        target=target or ToolExecutionTarget(),
     )
 
 

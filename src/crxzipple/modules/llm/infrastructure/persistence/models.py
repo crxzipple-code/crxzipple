@@ -80,6 +80,14 @@ class LlmInvocationModel(Base):
         nullable=False,
         default=dict,
     )
+    run_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    session_key: Mapped[str | None] = mapped_column(String(240), nullable=True, index=True)
+    active_session_id: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+        index=True,
+    )
     provider_request_payload_preview: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,

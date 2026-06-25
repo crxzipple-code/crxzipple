@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
-from crxzipple.modules.llm.domain.value_objects import (
+from crxzipple.modules.llm.domain import (
     LlmDefaults,
     LlmErrorPayload,
     LlmMessage,
@@ -186,6 +186,10 @@ class LlmErrorDTO:
 class LlmInvocationDTO:
     id: str
     llm_id: str
+    run_id: str | None
+    agent_id: str | None
+    session_key: str | None
+    active_session_id: str | None
     messages: tuple[LlmMessageDTO, ...]
     input_items: tuple[dict[str, object], ...]
     provider_context_messages: tuple[LlmMessageDTO, ...]
@@ -213,6 +217,10 @@ class LlmInvocationDTO:
         return cls(
             id=invocation.id,
             llm_id=invocation.llm_id,
+            run_id=invocation.run_id,
+            agent_id=invocation.agent_id,
+            session_key=invocation.session_key,
+            active_session_id=invocation.active_session_id,
             messages=tuple(
                 LlmMessageDTO.from_value(item) for item in invocation.messages
             ),

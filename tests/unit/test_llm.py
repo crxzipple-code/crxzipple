@@ -104,7 +104,7 @@ def test_profile_supports_provider_continuation_for_openai_responses() -> None:
     )
 
 
-def test_profile_supports_provider_continuation_for_codex_websocket_only() -> None:
+def test_profile_supports_provider_continuation_rejects_codex_websocket() -> None:
     profile = LlmProfile(
         id="profile-codex-websocket",
         provider=LlmProviderKind.OPENAI,
@@ -121,7 +121,7 @@ def test_profile_supports_provider_continuation_for_codex_websocket_only() -> No
         previous_response_id="resp_previous",
     )
 
-    assert profile_supports_provider_continuation(
+    assert not profile_supports_provider_continuation(
         profile=profile,
         continuation=continuation,
         provider_options={"provider_transport": "websocket"},
@@ -176,6 +176,22 @@ def test_provider_continuation_from_state_maps_provider_native_payload() -> None
     assert continuation.input_item_count == 2
     assert continuation.instructions_fingerprint == "instructions-1"
     assert continuation.tool_fingerprints == ("tool-a",)
+
+
+def test_provider_continuation_from_state_rejects_fallback_payload() -> None:
+    assert (
+        provider_continuation_from_state(
+            {
+                "mode": "provider_native",
+                "previous_response_id": "resp_previous",
+                "provider_family": LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
+                "transport": "websocket",
+                "fallback": True,
+                "fallback_reason": "websocket_continuation_failed_before_output",
+            },
+        )
+        is None
+    )
 
 
 def test_provider_continuation_from_state_rejects_invalid_payload() -> None:
@@ -417,6 +433,29 @@ class _FakeNativeStreamingLlmAdapter:
         )
 
 
+class _IncompleteStreamingLlmAdapter:
+    def stream_invoke(self, profile, request):  # noqa: ANN001
+        self.last_profile = profile
+        self.last_request = request
+        yield LlmStreamEvent(
+            type="text_delta",
+            sequence=1,
+            data={"text": "partial"},
+        )
+
+
+class _FailingStreamingLlmAdapter:
+    def stream_invoke(self, profile, request):  # noqa: ANN001
+        self.last_profile = profile
+        self.last_request = request
+        yield LlmStreamEvent(
+            type="text_delta",
+            sequence=1,
+            data={"text": "before failure"},
+        )
+        raise RuntimeError("stream adapter exploded")
+
+
 class _FakeAsyncLlmAdapter:
     async def invoke_async(self, profile, request: LlmAdapterRequest) -> LlmAdapterResponse:  # noqa: ANN001
         self.last_profile = profile
@@ -476,6 +515,59 @@ class _FakeAsyncStreamingLlmAdapter:
                     metadata={"adapter": "async-streaming-fake"},
                 ).to_payload(),
                 "provider_request_id": "async-stream-request-123",
+            },
+        )
+
+
+class _FakeAsyncNativeStreamingLlmAdapter:
+    async def stream_invoke_async(self, profile, request):  # noqa: ANN001
+        self.last_profile = profile
+        self.last_request = request
+        await asyncio.sleep(0)
+        yield LlmStreamEvent(
+            type="item_started",
+            sequence=1,
+            data={
+                "item_id": "async-native-item-1",
+                "provider_event_type": "response.output_item.added",
+                "provider_payload": {"type": "response.output_item.added"},
+            },
+        )
+        await asyncio.sleep(0)
+        yield LlmStreamEvent(
+            type="completed",
+            sequence=2,
+            data={
+                "result": LlmResult(
+                    text="async native summary should be ignored",
+                    finish_reason="completed",
+                ).to_payload(),
+                "response_items": [
+                    LlmResponseItem(
+                        id=f"{request.invocation_id}:async-native:item:1",
+                        invocation_id=request.invocation_id,
+                        sequence_no=1,
+                        kind=LlmResponseItemKind.TOOL_CALL,
+                        role=LlmMessageRole.ASSISTANT,
+                        phase=LlmMessagePhase.COMMENTARY,
+                        content_payload={
+                            "call_id": "call-async-native-1",
+                            "tool_name": "search_docs",
+                            "arguments": {"query": "async-native"},
+                        },
+                        provider_item_id="async-native-item-1",
+                        provider_item_type="function_call",
+                        call_id="call-async-native-1",
+                        tool_name="search_docs",
+                    ).to_payload(),
+                ],
+                "continuation": LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                    provider_payload={"status": "completed"},
+                ).to_payload(),
+                "provider_request_id": "async-native-stream-request-123",
             },
         )
 
@@ -704,6 +796,10 @@ class LlmServiceTestCase(unittest.TestCase):
         invocation = LlmInvocation(
             id="inv-response-items",
             llm_id=profile.id,
+            run_id="run-response-items",
+            agent_id="agent-response-items",
+            session_key="session:response-items",
+            active_session_id="session-instance-response-items",
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -756,8 +852,17 @@ class LlmServiceTestCase(unittest.TestCase):
         fetched = self.service.get_invocation(invocation.id)
         fetched_item = self.service.get_response_item(response_item.id)
         events = self.service.list_response_events(invocation.id)
+        run_invocations = self.service.list_invocations(run_id="run-response-items")
 
         self.assertEqual(fetched.response_items[0].id, response_item.id)
+        self.assertEqual(fetched.run_id, "run-response-items")
+        self.assertEqual(fetched.agent_id, "agent-response-items")
+        self.assertEqual(fetched.session_key, "session:response-items")
+        self.assertEqual(
+            fetched.active_session_id,
+            "session-instance-response-items",
+        )
+        self.assertEqual([item.id for item in run_invocations], [invocation.id])
         self.assertEqual(fetched_item.id, response_item.id)
         self.assertEqual(fetched_item.invocation_id, invocation.id)
         self.assertEqual(fetched.response_items[0].phase, LlmMessagePhase.FINAL_ANSWER)
@@ -1389,6 +1494,105 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(stored.result.tool_calls[0].name, "search_docs")
         self.assertEqual(stored.continuation.reason, LlmContinuationReason.TOOL_CALL)
 
+    def test_stream_invoke_fails_incomplete_stream_without_completed_event(self) -> None:
+        registry = LlmAdapterRegistry()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, _IncompleteStreamingLlmAdapter())
+        service = LlmApplicationService(self.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="incomplete-stream-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        events = list(
+            service.stream_invoke(
+                StreamLlmInput(
+                    llm_id=profile.id,
+                    messages=(
+                        LlmMessage(
+                            role=LlmMessageRole.USER,
+                            content="Stream without completed event.",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["invocation_started", "text_delta", "failed"],
+        )
+        invocation_id = events[0].invocation_id
+        stored = service.get_invocation(invocation_id)
+        self.assertEqual(stored.status.value, "failed")
+        self.assertIsNotNone(stored.error)
+        assert stored.error is not None
+        self.assertEqual(stored.error.code, "stream_incomplete")
+        self.assertEqual(
+            stored.error.message,
+            "Streaming llm invocation ended before completion.",
+        )
+        response_events = service.list_response_events(invocation_id)
+        self.assertEqual(
+            [event.type for event in response_events],
+            [
+                LlmResponseEventType.INVOCATION_STARTED,
+                LlmResponseEventType.TEXT_DELTA,
+                LlmResponseEventType.FAILED,
+            ],
+        )
+
+    def test_stream_invoke_records_adapter_failure_after_partial_output(self) -> None:
+        registry = LlmAdapterRegistry()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, _FailingStreamingLlmAdapter())
+        service = LlmApplicationService(self.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="failing-stream-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        events = list(
+            service.stream_invoke(
+                StreamLlmInput(
+                    llm_id=profile.id,
+                    messages=(
+                        LlmMessage(
+                            role=LlmMessageRole.USER,
+                            content="Stream and then fail.",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["invocation_started", "text_delta", "failed"],
+        )
+        invocation_id = events[0].invocation_id
+        stored = service.get_invocation(invocation_id)
+        self.assertEqual(stored.status.value, "failed")
+        self.assertIsNotNone(stored.error)
+        assert stored.error is not None
+        self.assertEqual(stored.error.code, "adapter_error")
+        self.assertEqual(stored.error.message, "stream adapter exploded")
+        response_events = service.list_response_events(invocation_id)
+        self.assertEqual(
+            [event.type for event in response_events],
+            [
+                LlmResponseEventType.INVOCATION_STARTED,
+                LlmResponseEventType.TEXT_DELTA,
+                LlmResponseEventType.FAILED,
+            ],
+        )
+
     def test_invoke_async_uses_async_adapter_and_persists_result(self) -> None:
         registry = LlmAdapterRegistry()
         adapter = _FakeAsyncLlmAdapter()
@@ -1515,3 +1719,93 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(stored.status.value, "succeeded")
         self.assertEqual(stored.result.text, "hello from async streaming adapter")
         self.assertEqual(stored.provider_request_id, "async-stream-request-123")
+
+    def test_stream_invoke_async_can_bridge_sync_stream_adapter(self) -> None:
+        registry = LlmAdapterRegistry()
+        adapter = _FakeStreamingLlmAdapter()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, adapter)
+        service = LlmApplicationService(self.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="sync-stream-bridge",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        async def _collect_events():
+            return [
+                event
+                async for event in service.stream_invoke_async(
+                    StreamLlmInput(
+                        llm_id=profile.id,
+                        messages=(
+                            LlmMessage(
+                                role=LlmMessageRole.USER,
+                                content="Bridge sync stream.",
+                            ),
+                        ),
+                    ),
+                )
+            ]
+
+        events = asyncio.run(_collect_events())
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["invocation_started", "text_delta", "completed"],
+        )
+        self.assertEqual(events[1].data["text"], "hello ")
+        stored = service.get_invocation(events[0].invocation_id)
+        self.assertEqual(stored.status.value, "succeeded")
+        self.assertEqual(stored.result.text, "hello from streaming adapter")
+        self.assertEqual(stored.provider_request_id, "stream-request-123")
+        self.assertEqual(adapter.last_profile.id, "sync-stream-bridge")
+
+    def test_stream_invoke_async_persists_response_items_and_continuation(self) -> None:
+        registry = LlmAdapterRegistry()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, _FakeAsyncNativeStreamingLlmAdapter())
+        service = LlmApplicationService(self.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="async-native-stream-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        async def _collect_events():
+            return [
+                event
+                async for event in service.stream_invoke_async(
+                    StreamLlmInput(
+                        llm_id=profile.id,
+                        messages=(
+                            LlmMessage(
+                                role=LlmMessageRole.USER,
+                                content="Use async native stream.",
+                            ),
+                        ),
+                    ),
+                )
+            ]
+
+        events = asyncio.run(_collect_events())
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["invocation_started", "item_started", "completed"],
+        )
+        stored = service.get_invocation(events[0].invocation_id)
+        self.assertEqual(stored.status.value, "succeeded")
+        self.assertEqual(stored.provider_request_id, "async-native-stream-request-123")
+        self.assertEqual(len(stored.response_items), 1)
+        self.assertEqual(stored.response_items[0].kind, LlmResponseItemKind.TOOL_CALL)
+        self.assertEqual(stored.response_items[0].call_id, "call-async-native-1")
+        self.assertEqual(stored.result.text, None)
+        self.assertEqual(stored.result.tool_calls[0].id, "call-async-native-1")
+        self.assertEqual(stored.result.tool_calls[0].name, "search_docs")
+        self.assertEqual(stored.continuation.reason, LlmContinuationReason.TOOL_CALL)
+        self.assertTrue(stored.continuation.needs_follow_up)

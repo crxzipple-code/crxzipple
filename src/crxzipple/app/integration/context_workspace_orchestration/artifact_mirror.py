@@ -15,6 +15,23 @@ _MAX_LLM_FILE_BYTES = 4_000_000
 _MAX_LLM_TEXT_FILE_CHARS = 24_000
 
 
+class ArtifactMirrorAdapter:
+    def __init__(self, artifact_service: object | None = None) -> None:
+        self._artifact_service = artifact_service
+
+    def content_blocks(
+        self,
+        provider_attachments: dict[str, object],
+        *,
+        allow_vision: bool = True,
+    ) -> tuple[dict[str, object], ...]:
+        return build_artifact_content_blocks(
+            provider_attachments,
+            artifact_service=self._artifact_service,
+            allow_vision=allow_vision,
+        )
+
+
 def build_artifact_content_blocks(
     provider_attachments: dict[str, object],
     *,

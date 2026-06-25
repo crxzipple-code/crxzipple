@@ -13,7 +13,7 @@ from crxzipple.modules.llm.domain import (
     LlmProviderKind,
     ToolSchema,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+from crxzipple.modules.llm.infrastructure.adapters.provider_message_common import (
     projected_input_items_from_messages,
 )
 from crxzipple.modules.llm.infrastructure.adapters.provider_request_preview import (
@@ -475,6 +475,95 @@ def test_openai_codex_renderer_websocket_uses_provider_native_delta() -> None:
     assert preview["previous_response_id"] == "resp_previous"
     assert preview["input_delta_mode"] is True
     assert preview["render_report"]["render_strategy"] == "provider_native_delta"
+
+
+def test_openai_codex_renderer_adds_runtime_context_without_breaking_delta() -> None:
+    renderer = _renderer()
+    profile = _profile()
+    baseline_input_items = (
+        LlmInputItem(
+            kind=LlmInputItemKind.MESSAGE,
+            payload={"role": "system", "content": "Runtime contract."},
+            source="context_slice",
+        ),
+        LlmInputItem(
+            kind=LlmInputItemKind.MESSAGE,
+            payload={"role": "user", "content": "Original task."},
+            source="session_item",
+        ),
+    )
+    baseline_request = LlmAdapterRequest(
+        invocation_id="inv-codex-baseline",
+        messages=(),
+        input_items=baseline_input_items,
+    )
+    baseline_items = renderer.build_full_input_items_input(
+        render_input=ProviderRenderInput.from_request(
+            profile=profile,
+            request=baseline_request,
+        ),
+    )
+    request = LlmAdapterRequest(
+        invocation_id="inv-codex-runtime-context",
+        messages=(),
+        input_items=(
+            *baseline_input_items,
+            LlmInputItem(
+                kind=LlmInputItemKind.FUNCTION_CALL_OUTPUT,
+                payload={
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "hello",
+                },
+                source="session_item",
+            ),
+        ),
+        provider_transport="websocket",
+        runtime_context={
+            "current_step": 29,
+            "max_steps": 30,
+            "remaining_steps": 1,
+            "step_budget_status": "finalize_now",
+            "debug_body": "must not leak",
+        },
+        continuation=LlmProviderContinuation(
+            mode="provider_native",
+            previous_response_id="resp_previous",
+            input_item_fingerprints=openai_response_input_fingerprints(
+                baseline_items,
+            ),
+            instructions_fingerprint=openai_provider_payload_fingerprint(
+                "Runtime contract.",
+            ),
+            tool_fingerprints=(),
+        ),
+    )
+
+    rendered = renderer.render_websocket_create(
+        profile,
+        request,
+        endpoint="wss://chatgpt.example/backend-api/codex/responses",
+    )
+    preview = renderer.preview(profile, request)
+
+    assert rendered.payload["previous_response_id"] == "resp_previous"
+    assert rendered.payload["input"][0] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "hello",
+    }
+    runtime_item = rendered.payload["input"][1]
+    assert runtime_item["role"] == "user"
+    runtime_text = runtime_item["content"][0]["text"]
+    assert "- Step budget: 29/30 used; 1 remaining; status=finalize_now" in (
+        runtime_text
+    )
+    assert "finish with the best supported answer now" in runtime_text
+    assert "must not leak" not in runtime_text
+    assert preview["has_previous_response_id"] is True
+    assert preview["input_delta_mode"] is True
+    assert preview["input_delta_count"] == 2
+    assert preview["input_baseline_count"] == 2
 
 
 def test_openai_codex_renderer_websocket_allows_additive_tool_surface_delta() -> None:

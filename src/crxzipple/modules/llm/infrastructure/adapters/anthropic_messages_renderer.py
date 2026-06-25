@@ -5,12 +5,12 @@ from typing import Any
 
 from crxzipple.modules.llm.application.adapters import LlmAdapterRequest
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmInputItemKind
+from crxzipple.modules.llm.domain import LlmInputItemKind
 from crxzipple.modules.llm.infrastructure.adapters.adapter_utils import (
     coerce_text_content,
     default_base_url,
 )
-from crxzipple.modules.llm.infrastructure.adapters.provider_message_projection import (
+from crxzipple.modules.llm.infrastructure.adapters.provider_anthropic_message_projection import (
     anthropic_messages,
 )
 from crxzipple.modules.llm.infrastructure.adapters.http_helpers import join_url

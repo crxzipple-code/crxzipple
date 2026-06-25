@@ -243,6 +243,22 @@ export interface WorkbenchRunHeader {
   };
   trace: UiTraceContext;
   actions: UiRuntimeAction[];
+  projection_diagnostics?: WorkbenchProjectionDiagnostics | null;
+}
+
+export interface WorkbenchProjectionDiagnostics {
+  owner_sources: WorkbenchOwnerFactSource[];
+  owner_call_sources: string[];
+  owner_call_count: number;
+  processed_item_count: number;
+  timeline_item_count: number;
+  elapsed_ms: number;
+}
+
+export interface WorkbenchOwnerFactSource {
+  module: string;
+  facts: string[];
+  read_path: string;
 }
 
 export interface WorkbenchTurnSummary {
@@ -440,6 +456,21 @@ export interface OperationsTab {
   tone?: UiTone;
 }
 
+export interface OperationsOwnerFactSource {
+  module: string;
+  facts: string[];
+  read_path: string;
+}
+
+export interface OperationsProjectionDiagnostics {
+  module: string;
+  owner_sources: OperationsOwnerFactSource[];
+  owner_call_count: number;
+  processed_item_count: number;
+  elapsed_ms: number;
+  freshness_at?: string | null;
+}
+
 export interface OperationsPageBase {
   module: RuntimeModuleId;
   title: string;
@@ -452,6 +483,7 @@ export interface OperationsPageBase {
   tabs: OperationsTab[];
   active_tab: string;
   trace?: UiTraceContext;
+  projection_diagnostics?: OperationsProjectionDiagnostics | null;
   actions: UiRuntimeAction[];
 }
 

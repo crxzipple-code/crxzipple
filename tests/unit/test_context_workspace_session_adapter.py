@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
 from crxzipple.app.integration.context_workspace_session import (
     SessionContextNodeProvider,
-    _evidence_type,
+)
+from crxzipple.app.integration.context_workspace_session_evidence import (
+    evidence_type,
 )
 from crxzipple.modules.context_workspace.application import (
     ContextActionInput,
@@ -784,9 +786,7 @@ def test_session_adapter_does_not_infer_current_run_frontier_without_execution_f
                 "tool_call_id": "call-current",
                 "status": "succeeded",
                 "metadata": {
-                    "browser_evidence": {
-                        "verified_ref": "current-ref",
-                    },
+                    "verified_ref": "current-ref",
                 },
                 "content": [
                     {
@@ -1251,18 +1251,16 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_context_budget() ->
                     },
                     "metadata": {
                         "artifact_ids": [f"artifact-browser-body-{index}"],
-                        "browser_evidence": {
-                            "request_id": f"req-browser-{index}",
-                            "payload_shape": {
-                                "depCityCode": "str",
-                                "arrCityCode": "str",
-                            },
-                            "result_shape": {
-                                "data": {
-                                    "flightItems": {
-                                        "type": "list",
-                                        "count": index,
-                                    },
+                        "request_id": f"req-browser-{index}",
+                        "payload_shape": {
+                            "depCityCode": "str",
+                            "arrCityCode": "str",
+                        },
+                        "result_shape": {
+                            "data": {
+                                "flightItems": {
+                                    "type": "list",
+                                    "count": index,
                                 },
                             },
                         },
@@ -1533,28 +1531,26 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
                     "body_removed_from_details": True,
                 },
                 "metadata": {
-                    "browser_host_service_key": "host:browser:crxzipple",
-                    "browser_profile": "crxzipple",
-                    "browser_target_id": "tab-east",
+                    "host_service_key": "host:browser:crxzipple",
+                    "profile": "crxzipple",
+                    "target_id": "tab-east",
                     "artifact_ids": ["artifact-network-body"],
-                    "browser_evidence": {
-                        "payload_shape": {
-                            "depCityCode": "str",
-                            "arrCityCode": "str",
-                        },
-                        "result_shape": {
-                            "data": {
-                                "flightItems": {
-                                    "type": "list",
-                                    "count": 35,
-                                    "item": {"flightSort": {"price": "int"}},
-                                },
+                    "payload_shape": {
+                        "depCityCode": "str",
+                        "arrCityCode": "str",
+                    },
+                    "result_shape": {
+                        "data": {
+                            "flightItems": {
+                                "type": "list",
+                                "count": 35,
+                                "item": {"flightSort": {"price": "int"}},
                             },
                         },
-                        "runtime_globals": ["$nuxt", "__NUXT__"],
-                        "verified_ref": "ref-flight-date",
-                        "request_id": "req-east-1",
                     },
+                    "runtime_globals": ["$nuxt", "__NUXT__"],
+                    "verified_ref": "ref-flight-date",
+                    "request_id": "req-east-1",
                 },
                 "content": [
                     {
@@ -1629,7 +1625,6 @@ def test_session_adapter_renders_tool_result_envelope_refs() -> None:
                 "content": [{"type": "text", "text": "short preview"}],
                 "metadata": {
                     "artifact_ids": ["artifact-large-result"],
-                    "browser_evidence": {},
                     TOOL_RESULT_ENVELOPE_METADATA_KEY: {
                         "status": "ok",
                         "summary": "Large result was externalized.",
@@ -1699,7 +1694,7 @@ def test_session_adapter_renders_tool_result_envelope_refs() -> None:
 
 def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None:
     assert (
-        _evidence_type(
+        evidence_type(
             tool_name="browser.network.fetch_as_page",
             status="succeeded",
             facts={"kind": "network-fetch-as-page", "result_shape": {"data": "dict"}},
@@ -1707,7 +1702,7 @@ def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None
         == "api_endpoint"
     )
     assert (
-        _evidence_type(
+        evidence_type(
             tool_name="browser.runtime.evaluate",
             status="succeeded",
             facts={"result_shape": {"value": "dict"}},
@@ -1715,7 +1710,7 @@ def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None
         == "result_shape"
     )
     assert (
-        _evidence_type(
+        evidence_type(
             tool_name="browser.runtime.evaluate",
             status="succeeded",
             facts={"payload_shape": {"depCityCode": "str"}},
@@ -1723,7 +1718,7 @@ def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None
         == "payload_shape"
     )
     assert (
-        _evidence_type(
+        evidence_type(
             tool_name="browser.click",
             status="succeeded",
             facts={"selector": "#submit"},
@@ -1731,7 +1726,7 @@ def test_evidence_type_classifies_api_shape_and_verified_browser_facts() -> None
         == "observation"
     )
     assert (
-        _evidence_type(
+        evidence_type(
             tool_name="browser.click",
             status="failed",
             facts={"selector": "#submit"},
@@ -1786,13 +1781,13 @@ def test_evidence_ledger_honors_explicit_superseded_lifecycle() -> None:
                     "kind": "network-fetch-as-page",
                     "endpoint": "/old",
                     "method": "POST",
-                    "lifecycle_status": "superseded",
-                    "superseded_by_tool_call_id": "call-new-endpoint",
+                    "tool_lifecycle": {
+                        "lifecycle_status": "superseded",
+                        "superseded_by_tool_call_id": "call-new-endpoint",
+                    },
                 },
                 "metadata": {
-                    "browser_evidence": {
-                        "payload_shape": {"old": "str"},
-                    },
+                    "payload_shape": {"old": "str"},
                 },
                 "content": [{"type": "text", "text": "old endpoint worked"}],
             },
@@ -2009,8 +2004,10 @@ def test_session_adapter_renders_explicit_superseded_tool_interaction_lifecycle(
                 "tool_call_id": "call-old-endpoint",
                 "status": "succeeded",
                 "metadata": {
-                    "superseded": True,
-                    "superseded_by_tool_call_id": "call-new-endpoint",
+                    "tool_lifecycle": {
+                        "superseded": True,
+                        "superseded_by_tool_call_id": "call-new-endpoint",
+                    },
                 },
                 "content": [
                     {
@@ -2100,9 +2097,7 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
                 "tool_run_id": "tool-run-old-endpoint",
                 "status": "succeeded",
                 "metadata": {
-                    "browser_evidence": {
-                        "payload_shape": {"query": "str"},
-                    },
+                    "payload_shape": {"query": "str"},
                 },
                 "content": [{"type": "text", "text": "old endpoint response"}],
             },
@@ -2210,9 +2205,7 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
                 "tool_run_id": "tool-run-old-endpoint",
                 "status": "succeeded",
                 "metadata": {
-                    "browser_evidence": {
-                        "payload_shape": {"query": "str"},
-                    },
+                    "payload_shape": {"query": "str"},
                 },
                 "content": [{"type": "text", "text": "old endpoint response"}],
             },

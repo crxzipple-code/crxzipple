@@ -4,6 +4,23 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class OperationsOwnerFactSourceModel:
+    module: str
+    facts: tuple[str, ...]
+    read_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class OperationsProjectionDiagnosticsModel:
+    module: str
+    owner_sources: tuple[OperationsOwnerFactSourceModel, ...]
+    owner_call_count: int
+    processed_item_count: int
+    elapsed_ms: float
+    freshness_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MetricCardModel:
     id: str
     label: str

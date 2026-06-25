@@ -329,14 +329,19 @@ class AuthorizationApplicationService:
         repository = self.temporary_grant_repository_factory()
         run_id = str(context_attrs.get("run_id", "")).strip()
         session_key = str(context_attrs.get("session_key", "")).strip()
+        agent_id = str(context_attrs.get("agent_id", "")).strip()
         tool_ids: set[str] = set()
         effect_ids: set[str] = set()
         if run_id:
             for grant in repository.list_for_run(run_id):
+                if not _grant_matches_agent(grant, agent_id):
+                    continue
                 tool_ids.update(grant.tool_ids)
                 effect_ids.update(grant.effect_ids)
         if session_key:
             for grant in repository.list_for_session(session_key):
+                if not _grant_matches_agent(grant, agent_id):
+                    continue
                 tool_ids.update(grant.tool_ids)
                 effect_ids.update(grant.effect_ids)
         return GrantedAuthorizationPayload(
@@ -784,10 +789,10 @@ class AuthorizationApplicationService:
                 actor_id=(actor_id or "").strip() or None,
                 target_policy_id=(target_policy_id or "").strip() or None,
                 reason=reason.strip(),
-                before_payload=dict(before_payload or {}),
-                after_payload=dict(after_payload or {}),
-                decision_payload=dict(decision_payload or {}),
-                metadata=dict(metadata or {}),
+                before_payload=_redact_audit_payload(before_payload or {}),
+                after_payload=_redact_audit_payload(after_payload or {}),
+                decision_payload=_redact_audit_payload(decision_payload or {}),
+                metadata=_redact_audit_payload(metadata or {}),
                 created_at=datetime.now(timezone.utc),
             ),
         )
@@ -825,6 +830,55 @@ def _run_grant_id(run_id: str, approval_request_id: str | None) -> str:
 def _session_grant_id(session_key: str, approval_request_id: str | None) -> str:
     request_id = (approval_request_id or "").strip() or "manual"
     return f"session:{session_key}:{request_id}"
+
+
+def _grant_matches_agent(grant: TemporaryAuthorizationGrant, agent_id: str) -> bool:
+    grant_agent_id = (grant.agent_id or "").strip()
+    if not grant_agent_id:
+        return True
+    return bool(agent_id) and grant_agent_id == agent_id
+
+
+_SENSITIVE_AUDIT_KEY_FRAGMENTS = (
+    "api_key",
+    "authorization",
+    "bearer",
+    "client_secret",
+    "cookie",
+    "credential",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+)
+_REDACTED_AUDIT_VALUE = "[redacted]"
+
+
+def _redact_audit_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        str(key): _redact_audit_value(str(key), value)
+        for key, value in dict(payload).items()
+    }
+
+
+def _redact_audit_value(key: str, value: Any) -> Any:
+    if _is_sensitive_audit_key(key):
+        return _REDACTED_AUDIT_VALUE
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_audit_value(str(child_key), child_value)
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_audit_value(key, item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_audit_value(key, item) for item in value)
+    return value
+
+
+def _is_sensitive_audit_key(key: str) -> bool:
+    normalized = key.strip().lower()
+    return any(fragment in normalized for fragment in _SENSITIVE_AUDIT_KEY_FRAGMENTS)
 
 
 def _policy_payload(policy: AuthorizationPolicy) -> dict[str, Any]:

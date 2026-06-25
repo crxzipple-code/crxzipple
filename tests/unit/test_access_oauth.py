@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
+import threading
 import unittest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
-from crxzipple.modules.access.application import oauth as oauth_module
-from crxzipple.modules.access.application.settings_integration import (
+import requests
+
+from crxzipple.modules.access.application import oauth_callback_listener as callback_module
+from crxzipple.modules.access.application.oauth_contracts import AccessOAuthSetupResult
+from crxzipple.modules.access.application.oauth_token_client import (
+    AccessOAuthTokenEndpointError,
+)
+from crxzipple.modules.access.application.settings_config_views import (
     AccessSettingsConfigProvider,
 )
+from crxzipple.modules.access.infrastructure.oauth_tokens import OAuthTokenDocument
 from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
@@ -43,6 +53,26 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.harness.close()
 
+    def test_oauth_setup_payload_redacts_secret_metadata(self) -> None:
+        result = AccessOAuthSetupResult(
+            session_id="oauthsetup-redaction",
+            provider_id="example-oauth",
+            flow_kind="browser_oauth",
+            metadata={
+                "code_verifier": "raw-verifier",
+                "device_code": "raw-device-code",
+                "access_token_hint": "raw-token",
+                "safe_label": "visible",
+            },
+        )
+
+        payload = result.to_payload()
+
+        self.assertEqual(payload["metadata"]["code_verifier"], "[redacted]")
+        self.assertEqual(payload["metadata"]["device_code"], "[redacted]")
+        self.assertEqual(payload["metadata"]["access_token_hint"], "[redacted]")
+        self.assertEqual(payload["metadata"]["safe_label"], "visible")
+
     def test_browser_oauth_setup_completes_account_and_binding(self) -> None:
         self.service.register_provider(
             provider_id="example-oauth",
@@ -61,7 +91,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
         assert session is not None
 
         with patch(
-            "crxzipple.modules.access.application.oauth.requests.post",
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
             return_value=_FakeOAuthResponse(
                 {
                     "access_token": "oauth-access-token",
@@ -109,6 +139,297 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
             "oauth-access-token",
         )
 
+    def test_refresh_account_updates_token_and_account_metadata(self) -> None:
+        self.service.register_provider(
+            provider_id="refresh-oauth",
+            display_name="Refresh OAuth",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            client_id="refresh-client",
+            callback_url="http://127.0.0.1:1455/callback",
+            default_scopes=("profile",),
+        )
+        setup = self.service.begin_browser_setup(provider_id="refresh-oauth")
+        session = self.access_governance_repository.get_setup_session(setup.session_id)
+        assert session is not None
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse(
+                {
+                    "access_token": "old-access-token",
+                    "refresh_token": "old-refresh-token",
+                    "expires_in": 30,
+                    "scope": "profile",
+                    "email": "refresh@example.test",
+                },
+            ),
+        ):
+            self.service.complete_browser_setup(
+                session_id=setup.session_id,
+                code="oauth-code",
+                state=str(session.metadata["state"]),
+                account_id="refresh-oauth:operator",
+                credential_binding_id="refresh-oauth-operator",
+            )
+
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse(
+                {
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token",
+                    "expires_in": 3600,
+                    "scope": "profile tools:read",
+                },
+            ),
+        ) as post:
+            refreshed = self.service.refresh_account("refresh-oauth:operator")
+
+        self.assertEqual(refreshed.account.masked_preview, "new-...oken")
+        self.assertEqual(refreshed.account.granted_scopes, ("profile", "tools:read"))
+        self.assertTrue(refreshed.account.refresh_ready)
+        self.assertIn("last_refresh_at", refreshed.account.metadata)
+        self.assertEqual(post.call_args.kwargs["data"]["grant_type"], "refresh_token")
+        self.assertEqual(post.call_args.kwargs["data"]["refresh_token"], "old-refresh-token")
+        token_store = self.container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE)
+        stored = token_store.read_token(refreshed.account.storage_key or "")
+        self.assertEqual(stored.access_token, "new-access-token")
+
+    def test_refresh_account_failure_redacts_refresh_token(self) -> None:
+        self.service.register_provider(
+            provider_id="refresh-failure-oauth",
+            display_name="Refresh Failure OAuth",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            client_id="refresh-failure-client",
+            callback_url="http://127.0.0.1:1455/callback",
+            default_scopes=("profile",),
+        )
+        setup = self.service.begin_browser_setup(provider_id="refresh-failure-oauth")
+        session = self.access_governance_repository.get_setup_session(setup.session_id)
+        assert session is not None
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse(
+                {
+                    "access_token": "old-access-token",
+                    "refresh_token": "old-refresh-token",
+                    "expires_in": 30,
+                    "scope": "profile",
+                    "email": "refresh-failure@example.test",
+                },
+            ),
+        ):
+            created = self.service.complete_browser_setup(
+                session_id=setup.session_id,
+                code="oauth-code",
+                state=str(session.metadata["state"]),
+                account_id="refresh-failure-oauth:operator",
+                credential_binding_id="refresh-failure-oauth-operator",
+            )
+
+        self.service.token_client.retry_backoff_seconds = 0
+        with (
+            patch(
+                "crxzipple.modules.access.application.oauth_token_client.requests.post",
+                side_effect=requests.ConnectionError("old-refresh-token leaked"),
+            ) as post,
+            self.assertRaises(AccessOAuthTokenEndpointError) as context,
+        ):
+            self.service.refresh_account("refresh-failure-oauth:operator")
+
+        self.assertEqual(post.call_count, 2)
+        error_text = str(context.exception)
+        self.assertIn("OAuth refresh token endpoint request failed", error_text)
+        self.assertNotIn("old-refresh-token", error_text)
+        self.assertNotIn("leaked", error_text)
+        token_store = self.container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE)
+        stored = token_store.read_token(created.account.storage_key or "")
+        self.assertEqual(stored.access_token, "old-access-token")
+
+    def test_resolve_access_token_skips_duplicate_auto_refresh_after_locked_reread(
+        self,
+    ) -> None:
+        self.service.register_provider(
+            provider_id="refresh-lock-oauth",
+            display_name="Refresh Lock OAuth",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            client_id="refresh-lock-client",
+            callback_url="http://127.0.0.1:1455/callback",
+            default_scopes=("profile",),
+        )
+        setup = self.service.begin_browser_setup(provider_id="refresh-lock-oauth")
+        session = self.access_governance_repository.get_setup_session(setup.session_id)
+        assert session is not None
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse(
+                {
+                    "access_token": "old-access-token",
+                    "refresh_token": "old-refresh-token",
+                    "expires_in": 30,
+                    "scope": "profile",
+                    "email": "refresh-lock@example.test",
+                },
+            ),
+        ):
+            created = self.service.complete_browser_setup(
+                session_id=setup.session_id,
+                code="oauth-code",
+                state=str(session.metadata["state"]),
+                account_id="refresh-lock-oauth:operator",
+                credential_binding_id="refresh-lock-oauth-operator",
+            )
+
+        token_store = self.container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE)
+        storage_key = created.account.storage_key or ""
+
+        @contextmanager
+        def refreshed_by_other_worker(_storage_key: str):
+            token_store.write_token(
+                storage_key,
+                OAuthTokenDocument(
+                    access_token="fresh-access-token",
+                    refresh_token="old-refresh-token",
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                    scopes=("profile",),
+                ),
+            )
+            yield
+
+        with (
+            patch.object(token_store, "token_lock", refreshed_by_other_worker),
+            patch(
+                "crxzipple.modules.access.application.oauth_token_client.AccessOAuthTokenClient.refresh_token",
+            ) as refresh,
+        ):
+            resolved = self.service.resolve_access_token("refresh-lock-oauth:operator")
+
+        self.assertEqual(resolved, "fresh-access-token")
+        refresh.assert_not_called()
+
+    def test_oauth_token_store_serializes_same_storage_key_lock(self) -> None:
+        token_store = self.container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE)
+        storage_key = "oauth_tokens/lock-test.json"
+        entered = threading.Event()
+
+        def enter_same_lock() -> None:
+            with token_store.token_lock(storage_key):
+                entered.set()
+
+        with token_store.token_lock(storage_key):
+            thread = threading.Thread(target=enter_same_lock)
+            thread.start()
+            self.assertFalse(entered.wait(0.05))
+
+        self.assertTrue(entered.wait(1.0))
+        thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive())
+
+    def test_revoking_account_revokes_remote_token_and_deletes_storage(self) -> None:
+        self.service.register_provider(
+            provider_id="revoke-oauth",
+            display_name="Revoke OAuth",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            revocation_url="https://auth.example.test/revoke",
+            client_id="revoke-client",
+            callback_url="http://127.0.0.1:1455/callback",
+            default_scopes=("profile",),
+        )
+        setup = self.service.begin_browser_setup(provider_id="revoke-oauth")
+        session = self.access_governance_repository.get_setup_session(setup.session_id)
+        assert session is not None
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse(
+                {
+                    "access_token": "revoked-access-token",
+                    "refresh_token": "revoked-refresh-token",
+                    "expires_in": 3600,
+                    "scope": "profile",
+                    "email": "revoke@example.test",
+                },
+            ),
+        ):
+            created = self.service.complete_browser_setup(
+                session_id=setup.session_id,
+                code="oauth-code",
+                state=str(session.metadata["state"]),
+                account_id="revoke-oauth:operator",
+                credential_binding_id="revoke-oauth-operator",
+            )
+
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse({}),
+        ) as post:
+            revoked = self.service.set_account_status(
+                "revoke-oauth:operator",
+                status="revoked",
+            )
+
+        self.assertEqual(revoked.status, "revoked")
+        self.assertEqual(post.call_args.args[0], "https://auth.example.test/revoke")
+        self.assertEqual(post.call_args.kwargs["data"]["token"], "revoked-access-token")
+        token_store = self.container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE)
+        with self.assertRaises(LookupError):
+            token_store.read_token(created.account.storage_key or "")
+
+    def test_revoking_account_retries_transient_failure_before_deleting_storage(self) -> None:
+        self.service.register_provider(
+            provider_id="revoke-retry-oauth",
+            display_name="Revoke Retry OAuth",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            revocation_url="https://auth.example.test/revoke",
+            client_id="revoke-retry-client",
+            callback_url="http://127.0.0.1:1455/callback",
+            default_scopes=("profile",),
+        )
+        setup = self.service.begin_browser_setup(provider_id="revoke-retry-oauth")
+        session = self.access_governance_repository.get_setup_session(setup.session_id)
+        assert session is not None
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            return_value=_FakeOAuthResponse(
+                {
+                    "access_token": "revoked-retry-access-token",
+                    "refresh_token": "revoked-retry-refresh-token",
+                    "expires_in": 3600,
+                    "scope": "profile",
+                    "email": "revoke-retry@example.test",
+                },
+            ),
+        ):
+            created = self.service.complete_browser_setup(
+                session_id=setup.session_id,
+                code="oauth-code",
+                state=str(session.metadata["state"]),
+                account_id="revoke-retry-oauth:operator",
+                credential_binding_id="revoke-retry-oauth-operator",
+            )
+
+        self.service.token_client.retry_backoff_seconds = 0
+        with patch(
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
+            side_effect=[
+                requests.ConnectionError("revoked-retry-access-token leaked"),
+                _FakeOAuthResponse({}),
+            ],
+        ) as post:
+            revoked = self.service.set_account_status(
+                "revoke-retry-oauth:operator",
+                status="revoked",
+            )
+
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(revoked.status, "revoked")
+        token_store = self.container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE)
+        with self.assertRaises(LookupError):
+            token_store.read_token(created.account.storage_key or "")
+
     def test_default_codex_provider_uses_builtin_oauth_flow(self) -> None:
         setup = self.service.begin_browser_setup(provider_id="openai-codex")
 
@@ -145,7 +466,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
 
         with (
             patch(
-                "crxzipple.modules.access.application.oauth.requests.post",
+                "crxzipple.modules.access.application.oauth_token_client.requests.post",
                 return_value=_FakeOAuthResponse(
                     {
                         "access_token": access_token,
@@ -180,11 +501,11 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
     def test_begin_codex_oauth_login_starts_callback_listener_and_browser(self) -> None:
         with (
             patch(
-                "crxzipple.modules.access.application.oauth._start_codex_oauth_callback_listener",
+                "crxzipple.modules.access.application.oauth.start_codex_oauth_callback_listener",
                 return_value={"status": "listening"},
             ),
             patch(
-                "crxzipple.modules.access.application.oauth._open_browser_url",
+                "crxzipple.modules.access.application.oauth.open_browser_url",
                 return_value=True,
             ) as open_browser,
         ):
@@ -199,7 +520,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
         open_browser.assert_called_once_with(setup.authorize_url)
 
     def test_codex_oauth_listener_supersedes_active_listener(self) -> None:
-        class _FakeServer(oauth_module.HTTPServer):
+        class _FakeServer(callback_module.HTTPServer):
             def __init__(self) -> None:
                 self.shutdown_called = False
                 self.close_called = False
@@ -213,14 +534,14 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
         old_setup = self.service.begin_browser_setup(provider_id="openai-codex")
         server = _FakeServer()
         completed = {"value": False}
-        previous_active = oauth_module._CODEX_OAUTH_CALLBACK_ACTIVE
+        previous_active = callback_module._CODEX_OAUTH_CALLBACK_ACTIVE
         try:
-            oauth_module._CODEX_OAUTH_CALLBACK_ACTIVE = {
+            callback_module._CODEX_OAUTH_CALLBACK_ACTIVE = {
                 "session_id": old_setup.session_id,
                 "server": server,
                 "completed": completed,
             }
-            oauth_module._stop_active_codex_oauth_callback_listener(
+            callback_module.stop_active_codex_oauth_callback_listener(
                 service=self.service,
                 reason=(
                     "OpenAI Codex OAuth callback listener was superseded by a "
@@ -229,7 +550,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
                 superseded_by_session_id="new-session",
             )
         finally:
-            oauth_module._CODEX_OAUTH_CALLBACK_ACTIVE = previous_active
+            callback_module._CODEX_OAUTH_CALLBACK_ACTIVE = previous_active
 
         old_session = self.access_governance_repository.get_setup_session(
             old_setup.session_id,
@@ -275,7 +596,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
             default_scopes=("profile",),
         )
         with patch(
-            "crxzipple.modules.access.application.oauth.requests.post",
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
             return_value=_FakeOAuthResponse(
                 {
                     "device_code": "device-secret-code",
@@ -313,7 +634,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
         )
 
         with patch(
-            "crxzipple.modules.access.application.oauth.requests.post",
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
             return_value=_FakeOAuthResponse(
                 {
                     "device_code": "device-secret-code",
@@ -337,7 +658,7 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
         self.assertEqual(session.metadata["device_code"], "device-secret-code")
 
         with patch(
-            "crxzipple.modules.access.application.oauth.requests.post",
+            "crxzipple.modules.access.application.oauth_token_client.requests.post",
             return_value=_FakeOAuthResponse(
                 {
                     "access_token": "device-access-token",

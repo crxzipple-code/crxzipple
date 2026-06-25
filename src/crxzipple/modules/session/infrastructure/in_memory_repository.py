@@ -55,6 +55,12 @@ class InMemorySessionItemRepository:
                 return item
         return None
 
+    def get_many(self, item_ids: tuple[str, ...]) -> list[SessionItem]:
+        requested = {item_id for item_id in item_ids if item_id}
+        if not requested:
+            return []
+        return [item for item in self._items if item.id in requested]
+
     def get_by_source(
         self,
         *,

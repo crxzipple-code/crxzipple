@@ -59,18 +59,28 @@ from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
 from crxzipple.modules.orchestration.application.execution_chain_lifecycle import (
     ORCHESTRATION_RUN_INTAKE_OWNER_KIND,
     cancel_active_execution_step,
+    complete_execution_chain,
+    complete_llm_execution_step,
+    ensure_intake_execution_chain,
     fail_active_execution_step,
     mark_approval_request_step_item_terminal,
     mark_tool_run_step_item_terminal,
     materialize_approval_execution_step,
+    materialize_final_response_execution_step,
     materialize_resume_execution_step,
     materialize_tool_batch_execution_step,
     materialize_tool_result_session_item_items,
+    prepare_dispatch_execution_step,
+    record_failed_llm_execution_item,
+    start_llm_execution_step,
 )
 from crxzipple.modules.orchestration.application.engine import EngineAdvanceOutcome
 from crxzipple.modules.orchestration.application.execution import RunExecutionService
 from crxzipple.modules.orchestration.application.tool_resume import (
     OrchestrationToolResumeCoordinator,
+)
+from crxzipple.modules.orchestration.application.tool_execution_records import (
+    tool_lifecycle_from_tool_run,
 )
 from crxzipple.modules.orchestration.application.engine_session_recorder import (
     OrchestrationSessionRecorder,
@@ -238,6 +248,71 @@ class _FakeBackgroundToolResumeEngine:
     ) -> tuple[str, ...]:
         self.appended_run_ids.append(run.id)
         return tuple(f"message-{index + 1}" for index, _ in enumerate(tool_runs))
+
+
+def test_tool_lifecycle_from_tool_run_ignores_flat_lifecycle_fields() -> None:
+    tool_run = ToolRun(
+        id="tool-run-flat-lifecycle",
+        tool_id="configured.browser",
+        call_id="call-flat-lifecycle",
+        target=ToolExecutionTarget(),
+        metadata={
+            "superseded": True,
+            "lifecycle_status": "superseded",
+            "superseded_by_tool_call_id": "call-next",
+        },
+        result_payload=ToolRunResult.structured(
+            content=[text_content_block("ok")],
+            details={
+                "superseded": True,
+                "lifecycle_status": "superseded",
+                "superseded_by_tool_call_id": "call-next",
+            },
+            metadata={
+                "superseded": True,
+                "lifecycle_status": "superseded",
+            },
+        ).to_payload(),
+    )
+
+    assert tool_lifecycle_from_tool_run(tool_run) == {}
+
+
+def test_tool_lifecycle_from_tool_run_reads_nested_lifecycle_fields() -> None:
+    tool_run = ToolRun(
+        id="tool-run-nested-lifecycle",
+        tool_id="configured.browser",
+        call_id="call-nested-lifecycle",
+        target=ToolExecutionTarget(),
+        metadata={
+            "tool_lifecycle": {
+                "lifecycle_status": "observed",
+                "superseded": False,
+            },
+        },
+        result_payload=ToolRunResult.structured(
+            content=[text_content_block("ok")],
+            details={
+                "tool_lifecycle": {
+                    "lifecycle_status": "superseded",
+                    "superseded": True,
+                    "superseded_by_tool_call_id": "call-next",
+                },
+            },
+            metadata={
+                "evidence_lifecycle": {
+                    "evidence_lifecycle_status": "verified",
+                },
+            },
+        ).to_payload(),
+    )
+
+    assert tool_lifecycle_from_tool_run(tool_run) == {
+        "lifecycle_status": "superseded",
+        "superseded": True,
+        "superseded_by_tool_call_id": "call-next",
+        "evidence_lifecycle_status": "verified",
+    }
 
 
 def _create_sqlite_engine_with_foreign_keys():
@@ -665,6 +740,73 @@ def test_run_query_service_exposes_execution_chain_read_surface() -> None:
     assert waiting_status.waiting_reason == "tool_background_wait"
 
 
+def test_execution_chain_snapshot_query_batches_items_for_long_chain() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    with uow:
+        run = OrchestrationRun.accept(
+            run_id="run-long-chain-query",
+            inbound_instruction=InboundInstruction(source="unit", content="query"),
+        )
+        uow.orchestration_runs.add(run)
+        chain = ExecutionChain.create(
+            chain_id="chain-long-chain-query",
+            turn_id=run.id,
+        )
+        chain.start(active_step_id="step-long-chain-query-0")
+        for index in range(60):
+            chain.increment_step_count()
+            step = ExecutionStep.create(
+                step_id=f"step-long-chain-query-{index}",
+                chain_id=chain.id,
+                turn_id=chain.turn_id,
+                step_index=index,
+                kind=ExecutionStepKind.TOOL_BATCH,
+                correlation_key=f"run-long-chain-query:tool-batch:{index}",
+            )
+            step.complete()
+            uow.execution_steps.add(step)
+            for item_index in range(2):
+                item = ExecutionStepItem.create(
+                    item_id=f"item-long-chain-query-{index}-{item_index}",
+                    step_id=step.id,
+                    chain_id=chain.id,
+                    turn_id=chain.turn_id,
+                    item_index=item_index,
+                    kind=ExecutionStepItemKind.TOOL_RUN,
+                    owner=ExecutionOwnerReference(
+                        owner_kind="tool_run",
+                        owner_id=f"tool-run-long-chain-query-{index}-{item_index}",
+                    ),
+                )
+                item.complete(
+                    summary_payload={"index": index, "item_index": item_index},
+                )
+                uow.execution_step_items.add(item)
+        chain.complete()
+        uow.execution_chains.add(chain)
+        uow.commit()
+
+    statement_count = {"select": 0}
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _count_selects(_conn, _cursor, statement, _parameters, _context, _executemany):  # noqa: ANN001
+        if statement.lstrip().lower().startswith("select"):
+            statement_count["select"] += 1
+
+    query = OrchestrationRunQueryService(lambda: uow)
+    snapshots = query.list_execution_chain_snapshots("run-long-chain-query")
+
+    event.remove(engine, "before_cursor_execute", _count_selects)
+    assert len(snapshots) == 1
+    assert len(snapshots[0].steps) == 60
+    assert sum(len(step.items) for step in snapshots[0].steps) == 120
+    assert statement_count["select"] <= 4
+
+
 def test_run_query_service_exposes_waiting_approval_status() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -832,6 +974,363 @@ def test_ingress_submit_materializes_intake_execution_step_for_request() -> None
         owner_kind="orchestration_ingress_request",
         owner_id=request.id,
     )
+
+
+def test_lifecycle_bootstrap_llm_completion_is_idempotent() -> None:
+    engine = _create_sqlite_engine_with_foreign_keys()
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    run = OrchestrationRun.accept(
+        run_id="run-lifecycle-llm-complete",
+        inbound_instruction=InboundInstruction(source="unit", content="hello"),
+        metadata={"session_key": "session-lifecycle-llm-complete"},
+    )
+
+    with uow:
+        uow.orchestration_runs.add(run)
+        bootstrap = ensure_intake_execution_chain(
+            uow,
+            run=run,
+            owner=ExecutionOwnerReference(
+                owner_kind=ORCHESTRATION_RUN_INTAKE_OWNER_KIND,
+                owner_id=run.id,
+            ),
+        )
+        assert bootstrap.chain.status is ExecutionChainStatus.WAITING
+        assert bootstrap.chain.active_step_id == bootstrap.intake_step.id
+        assert bootstrap.chain.step_count == 1
+        assert bootstrap.intake_step.kind is ExecutionStepKind.INTAKE
+        assert bootstrap.intake_step.status is ExecutionStepStatus.WAITING
+        assert bootstrap.intake_step.correlation_key == (
+            "run-lifecycle-llm-complete:0:intake"
+        )
+
+        dispatch = prepare_dispatch_execution_step(
+            uow,
+            run=run,
+            dispatch_task_id="dispatch-lifecycle-1",
+        )
+        assert dispatch.step.kind is ExecutionStepKind.LLM
+        assert dispatch.step.status is ExecutionStepStatus.CREATED
+        assert dispatch.step.step_index == 1
+        assert dispatch.step.dispatch_task_id == "dispatch-lifecycle-1"
+        assert dispatch.step.correlation_key == "run-lifecycle-llm-complete:1:llm"
+        assert dispatch.chain.status is ExecutionChainStatus.RUNNING
+        assert dispatch.chain.active_step_id == dispatch.step.id
+        assert dispatch.chain.step_count == 2
+
+        started = start_llm_execution_step(
+            uow,
+            run=run,
+            dispatch_task_id="dispatch-lifecycle-1",
+        )
+        assert started.id == dispatch.step.id
+        assert started.status is ExecutionStepStatus.RUNNING
+
+        completed = complete_llm_execution_step(
+            uow,
+            run=run,
+            llm_invocation_id="invocation-lifecycle-1",
+            assistant_progress_item_ids=("session-item-progress-1",),
+            summary_payload={
+                "llm_id": "llm-primary",
+                "finish_reason": "tool_calls",
+            },
+            continuation_payload={
+                "reason": "provider_end_turn_false",
+                "end_turn": False,
+                "needs_follow_up": True,
+                "provider_continuation_state": {
+                    "mode": "provider_native",
+                    "previous_response_id": "resp-lifecycle-1",
+                },
+            },
+        )
+        assert completed is not None
+        assert completed.id == started.id
+        assert completed.status is ExecutionStepStatus.COMPLETED
+
+        repeated = complete_llm_execution_step(
+            uow,
+            run=run,
+            llm_invocation_id="invocation-lifecycle-1",
+            assistant_progress_item_ids=("session-item-progress-1",),
+            summary_payload={"llm_id": "llm-primary"},
+            continuation_payload={
+                "reason": "provider_end_turn_false",
+                "end_turn": False,
+                "needs_follow_up": True,
+            },
+        )
+        assert repeated is None
+        uow.commit()
+
+    query = OrchestrationRunQueryService(lambda: uow)
+    [chain] = query.list_execution_chains(run.id)
+    steps = query.list_execution_steps(chain.id)
+    assert [(step.step_index, step.kind, step.status) for step in steps] == [
+        (0, ExecutionStepKind.INTAKE, ExecutionStepStatus.COMPLETED),
+        (1, ExecutionStepKind.LLM, ExecutionStepStatus.COMPLETED),
+    ]
+    assert chain.status is ExecutionChainStatus.RUNNING
+    assert chain.active_step_id == steps[1].id
+    assert chain.step_count == 2
+
+    items = query.list_execution_step_items(steps[1].id)
+    assert [
+        (item.item_index, item.kind, item.owner, item.status, item.correlation_key)
+        for item in items
+    ] == [
+        (
+            0,
+            ExecutionStepItemKind.LLM_INVOCATION,
+            ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id="invocation-lifecycle-1",
+            ),
+            ExecutionStepItemStatus.COMPLETED,
+            "invocation-lifecycle-1",
+        ),
+        (
+            1,
+            ExecutionStepItemKind.CONTINUATION_DECISION,
+            ExecutionOwnerReference(
+                owner_kind="llm_continuation",
+                owner_id="invocation-lifecycle-1:continuation",
+            ),
+            ExecutionStepItemStatus.COMPLETED,
+            "invocation-lifecycle-1:continuation",
+        ),
+        (
+            2,
+            ExecutionStepItemKind.SESSION_MESSAGE,
+            ExecutionOwnerReference(
+                owner_kind="session_item",
+                owner_id="session-item-progress-1",
+            ),
+            ExecutionStepItemStatus.COMPLETED,
+            "session-item-progress-1",
+        ),
+    ]
+    assert items[0].summary_payload == {
+        "llm_invocation_id": "invocation-lifecycle-1",
+        "llm_id": "llm-primary",
+        "finish_reason": "tool_calls",
+    }
+    assert items[1].summary_payload == {
+        "llm_invocation_id": "invocation-lifecycle-1",
+        "continuation_id": "invocation-lifecycle-1:continuation",
+        "reason": "provider_end_turn_false",
+        "end_turn": False,
+        "needs_follow_up": True,
+        "provider_continuation_state": {
+            "mode": "provider_native",
+            "previous_response_id": "resp-lifecycle-1",
+        },
+    }
+    assert items[2].payload_ref == {
+        "kind": "session_item",
+        "session_item_id": "session-item-progress-1",
+    }
+
+
+def test_lifecycle_llm_failure_records_failed_invocation_item_and_chain() -> None:
+    engine = _create_sqlite_engine_with_foreign_keys()
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    run = OrchestrationRun.accept(
+        run_id="run-lifecycle-llm-fail",
+        inbound_instruction=InboundInstruction(source="unit", content="hello"),
+        metadata={"session_key": "session-lifecycle-llm-fail"},
+    )
+
+    with uow:
+        uow.orchestration_runs.add(run)
+        ensure_intake_execution_chain(
+            uow,
+            run=run,
+            owner=ExecutionOwnerReference(
+                owner_kind=ORCHESTRATION_RUN_INTAKE_OWNER_KIND,
+                owner_id=run.id,
+            ),
+        )
+        started = start_llm_execution_step(
+            uow,
+            run=run,
+            dispatch_task_id="dispatch-failure-1",
+        )
+        failed_item = record_failed_llm_execution_item(
+            uow,
+            run=run,
+            llm_invocation_id="invocation-failure-1",
+            message="provider rejected request",
+            code="provider_error",
+            summary_payload={"llm_id": "llm-primary"},
+            details={"status_code": 400},
+        )
+        failed_step = fail_active_execution_step(
+            uow,
+            run=run,
+            message="provider rejected request",
+            code="provider_error",
+            details={"status_code": 400},
+        )
+        assert failed_item is not None
+        assert failed_step is not None
+        assert failed_step.id == started.id
+        uow.commit()
+
+    query = OrchestrationRunQueryService(lambda: uow)
+    [chain] = query.list_execution_chains(run.id)
+    [llm_step] = [
+        step
+        for step in query.list_execution_steps(chain.id)
+        if step.kind is ExecutionStepKind.LLM
+    ]
+    [item] = query.list_execution_step_items(llm_step.id)
+    assert chain.status is ExecutionChainStatus.FAILED
+    assert chain.error_payload is not None
+    assert chain.error_payload.code == "provider_error"
+    assert llm_step.status is ExecutionStepStatus.FAILED
+    assert llm_step.error_payload is not None
+    assert llm_step.error_payload.details == {"status_code": 400}
+    assert item.kind is ExecutionStepItemKind.LLM_INVOCATION
+    assert item.status is ExecutionStepItemStatus.FAILED
+    assert item.owner == ExecutionOwnerReference(
+        owner_kind="llm_invocation",
+        owner_id="invocation-failure-1",
+    )
+    assert item.correlation_key == "invocation-failure-1"
+    assert item.summary_payload == {
+        "llm_invocation_id": "invocation-failure-1",
+        "llm_id": "llm-primary",
+    }
+
+
+def test_lifecycle_approval_and_final_response_steps_are_idempotent() -> None:
+    engine = _create_sqlite_engine_with_foreign_keys()
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    run = OrchestrationRun.accept(
+        run_id="run-lifecycle-approval-final",
+        inbound_instruction=InboundInstruction(source="unit", content="confirm"),
+        metadata={"session_key": "session-lifecycle-approval-final"},
+    )
+    approval = PendingApprovalRequest(
+        request_id="approval-lifecycle-1",
+        effect_id="effect-lifecycle-1",
+        label="Allow command",
+        reason="needs confirmation",
+        tool_ids=("command-exec",),
+        tool_name="command.exec",
+    )
+
+    with uow:
+        uow.orchestration_runs.add(run)
+        ensure_intake_execution_chain(
+            uow,
+            run=run,
+            owner=ExecutionOwnerReference(
+                owner_kind=ORCHESTRATION_RUN_INTAKE_OWNER_KIND,
+                owner_id=run.id,
+            ),
+        )
+        approval_step = materialize_approval_execution_step(
+            uow,
+            run=run,
+            request=approval,
+        )
+        repeated_approval_step = materialize_approval_execution_step(
+            uow,
+            run=run,
+            request=approval,
+        )
+        assert approval_step is not None
+        assert repeated_approval_step is not None
+        assert repeated_approval_step.id == approval_step.id
+        assert approval_step.status is ExecutionStepStatus.WAITING
+
+        approval_item = mark_approval_request_step_item_terminal(
+            uow,
+            request_id=approval.request_id,
+            decision="APPROVED",
+        )
+        assert approval_item is not None
+        assert approval_item.status is ExecutionStepItemStatus.COMPLETED
+
+        final_step = materialize_final_response_execution_step(
+            uow,
+            run=run,
+            llm_invocation_id="invocation-final-1",
+            assistant_session_item_ids=(
+                "session-item-final-1",
+                "session-item-final-2",
+            ),
+            summary_payload={
+                "finish_reason": "stop",
+                "response_text_chars": 42,
+            },
+        )
+        repeated_final_step = materialize_final_response_execution_step(
+            uow,
+            run=run,
+            llm_invocation_id="invocation-final-1",
+            assistant_session_item_ids=(
+                "session-item-final-1",
+                "session-item-final-2",
+            ),
+            summary_payload={"finish_reason": "stop"},
+        )
+        assert final_step is not None
+        assert repeated_final_step is not None
+        assert repeated_final_step.id == final_step.id
+        assert repeated_final_step.status is ExecutionStepStatus.COMPLETED
+        complete_execution_chain(uow, run=run)
+        uow.commit()
+
+    query = OrchestrationRunQueryService(lambda: uow)
+    [chain] = query.list_execution_chains(run.id)
+    steps = query.list_execution_steps(chain.id)
+    assert [(step.step_index, step.kind, step.status) for step in steps] == [
+        (0, ExecutionStepKind.INTAKE, ExecutionStepStatus.WAITING),
+        (1, ExecutionStepKind.APPROVAL, ExecutionStepStatus.COMPLETED),
+        (2, ExecutionStepKind.FINAL_RESPONSE, ExecutionStepStatus.COMPLETED),
+    ]
+    assert chain.status is ExecutionChainStatus.COMPLETED
+    assert chain.active_step_id is None
+
+    approval_items = query.list_execution_step_items(steps[1].id)
+    assert len(approval_items) == 1
+    assert approval_items[0].kind is ExecutionStepItemKind.APPROVAL_REQUEST
+    assert approval_items[0].owner == ExecutionOwnerReference(
+        owner_kind="approval_request",
+        owner_id="approval-lifecycle-1",
+    )
+    assert approval_items[0].summary_payload["decision"] == "approved"
+    assert approval_items[0].correlation_key == "approval-lifecycle-1"
+
+    final_items = query.list_execution_step_items(steps[2].id)
+    assert [
+        (item.item_index, item.kind, item.owner.owner_id, item.correlation_key)
+        for item in final_items
+    ] == [
+        (0, ExecutionStepItemKind.SESSION_MESSAGE, "session-item-final-1", "session-item-final-1"),
+        (1, ExecutionStepItemKind.SESSION_MESSAGE, "session-item-final-2", "session-item-final-2"),
+    ]
+    assert final_items[0].payload_ref == {
+        "kind": "session_item",
+        "session_item_id": "session-item-final-1",
+    }
+    assert final_items[0].summary_payload == {
+        "session_item_id": "session-item-final-1",
+        "item_role": "assistant",
+        "llm_invocation_id": "invocation-final-1",
+        "finish_reason": "stop",
+        "response_text_chars": 42,
+    }
 
 
 def test_progress_coordinator_records_llm_step_and_invocation_item() -> None:

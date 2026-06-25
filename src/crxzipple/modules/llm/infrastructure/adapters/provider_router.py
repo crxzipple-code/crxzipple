@@ -5,7 +5,7 @@ from typing import Any
 
 from crxzipple.modules.llm.application.adapters import LlmAdapterRequest
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmApiFamily
+from crxzipple.modules.llm.domain import LlmApiFamily
 from crxzipple.modules.llm.infrastructure.adapters.anthropic_messages import (
     AnthropicMessagesAdapter,
 )
@@ -29,8 +29,10 @@ from crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses import
 )
 from crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses_renderer import (
     OpenAICodexResponsesRenderer,
-    _websocket_endpoint_from_http,
     requested_provider_transport_input,
+)
+from crxzipple.modules.llm.infrastructure.adapters.openai_codex_websocket_transport import (
+    codex_websocket_endpoint,
 )
 from crxzipple.modules.llm.infrastructure.adapters.openai_responses import (
     OpenAIResponsesAdapter,
@@ -130,7 +132,7 @@ class ProviderProtocolRenderRouter:
             if requested_provider_transport_input(render_input) == "websocket":
                 rendered = self.openai_codex_responses.render_websocket_create_input(
                     render_input,
-                    endpoint=_websocket_endpoint_from_http(rendered_http.endpoint),
+                    endpoint=codex_websocket_endpoint(rendered_http.endpoint),
                 )
             else:
                 rendered = rendered_http

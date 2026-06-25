@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from crxzipple.modules.memory import FileBackedMemoryService, MemoryUseContext
+from crxzipple.modules.memory.application.events import MEMORY_RETRIEVAL_SUCCEEDED_EVENT
 from crxzipple.modules.memory.domain.services import search_snippet
 from crxzipple.modules.memory.infrastructure.indexing import (
     FileMemoryIndexManager,
@@ -212,6 +215,93 @@ class FileBackedMemoryTestCase(unittest.TestCase):
         self.assertEqual(second_hits[0].path, "MEMORY.md")
         self.assertNotEqual(first_hash, second_hash)
         self.assertEqual(stale_hits, [])
+
+    def test_recall_result_limit_and_latency_metrics_are_reported(self) -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        service = FileBackedMemoryService(
+            store=FileMemoryStore(),
+            index_manager=FileMemoryIndexManager(),
+            event_emitter=lambda name, payload: events.append((name, payload)),
+        )
+        for index in range(3):
+            service.write_archive(
+                context=self.context,
+                content=f"# Note {index}\nRelease checklist budget item {index}.",
+                slug=f"budget-{index}",
+                now=datetime(2026, 3, 27, 10, index, tzinfo=timezone.utc),
+            )
+
+        hits = service.search(
+            context=self.context,
+            query="release checklist budget",
+            limit=2,
+        )
+
+        self.assertEqual(len(hits), 2)
+        succeeded_events = [
+            payload
+            for event_name, payload in events
+            if event_name == MEMORY_RETRIEVAL_SUCCEEDED_EVENT
+        ]
+        self.assertEqual(len(succeeded_events), 1)
+        self.assertEqual(succeeded_events[0]["limit"], 2)
+        self.assertEqual(succeeded_events[0]["hit_count"], 2)
+        self.assertIsInstance(succeeded_events[0]["duration_ms"], int)
+        self.assertGreaterEqual(succeeded_events[0]["duration_ms"], 0)
+
+    def test_concurrent_write_rebuild_and_recall_do_not_corrupt_index(self) -> None:
+        service = _file_backed_memory_service()
+        start = threading.Event()
+
+        def write_item(index: int) -> None:
+            start.wait(timeout=2)
+            service.write_archive(
+                context=self.context,
+                content=f"# Concurrent {index}\nConcurrent memory item {index}.",
+                slug=f"concurrent-{index}",
+                now=datetime(2026, 3, 27, 11, index, tzinfo=timezone.utc),
+            )
+
+        def rebuild() -> None:
+            start.wait(timeout=2)
+            service.rebuild_index(context=self.context)
+
+        def recall() -> int:
+            start.wait(timeout=2)
+            return len(
+                service.search(
+                    context=self.context,
+                    query="concurrent memory item",
+                    limit=2,
+                ),
+            )
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [
+                *(executor.submit(write_item, index) for index in range(4)),
+                executor.submit(rebuild),
+                executor.submit(recall),
+            ]
+            start.set()
+            for future in futures:
+                future.result()
+
+        hits = service.search(
+            context=self.context,
+            query="concurrent memory item",
+            limit=10,
+        )
+
+        self.assertGreaterEqual(len(hits), 4)
+        self.assertEqual(
+            {hit.path for hit in hits},
+            {
+                "memory/2026-03-27-concurrent-0.md",
+                "memory/2026-03-27-concurrent-1.md",
+                "memory/2026-03-27-concurrent-2.md",
+                "memory/2026-03-27-concurrent-3.md",
+            },
+        )
 
     def test_write_archive_writes_slugged_markdown_file(self) -> None:
         written = self.service.write_archive(

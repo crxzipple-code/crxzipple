@@ -52,11 +52,17 @@ class ToolSubmissionService(ToolServiceBase):
                 raise ToolRunNotFoundError(f"Tool run '{run_id}' was not found.")
             return run
 
-    def list_tool_runs(self, *, tool_id: str | None = None) -> list[ToolRun]:
+    def list_tool_runs(
+        self,
+        *,
+        tool_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[ToolRun]:
+        normalized_limit = _normalized_run_list_limit(limit)
         with self.uow_factory() as uow:
             if tool_id is None:
-                return uow.tool_runs.list()
-            return uow.tool_runs.list_for_tool(tool_id)
+                return uow.tool_runs.list(limit=normalized_limit)
+            return uow.tool_runs.list_for_tool(tool_id, limit=normalized_limit)
 
     def list_tool_runs_for_orchestration_runs(
         self,
@@ -423,6 +429,15 @@ def _readiness_payload(readiness: object) -> dict[str, object]:
         "setup_available": False,
         "checks": [],
     }
+
+
+def _normalized_run_list_limit(limit: int | None) -> int | None:
+    if limit is None:
+        return None
+    normalized = int(limit)
+    if normalized <= 0:
+        raise ToolValidationError("Tool run list limit must be greater than zero.")
+    return normalized
 
 
 def _tool_call_id(data: ExecuteToolInput) -> str | None:

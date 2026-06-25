@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from base64 import b64decode
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -32,7 +31,6 @@ from crxzipple.modules.channels import (
     ChannelInteraction,
     ChannelInteractionRegistry,
     ChannelProfile,
-    ChannelRuntimePlanner,
     ChannelRuntimeRegistration,
     ChannelSystemConfig,
     ChannelValidationError,
@@ -40,7 +38,10 @@ from crxzipple.modules.channels import (
     FileBackedChannelInteractionRegistryStore,
     FileBackedChannelSystemConfigStore,
 )
-from crxzipple.modules.events import Event, EventTarget
+from crxzipple.modules.channels.application.lark_runtime_delivery import (
+    lark_deliver_observe_record_to_channel,
+)
+from crxzipple.modules.events import Event
 from crxzipple.modules.llm.application import RegisterLlmProfileInput
 from crxzipple.modules.llm.domain import LlmApiFamily, LlmProviderKind
 from crxzipple.modules.orchestration.application import (
@@ -1221,6 +1222,22 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 dead_letters[0].envelope.payload["outbound_id"],
                 "msg-webhook-retry-1",
             )
+
+            self.webhook_channel_runtime_service.run_runtime_loop(
+                "webhook",
+                runtime_id="webhook-runtime-retry-1",
+                poll_interval_seconds=0.05,
+                max_cycles=1,
+            )
+
+            self.assertEqual(len(callback_server.payloads), 3)
+            replayed_dead_letters = self.events_service.read_event_topic(
+                channel_dead_letter_topic(
+                    "webhook",
+                    runtime_id="webhook-runtime-retry-1",
+                ),
+            )
+            self.assertEqual(len(replayed_dead_letters), 1)
         finally:
             callback_server.close()
 
@@ -1320,7 +1337,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -1359,6 +1379,84 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(
             runtime.metadata["last_observe_event_name"],
             "session.item.appended",
+        )
+
+    def test_lark_observe_delivery_skips_duplicate_successful_message(self) -> None:
+        topic = turn_session_topic("agent:assistant:lark:dm:ou_duplicate_1")
+        self.events_service.publish(
+            Event(
+                topic=topic,
+                kind="fact",
+                ordering_key="run-lark-duplicate-1",
+                payload={
+                    "event_name": "session.item.appended",
+                    "message_id": "msg-lark-duplicate-1",
+                    "session_key": "agent:assistant:lark:dm:ou_duplicate_1",
+                    "session_id": "session-inst-lark-duplicate-1",
+                    "role": "assistant",
+                    "kind": "default",
+                    "source_kind": "orchestration_run",
+                    "source_id": "run-lark-duplicate-1",
+                    "message": {
+                        "id": "msg-lark-duplicate-1",
+                        "session_key": "agent:assistant:lark:dm:ou_duplicate_1",
+                        "session_id": "session-inst-lark-duplicate-1",
+                        "sequence_no": 1,
+                        "role": "assistant",
+                        "kind": "default",
+                        "content_payload": {
+                            "blocks": [
+                                {"type": "text", "text": "already delivered"},
+                            ],
+                        },
+                        "source_kind": "orchestration_run",
+                        "source_id": "run-lark-duplicate-1",
+                        "visibility": "default",
+                        "metadata": {},
+                        "created_at": "2026-04-16T00:00:00+00:00",
+                    },
+                },
+            ),
+        )
+        record = self.events_service.read_event_topic(topic, limit=1)[0]
+        interaction = ChannelInteraction(
+            interaction_id="lark:default:event:duplicate-delivery-1",
+            channel_type="lark",
+            channel_account_id="default",
+            external_event_id="duplicate-delivery-1",
+            external_conversation_id="oc_duplicate_1",
+            external_user_id="ou_duplicate_1",
+            reply_address={
+                "channel_type": "lark",
+                "channel_account_id": "default",
+                "external_conversation_id": "oc_duplicate_1",
+                "external_user_id": "ou_duplicate_1",
+            },
+            agent_id="assistant",
+            session_key="agent:assistant:lark:dm:ou_duplicate_1",
+            run_id="run-lark-duplicate-1",
+            status="running",
+            metadata={
+                "last_delivered_message_id": "msg-lark-duplicate-1",
+                "last_delivery_status": "ok",
+            },
+        )
+
+        def _unexpected_resolver(*_args, **_kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("duplicate delivery should not resolve Lark account")
+
+        result = lark_deliver_observe_record_to_channel(
+            interaction,
+            record=record,
+            artifact_service=self.artifact_service,
+            account_profile_resolver=_unexpected_resolver,
+            tenant_access_token_resolver=_unexpected_resolver,
+        )
+
+        self.assertIs(result, interaction)
+        self.assertEqual(
+            result.metadata["last_delivered_message_id"],
+            "msg-lark-duplicate-1",
         )
 
     def test_lark_channel_runtime_delivers_text_and_artifacts_from_interaction_metadata(self) -> None:
@@ -1500,7 +1598,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -1660,7 +1761,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -1780,7 +1884,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 raise AssertionError(f"unexpected lark url: {url}")
 
             with patch(
-                "crxzipple.modules.channels.application.runtime.request_url",
+                "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+                side_effect=_fake_request,
+            ), patch(
+                "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
                 side_effect=_fake_request,
             ):
                 self.lark_channel_runtime_service.run_runtime_loop(
@@ -2234,7 +2341,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -2391,7 +2501,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -2535,7 +2648,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -2649,7 +2765,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
+            side_effect=_fake_request,
+        ), patch(
+            "crxzipple.modules.channels.application.lark_runtime_delivery.request_url",
             side_effect=_fake_request,
         ):
             self.lark_channel_runtime_service.run_runtime_loop(
@@ -2707,7 +2826,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             raise AssertionError(f"unexpected lark url: {url}")
 
         with patch(
-            "crxzipple.modules.channels.application.runtime.request_url",
+            "crxzipple.modules.channels.application.lark_runtime_identity.request_url",
             side_effect=_fake_request,
         ):
             open_id = self.lark_channel_runtime_service.resolve_bot_open_id_for_account(
@@ -2766,7 +2885,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
 
         try:
             with patch(
-                "crxzipple.modules.channels.application.runtime.Thread",
+                "crxzipple.modules.channels.application.lark_runtime_long_connection.Thread",
                 _FakeThread,
             ):
                 self.lark_channel_runtime_service.run_runtime_loop(
