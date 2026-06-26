@@ -304,6 +304,7 @@ class Settings:
     ocr_language: str = "ch"
     ocr_use_gpu: bool = False
     ocr_request_timeout_seconds: float = 60.0
+    ocr_max_concurrent_requests: int = 1
     daemon_state_dir: str = str(DEFAULT_DAEMON_STATE_DIR)
     events_state_dir: str = str(DEFAULT_EVENTS_STATE_DIR)
     operations_state_dir: str = str(DEFAULT_OPERATIONS_STATE_DIR)
@@ -469,6 +470,10 @@ def load_settings() -> Settings:
         ocr_request_timeout_seconds=max(
             float(os.getenv("APP_OCR_REQUEST_TIMEOUT_SECONDS", "60")),
             0.1,
+        ),
+        ocr_max_concurrent_requests=max(
+            int(os.getenv("APP_OCR_MAX_CONCURRENT_REQUESTS", "1")),
+            1,
         ),
         daemon_state_dir=os.getenv(
             "APP_DAEMON_STATE_DIR",

@@ -10,12 +10,18 @@ discipline.
 
 ## Evidence
 
-- 114 Python files, about 33960 lines after the current split.
+- 118 Python files, about 33860 lines after the current split.
 - `application/services.py` is now a thin 11-line export layer.
-- `infrastructure/action_engines.py` is now a 905-line action-engine
-  envelope/router; batch execution, raw CDP execution, action-trace
-  coordination, interaction primitives, ref/overlay handling, and wait actions
+- `infrastructure/action_engines.py` is now a 131-line dependency assembly
+  surface. Execution lifecycle lives in
+  `infrastructure/action_engine_execution.py`; page-level action dispatch lives
+  in `infrastructure/action_engine_page_dispatch.py`; batch execution, raw CDP
+  execution, action-trace coordination, interaction primitives, locator/ref
+  resolution, ref/overlay handling, wait actions, and primitive page actions
   live in focused infrastructure modules.
+- `infrastructure/action_engine_interactions.py` is now a 349-line
+  interaction primitive mixin after unused toolbar/date/bulk-selection helper
+  methods were retired.
 - `infrastructure/script_insight.py` is now a focused 668-line action facade
   after runtime expression, payload coercion, and source-analysis split.
 - `infrastructure/action_engine_scripts.py` is now a thin 59-line expression
@@ -54,8 +60,9 @@ discipline.
 
 - Browser profile/runtime separation is the correct direction.
 - Application service boundaries are now much cleaner.
-- Action-engine routing is separated from batch, CDP, action-trace,
-  interaction primitive, ref/overlay, and wait execution details.
+- Action-engine dependency assembly is separated from execution lifecycle,
+  page dispatch, batch, CDP, action-trace, interaction primitive, locator/ref
+  resolution, primitive page action, ref/overlay, and wait execution details.
 - The remaining Browser infrastructure engine surface remains an important
   follow-up review area because it still coordinates live control operations.
 - Browser should expose generic capability/tool behavior, not task-specific paths.
@@ -83,6 +90,10 @@ discipline.
 - `application/observation.py`
 - `application/network_capture.py`
 - `infrastructure/action_engines.py`
+- `infrastructure/action_engine_execution.py`
+- `infrastructure/action_engine_page_dispatch.py`
+- `infrastructure/action_engine_page_actions.py`
+- `infrastructure/action_engine_locator_resolution.py`
 - `infrastructure/engines.py`
 - `infrastructure/script_insight.py`
 - `infrastructure/action_trace.py`
@@ -100,9 +111,10 @@ recycler/inspector, execution coordinator, profile admin, pool service, and
 allocator service.
 
 `infrastructure/action_engines.py` has been reduced to the CDP/Playwright-backed
-action-engine envelope/router. Focused modules now own batch execution,
-`cdp-raw`, action-trace runner glue, interaction primitives, ref/overlay
-handling, and wait actions.
+action-engine dependency assembly surface. Focused modules now own execution
+lifecycle, page dispatch, batch execution, `cdp-raw`, action-trace runner
+glue, interaction primitives, locator/ref resolution, ref/overlay handling,
+primitive page actions, and wait actions.
 
 `infrastructure/script_insight.py`, `action_engine_scripts.py`,
 `action_trace.py`, `network_page_fetch.py`, `domain/value_objects.py`,
@@ -155,7 +167,7 @@ Browser can become a powerful external capability if exposed through stable tool
 ### Remediation Checklist
 
 - [x] Split `application/services.py` into profile admin, pool allocation, execution coordination, action planning, tab ops, and selection ops.
-- [x] Split `action_engines.py` into batch, raw CDP, action-trace runner, interaction primitives, reference/overlay handling, wait actions, and the remaining action-engine envelope/router.
+- [x] Split `action_engines.py` into execution lifecycle/page dispatch, batch, raw CDP, action-trace runner, interaction primitives, locator/ref resolution, primitive page actions, reference/overlay handling, wait actions, and the remaining action-engine dependency assembly.
 - [x] Split Browser trace helpers out of `action_trace.py` into payload, snapshot, state, network, and envelope/recommendation modules.
 - [x] Split Browser domain value objects into type, helper, profile, tab/ref, network, and command/result modules.
 - [x] Split Browser HTTP interface request models, profile helpers, proxy egress checks, and update payload rules out of the route surface.
@@ -210,6 +222,48 @@ Result:
 - Targeted ruff over Browser budget paths: passed
 - Browser action trace split lint: passed
 - Browser action trace regression: 42 passed
+- 2026-06-26 Browser primitive page action split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py --tb=short --maxfail=1`
+  -> 113 passed.
+- 2026-06-26 Browser locator resolution split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_browser_playwright_locator_actions.py --tb=short --maxfail=1`
+  -> 137 passed.
+- 2026-06-26 Browser interaction primitive cleanup:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_browser_playwright_locator_actions.py --tb=short --maxfail=1`
+  -> 137 passed.
+- 2026-06-26 Browser action execution split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_execution.py src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_execution.py src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_browser_playwright_locator_actions.py --tb=short --maxfail=1`
+  -> 137 passed.
+- 2026-06-26 Browser page dispatch split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_execution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_dispatch.py src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_execution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_dispatch.py src/crxzipple/modules/browser/infrastructure/action_engine_interactions.py src/crxzipple/modules/browser/infrastructure/action_engine_locator_resolution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_actions.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_browser_playwright_locator_actions.py --tb=short --maxfail=1`
+  -> 137 passed.
+- 2026-06-26 Browser page dispatch readability cleanup:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_execution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_dispatch.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/action_engines.py src/crxzipple/modules/browser/infrastructure/action_engine_execution.py src/crxzipple/modules/browser/infrastructure/action_engine_page_dispatch.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_browser_playwright_locator_actions.py --tb=short --maxfail=1`
+  -> 137 passed.
 - Browser runtime/http/observation regression: 82 passed
 - Browser domain value object split lint: passed
 - Browser domain/profile/network regression: 53 passed

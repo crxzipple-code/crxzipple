@@ -16,9 +16,9 @@ from crxzipple.modules.llm.application.provider_continuation import (
 from crxzipple.modules.orchestration.application.ports import (
     RequestRenderSnapshotRecord,
 )
-from crxzipple.modules.orchestration.application.engine import (
-    _llm_request_options_from_run,
-    _llm_request_options_from_run_metadata,
+from crxzipple.modules.orchestration.application.engine_runtime_helpers import (
+    llm_request_options_from_run,
+    llm_request_options_from_run_metadata,
 )
 from crxzipple.modules.orchestration.application.runtime_llm_request_draft import RuntimeLlmRequestDraft
 from crxzipple.modules.llm.application.runtime_request_factory import (
@@ -1177,7 +1177,7 @@ def test_run_metadata_llm_request_options_split_provider_reasoning_and_output() 
         },
     )
 
-    options = _llm_request_options_from_run_metadata(run)
+    options = llm_request_options_from_run_metadata(run)
 
     assert options["provider_options"]["service_tier"] == "default"
     assert options["provider_options"]["max_output_tokens"] == 1200
@@ -1206,7 +1206,7 @@ def test_effective_llm_request_policy_merges_model_defaults_and_run_override() -
         },
     )
 
-    options = _llm_request_options_from_run(run, draft=draft)
+    options = llm_request_options_from_run(run, draft=draft)
 
     assert options["provider_options"] == {
         "max_output_tokens": 800,
@@ -1256,7 +1256,7 @@ def test_effective_llm_request_policy_applies_runtime_defaults_before_model_and_
         },
     )
 
-    options = _llm_request_options_from_run(run, draft=draft)
+    options = llm_request_options_from_run(run, draft=draft)
 
     assert options["provider_options"] == {
         "max_output_tokens": 800,
@@ -1301,7 +1301,7 @@ def test_effective_llm_request_policy_applies_codex_style_provider_options() -> 
         },
     )
 
-    options = _llm_request_options_from_run(run, draft=draft)
+    options = llm_request_options_from_run(run, draft=draft)
 
     assert options["provider_options"] == {
         "service_tier": "priority",
@@ -1345,7 +1345,7 @@ def test_effective_llm_request_policy_filters_responses_only_options_for_non_res
         llm_defaults={"max_output_tokens": 1000},
     )
 
-    options = _llm_request_options_from_run(run, draft=draft)
+    options = llm_request_options_from_run(run, draft=draft)
 
     assert options["provider_options"] == {
         "service_tier": "default",
@@ -1385,7 +1385,7 @@ def test_effective_llm_request_policy_applies_agent_llm_policy() -> None:
         },
     )
 
-    options = _llm_request_options_from_run(run, draft=draft)
+    options = llm_request_options_from_run(run, draft=draft)
 
     assert options["reasoning_config"] == {"summary": "auto"}
     assert options["provider_options"] == {"parallel_tool_calls": False}
@@ -1442,7 +1442,7 @@ def test_effective_llm_request_policy_downgrades_unsupported_reasoning() -> None
         llm_defaults={"reasoning_effort": "high"},
     )
 
-    options = _llm_request_options_from_run(run, draft=draft)
+    options = llm_request_options_from_run(run, draft=draft)
 
     assert options["reasoning_config"] == {}
     trace = options["policy"].to_payload()["resolution_trace"]

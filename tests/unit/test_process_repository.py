@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
 
 from crxzipple.modules.process.domain import ProcessSession, ProcessStatus
-from crxzipple.modules.process.domain.exceptions import ProcessNotFoundError
+from crxzipple.modules.process.domain.exceptions import (
+    ProcessNotFoundError,
+    ProcessValidationError,
+)
 from crxzipple.modules.process.application.services import ProcessApplicationService
 from crxzipple.modules.process.infrastructure.repository import (
     FilesystemProcessSessionRepository,
@@ -103,6 +107,95 @@ class ProcessRepositoryTestCase(unittest.TestCase):
 
             self.assertEqual(refreshed.status, ProcessStatus.FAILED)
             self.assertIsNotNone(refreshed.ended_at)
+
+    def test_cleanup_terminal_sessions_keeps_running_and_newest_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = FilesystemProcessSessionRepository(Path(temp_dir))
+            now = datetime.now(timezone.utc)
+            self._save_terminal_session(repository, "old", temp_dir, ended_at=now)
+            self._save_terminal_session(
+                repository,
+                "new",
+                temp_dir,
+                ended_at=now + timedelta(seconds=1),
+            )
+            running = ProcessSession(
+                id="running",
+                command="sleep 60",
+                shell="/bin/sh",
+                working_directory=temp_dir,
+                pid=1,
+                status=ProcessStatus.RUNNING,
+            )
+            repository.save(running)
+
+            result = repository.cleanup_terminal_sessions(max_terminal_sessions=1)
+
+            self.assertEqual(result.removed_process_ids, ("old",))
+            self.assertEqual(result.retained_running_process_ids, ("running",))
+            with self.assertRaises(ProcessNotFoundError):
+                repository.get("old", include_output=False)
+            self.assertEqual(repository.get("new", include_output=False).id, "new")
+            self.assertEqual(
+                repository.get("running", include_output=False).status,
+                ProcessStatus.RUNNING,
+            )
+
+    def test_cleanup_terminal_sessions_enforces_terminal_byte_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = FilesystemProcessSessionRepository(Path(temp_dir))
+            now = datetime.now(timezone.utc)
+            self._save_terminal_session(repository, "old", temp_dir, ended_at=now)
+            repository.stdout_path("old").write_text("x" * 100, encoding="utf-8")
+            self._save_terminal_session(
+                repository,
+                "new",
+                temp_dir,
+                ended_at=now + timedelta(seconds=1),
+            )
+            repository.stdout_path("new").write_text("y", encoding="utf-8")
+            new_session_bytes = sum(
+                path.stat().st_size for path in (Path(temp_dir) / "new").iterdir()
+            )
+
+            result = repository.cleanup_terminal_sessions(
+                max_terminal_bytes=new_session_bytes,
+            )
+
+            self.assertEqual(result.removed_process_ids, ("old",))
+            self.assertGreater(result.reclaimed_bytes, 0)
+            self.assertEqual(repository.get("new", include_output=False).id, "new")
+
+    def test_cleanup_sessions_requires_at_least_one_policy_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = FilesystemProcessSessionRepository(Path(temp_dir))
+            service = ProcessApplicationService(repository=repository, supervisor=object())
+
+            with self.assertRaises(ProcessValidationError):
+                service.cleanup_sessions()
+
+    @staticmethod
+    def _save_terminal_session(
+        repository: FilesystemProcessSessionRepository,
+        process_id: str,
+        working_directory: str,
+        *,
+        ended_at: datetime,
+    ) -> None:
+        session = ProcessSession(
+            id=process_id,
+            command="printf done",
+            shell="/bin/sh",
+            working_directory=working_directory,
+            pid=None,
+            status=ProcessStatus.EXITED,
+            exit_code=0,
+            created_at=ended_at,
+            started_at=ended_at,
+            updated_at=ended_at,
+            ended_at=ended_at,
+        )
+        repository.save(session)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from crxzipple.modules.artifacts.domain.entities import ArtifactKind, ArtifactVa
 from crxzipple.modules.artifacts.domain.exceptions import ArtifactNotFoundError
 from crxzipple.modules.ocr.domain import OcrExecutionError, OcrResult, OcrValidationError
 
+from .capacity import OcrCapacityLimiter
 from .ports import OcrArtifactReadPort, OcrEngine
 
 
@@ -15,15 +16,25 @@ from .ports import OcrArtifactReadPort, OcrEngine
 class OcrApplicationService:
     DEFAULT_MAX_RESULT_BLOCKS: ClassVar[int] = 1_000
     DEFAULT_MAX_RESULT_TEXT_CHARS: ClassVar[int] = 200_000
+    DEFAULT_MAX_CONCURRENT_REQUESTS: ClassVar[int] = 1
 
     engine: OcrEngine
     artifact_service: OcrArtifactReadPort
     default_language: str = "ch"
     max_result_blocks: int = DEFAULT_MAX_RESULT_BLOCKS
     max_result_text_chars: int = DEFAULT_MAX_RESULT_TEXT_CHARS
+    max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS
+    capacity_limiter: OcrCapacityLimiter | None = None
+
+    def __post_init__(self) -> None:
+        if self.capacity_limiter is None:
+            self.capacity_limiter = OcrCapacityLimiter(self.max_concurrent_requests)
 
     def health(self) -> dict[str, object]:
-        return dict(self.engine.health())
+        payload = dict(self.engine.health())
+        assert self.capacity_limiter is not None
+        payload["capacity"] = self.capacity_limiter.snapshot().as_dict()
+        return payload
 
     def capability_metadata(self) -> dict[str, object]:
         health = dict(self.engine.health())
@@ -41,7 +52,9 @@ class OcrApplicationService:
             "limits": {
                 "max_result_blocks": max(int(self.max_result_blocks), 1),
                 "max_result_text_chars": max(int(self.max_result_text_chars), 1),
+                "max_concurrent_requests": max(int(self.max_concurrent_requests), 1),
             },
+            "capacity": self.capacity_limiter.snapshot().as_dict(),
             "large_output_policy": {
                 "mode": "reject_until_artifact_externalization",
                 "artifact_ref_externalization": False,
@@ -74,20 +87,22 @@ class OcrApplicationService:
             raise OcrValidationError(
                 f"Artifact '{normalized_artifact_id}' is not an image artifact.",
             )
-        try:
-            result = self.engine.analyze_image(
-                image_path=binary.path,
-                language=resolved_language,
-                detect_orientation=bool(detect_orientation),
-                artifact_id=normalized_artifact_id,
-                variant=variant.value,
-            )
-        except OcrValidationError:
-            raise
-        except OcrExecutionError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise OcrExecutionError(str(exc)) from exc
+        assert self.capacity_limiter is not None
+        with self.capacity_limiter.acquire():
+            try:
+                result = self.engine.analyze_image(
+                    image_path=binary.path,
+                    language=resolved_language,
+                    detect_orientation=bool(detect_orientation),
+                    artifact_id=normalized_artifact_id,
+                    variant=variant.value,
+                )
+            except OcrValidationError:
+                raise
+            except OcrExecutionError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise OcrExecutionError(str(exc)) from exc
         self._enforce_result_budget(result)
         return replace(
             result,

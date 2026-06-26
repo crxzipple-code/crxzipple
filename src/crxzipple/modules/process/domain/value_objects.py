@@ -30,3 +30,14 @@ class ProcessOutputWindow:
     next_stderr_offset: int
     started_at: datetime
     ended_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessCleanupResult:
+    removed_process_ids: tuple[str, ...]
+    reclaimed_bytes: int
+    retained_running_process_ids: tuple[str, ...]
+
+    @property
+    def removed_count(self) -> int:
+        return len(self.removed_process_ids)

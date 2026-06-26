@@ -30,7 +30,6 @@ from crxzipple.modules.tool.application.service_support import (
     PreparedToolRunExecution,
     ToolServiceBase,
     ToolServiceDependencies,
-    build_tool_from_function,
 )
 from crxzipple.modules.tool.application.worker_errors import (
     exception_message as _exception_message,
@@ -48,6 +47,10 @@ from crxzipple.modules.tool.application.worker_registration import (
     prune_expired_workers_in_uow,
     register_or_refresh_worker,
 )
+from crxzipple.modules.tool.application.worker_run_resolution import (
+    resolve_run_catalog_tool,
+    resolve_run_tool_for_concurrency,
+)
 from crxzipple.modules.tool.application.worker_runtime_execution import (
     execute_tool_runtime_for_worker,
 )
@@ -56,6 +59,9 @@ from crxzipple.modules.tool.application.worker_processing_heartbeat import (
 )
 from crxzipple.modules.tool.application.worker_tracking import (
     complete_background_tracking as _complete_background_tracking,
+)
+from crxzipple.modules.tool.application.worker_run_loop import (
+    run_worker_until_stopped_async,
 )
 from crxzipple.modules.tool.application.worker_wakeup import (
     wait_for_worker_wakeup,
@@ -69,18 +75,15 @@ from crxzipple.modules.tool.domain.entities import (
 from crxzipple.modules.tool.domain.exceptions import (
     ToolNotFoundError,
     ToolRunNotFoundError,
-    ToolValidationError,
 )
 from crxzipple.modules.tool.domain.value_objects import (
     ToolExecutionContext,
     ToolExecutionTarget,
-    ToolFunctionStatus,
     ToolMode,
     ToolRunAssignmentStatus,
     ToolRunError,
     ToolRunResult,
     ToolRunStatus,
-    ToolSourceStatus,
 )
 
 logger = get_logger(__name__)
@@ -170,7 +173,7 @@ class ToolWorkerService(ToolServiceBase):
     ) -> int:
         stopper = stop_event or ThreadEvent()
         return asyncio.run(
-            self._run_until_stopped_async(
+            run_worker_until_stopped_async(
                 worker_id=worker_id,
                 poll_interval_seconds=poll_interval_seconds,
                 max_runs=max_runs,
@@ -179,120 +182,15 @@ class ToolWorkerService(ToolServiceBase):
                 events_service=events_service,
                 runtime_event_service=runtime_event_service,
                 max_in_flight=max_in_flight,
+                register_worker=self.register_worker,
+                mark_worker_stale=self.mark_worker_stale,
+                launch_assignments=self._launch_assignments,
+                reap_inflight_tasks=self._reap_inflight_tasks,
+                heartbeat_inflight_loop=self._heartbeat_inflight_loop,
+                wait_for_worker_wakeup=self._wait_for_worker_wakeup,
+                logger=logger,
             ),
         )
-
-    async def _run_until_stopped_async(
-        self,
-        *,
-        worker_id: str,
-        poll_interval_seconds: float,
-        max_runs: int | None,
-        max_idle_cycles: int | None,
-        stop_event: ThreadEvent,
-        events_service: ToolEventWaitPort | None,
-        runtime_event_service: ToolRuntimeEventService | None,
-        max_in_flight: int,
-    ) -> int:
-        processed_runs = 0
-        idle_cycles = 0
-        inflight_tasks: dict[str, asyncio.Task[ToolRun]] = {}
-
-        logger.info(
-            "tool worker started",
-            extra={
-                "poll_interval_seconds": poll_interval_seconds,
-                "max_runs": max_runs,
-                "max_idle_cycles": max_idle_cycles,
-                "worker_id": worker_id,
-                "max_in_flight": max_in_flight,
-            },
-        )
-
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_inflight_loop(
-                worker_id=worker_id,
-                stop_event=stop_event,
-                inflight_tasks=inflight_tasks,
-            ),
-        )
-
-        try:
-            await asyncio.to_thread(
-                self.register_worker,
-                worker_id=worker_id,
-                max_in_flight=max_in_flight,
-            )
-            while True:
-                if runtime_event_service is not None:
-                    await asyncio.to_thread(
-                        runtime_event_service.process_available_events,
-                    )
-                await asyncio.to_thread(
-                    self.register_worker,
-                    worker_id=worker_id,
-                    max_in_flight=max_in_flight,
-                )
-
-                processed_runs += await self._reap_inflight_tasks(inflight_tasks)
-
-                if max_runs is not None and processed_runs >= max_runs and not inflight_tasks:
-                    break
-                if stop_event.is_set() and not inflight_tasks:
-                    break
-
-                launches_allowed = max(0, max_in_flight - len(inflight_tasks))
-                if max_runs is not None:
-                    launches_allowed = min(
-                        launches_allowed,
-                        max(0, max_runs - processed_runs - len(inflight_tasks)),
-                    )
-                launched = 0
-                if not stop_event.is_set() and launches_allowed > 0:
-                    launched = await self._launch_assignments(
-                        worker_id=worker_id,
-                        inflight_tasks=inflight_tasks,
-                        max_new_assignments=launches_allowed,
-                    )
-                    if launched:
-                        idle_cycles = 0
-
-                if inflight_tasks:
-                    idle_cycles = 0
-                    done, _ = await asyncio.wait(
-                        tuple(inflight_tasks.values()),
-                        timeout=poll_interval_seconds,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if done:
-                        processed_runs += await self._reap_inflight_tasks(inflight_tasks)
-                    continue
-
-                if launched:
-                    continue
-
-                idle_cycles += 1
-                if max_idle_cycles is not None and idle_cycles >= max_idle_cycles:
-                    break
-                await asyncio.to_thread(
-                    self._wait_for_worker_wakeup,
-                    stop_event=stop_event,
-                    timeout_seconds=poll_interval_seconds,
-                    events_service=events_service,
-                    runtime_event_service=runtime_event_service,
-                )
-        finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            if inflight_tasks:
-                await asyncio.wait(tuple(inflight_tasks.values()))
-                await self._reap_inflight_tasks(inflight_tasks)
-            await asyncio.to_thread(self.mark_worker_stale, worker_id=worker_id)
-
-        return processed_runs
 
     async def _launch_assignments(
         self,
@@ -699,38 +597,14 @@ class ToolWorkerService(ToolServiceBase):
             )
 
     def _resolve_run_tool_for_concurrency(self, uow, run: ToolRun) -> Tool | None:
-        if run.function_id is not None:
-            function = uow.tool_functions.get(run.function_id)
-            if function is not None:
-                return build_tool_from_function(function)
-        return self.catalog_service.resolve_tool(run.tool_id)
+        return resolve_run_tool_for_concurrency(
+            uow,
+            run,
+            catalog_service=self.catalog_service,
+        )
 
     def _resolve_run_catalog_tool(self, uow, run: ToolRun) -> Tool | None:
-        if run.function_id is None:
-            return None
-        function = uow.tool_functions.get(run.function_id)
-        if function is None:
-            raise ToolValidationError(
-                f"Tool run '{run.id}' references missing function '{run.function_id}'.",
-            )
-        source = uow.tool_sources.get(function.source_id)
-        if source is None:
-            raise ToolValidationError(
-                f"Tool run '{run.id}' references missing source '{function.source_id}'.",
-            )
-        if source.status is not ToolSourceStatus.ACTIVE:
-            raise ToolValidationError(
-                f"Tool source '{source.source_id}' is {source.status.value}.",
-            )
-        if function.status is not ToolFunctionStatus.ACTIVE:
-            raise ToolValidationError(
-                f"Tool function '{function.function_id}' is {function.status.value}.",
-            )
-        if not function.enabled:
-            raise ToolValidationError(
-                f"Tool function '{function.function_id}' is disabled.",
-            )
-        return build_tool_from_function(function)
+        return resolve_run_catalog_tool(uow, run)
 
     def _complete_run_results(
         self,

@@ -6,8 +6,8 @@ Low risk. OCR is compact and primarily an infrastructure capability adapter.
 
 ## Evidence
 
-- 17 Python files, about 1316 lines.
-- Large files include `infrastructure/ppstructure_client.py` (432), `infrastructure/http_client.py` (154), `infrastructure/paddle_engine.py` (137), `application/services.py` (93).
+- 18 Python files, about 1481 lines.
+- Large files include `infrastructure/ppstructure_client.py`, `infrastructure/http_client.py`, `infrastructure/paddle_engine.py`, and `application/services.py`.
 
 ## Findings
 
@@ -18,12 +18,15 @@ Low risk. OCR is compact and primarily an infrastructure capability adapter.
 - OCR application service now enforces bounded result shape: excessive block
   counts or extracted text length fail explicitly instead of silently truncating
   text that downstream agents might treat as complete evidence.
+- OCR application service and host process now enforce an explicit concurrent
+  request capacity limit. Capacity exhaustion is surfaced as an OCR domain error
+  and HTTP 503, not as a generic validation or execution failure.
 
 ## Launch Risks
 
-- External OCR engine availability and timeout behavior can affect tool runs.
-  Request/invalid-payload/error mapping and result-size budgets are now tested;
-  host concurrency/capacity policy remains a follow-up.
+- External OCR engine availability, timeout behavior, and local host saturation can
+  affect tool runs. Request/invalid-payload/error mapping, result-size budgets, and
+  host/application capacity limits are now tested.
 
 ## Recommendations
 
@@ -85,7 +88,8 @@ externalization.
 ### Concurrency And Multi-User Readiness
 
 OCR host/engine calls require timeout, concurrency, and capacity limits if used by
-many tool runs.
+many tool runs. The current policy is an explicit semaphore-style limiter with
+capacity metadata exposed through service capability metadata and host health.
 
 ### Remediation Checklist
 
@@ -100,11 +104,11 @@ many tool runs.
 
 ### Verification
 
-- `PYTHONPATH=src pytest -q tests/unit/test_ocr_service.py tests/unit/test_ocr_http.py tests/unit/test_ocr_infrastructure.py --tb=short` -> 10 passed.
-- `python -m ruff check src/crxzipple/modules/ocr/application/services.py tests/unit/test_ocr_service.py` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_ocr_service.py tests/unit/test_ocr_host_http.py tests/unit/test_ocr_http.py tests/unit/test_ocr_infrastructure.py tests/unit/test_config.py --tb=short --maxfail=1` -> 49 passed.
+- `python -m ruff check src/crxzipple/modules/ocr src/crxzipple/app/assembly/ocr.py src/crxzipple/app/assembly/daemon.py src/crxzipple/core/config.py tests/unit/test_ocr_service.py tests/unit/test_ocr_host_http.py tests/unit/test_ocr_http.py tests/unit/test_ocr_infrastructure.py tests/unit/test_config.py` -> passed.
 - `PYTHONPATH=src pytest -q tests/unit/test_ocr_service.py::OcrApplicationServiceTestCase::test_capability_metadata_reports_engine_features_and_service_budgets tests/unit/test_ocr_service.py::OcrApplicationServiceTestCase::test_analyze_artifact_rejects_results_that_exceed_text_budget --tb=short` -> 2 passed.
 - `python -m ruff check src/crxzipple/modules/ocr/application/services.py tests/unit/test_ocr_service.py --ignore F401,I001,E501` -> passed.
 
 ### Capacity Policy
 
-- OCR capacity is documented in [docs/ocr-capability-runtime-policy.md](../../ocr-capability-runtime-policy.md). OCR does not own a hidden internal queue; daemon/tool/orchestration worker limits control concurrent pressure until an explicit OCR host semaphore is needed.
+- OCR capacity is documented in [docs/ocr-capability-runtime-policy.md](../../ocr-capability-runtime-policy.md). OCR does not own a hidden internal queue; it owns an explicit request limiter whose limit is configured by `APP_OCR_MAX_CONCURRENT_REQUESTS`.

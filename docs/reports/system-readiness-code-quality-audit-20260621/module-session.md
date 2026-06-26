@@ -2,17 +2,17 @@
 
 ## Verdict
 
-Medium importance, medium risk. Session is conceptually clean as the conversation ledger and has improved materially in this split wave. Append, lifecycle, queries, replay windows, compaction, metadata, reset policy, events, and Unit of Work seams are now separated, but `SessionApplicationService` remains the largest coordinator and replay/compaction correctness is still launch-critical.
+Medium importance, medium risk. Session is conceptually clean as the conversation ledger and has improved materially in this split wave. Append, lifecycle, query/read windows, compaction, metadata, reset policy, events, and Unit of Work seams are now separated. `SessionApplicationService` remains the write/lifecycle coordinator, while read/query window construction now lives in `SessionQueryReader`; replay/compaction correctness is still launch-critical.
 
 ## Evidence
 
-- 33 Python files, about 5008 lines.
-- Large files include `application/services.py` (906), `interfaces/cli.py` (374), `infrastructure/persistence/repositories.py` (345), `interfaces/http_models.py` (319), `application/runtime_response_projection.py` (307), `domain/value_objects.py` (301), `application/session_windows.py` (199), `interfaces/http.py` (195), and `interfaces/dto.py` (179).
+- 34 Python files, about 5151 lines.
+- Large files include `application/services.py` (728), `interfaces/cli.py` (374), `infrastructure/persistence/repositories.py` (360), `interfaces/http_models.py` (319), `application/runtime_response_projection.py` (307), `domain/value_objects.py` (301), `application/session_reader.py` (295), `application/session_windows.py` (199), `interfaces/http.py` (195), and `interfaces/dto.py` (179).
 
 ## Findings
 
 - Current direction is good: Session owns conversation/session item facts, not UI timeline decisions and not provider rendering.
-- `services.py` remains large, but append/query/replay/compaction/metadata/reset/event/UoW helpers and session instance/runtime binding lifecycle helpers have been extracted.
+- `services.py` remains the write/lifecycle facade, but append, query/read, replay, compaction, metadata, reset, event, UoW, and session instance/runtime binding lifecycle helpers have been extracted. `SessionQueryReader` owns pure reads, item ranges, segment handles, context frontier, replay windows, and source-item lookup.
 - Runtime response projection belongs as a read/projection surface, but it should not become a second source of truth.
 
 ## Launch Risks
@@ -42,14 +42,15 @@ Medium importance, medium risk. Session is conceptually clean as the conversatio
 
 ### File-Level Assessment
 
-`application/services.py` was 1474 lines and is now 906 lines after moving item
+`application/services.py` was 1474 lines and is now 728 lines after moving item
 append helpers, item events, session lifecycle, query DTOs, replay/context windows,
 segment compaction helpers, metadata merge helpers, reset policy, and Unit of Work
 ports into focused modules, then moving session/entity construction, session instance
 construction, runtime binding payload/metadata projection, instance binding sync,
 instance existence checks, sequence calculation, and session-kind inference into
-`session_instance_lifecycle.py`. It still coordinates ensure session, append/list/replay,
-segment maintenance, metadata, compaction, and routing, so it remains the main Session
+`session_instance_lifecycle.py`, then moving read/query/window construction into
+`session_reader.py`. It still coordinates ensure session, routed sync, append,
+metadata mutation, compaction, and reset, so it remains the main Session write
 governance hotspot.
 
 `runtime_response_projection.py` is a healthy sign: runtime-facing projection is separated from core domain facts. It must remain a projection, not a second source of truth.
@@ -96,6 +97,7 @@ Concurrent item appends, compaction, and replay window reads need careful orderi
 
 - [x] Split `SessionApplicationService` helper concerns into item append/event, lifecycle, query DTO, replay/window, compaction, metadata, reset policy, and Unit of Work modules.
 - [x] Split Session entity/instance construction, runtime binding sync, instance sequencing, and session-kind inference out of `SessionApplicationService`.
+- [x] Split pure Session read/query/window construction into `SessionQueryReader`, leaving `SessionApplicationService` as the write/lifecycle facade.
 - [x] Add architecture test: LLM request builders cannot read session repositories directly.
 - [x] Add concurrent append/replay/compaction boundary tests.
 - [x] Add replay-window tests that preserve required protocol/tool-call items after compaction.

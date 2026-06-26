@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from crxzipple.modules.process.domain import ProcessSession
+from crxzipple.modules.process.domain import ProcessCleanupResult, ProcessSession
 
 
 class ProcessSessionRepositoryPort(Protocol):
@@ -25,6 +26,15 @@ class ProcessSessionRepositoryPort(Protocol):
         ...
 
     def remove(self, process_id: str) -> None:
+        ...
+
+    def cleanup_terminal_sessions(
+        self,
+        *,
+        ended_before: datetime | None = None,
+        max_terminal_sessions: int | None = None,
+        max_terminal_bytes: int | None = None,
+    ) -> ProcessCleanupResult:
         ...
 
     def read_stdout(self, process_id: str) -> str:

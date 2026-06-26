@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from crxzipple.modules.agent.application.services import RegisterAgentProfileInput
+from crxzipple.modules.agent.application.profile_models import RegisterAgentProfileInput
 from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,

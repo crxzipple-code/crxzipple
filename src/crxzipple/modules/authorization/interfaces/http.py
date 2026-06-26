@@ -1,193 +1,48 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends
 
-from crxzipple.interfaces.runtime_container import AppContainer, AppKey
+from crxzipple.interfaces.runtime_container import AppContainer
 from crxzipple.interfaces.http.dependencies import get_container
-from crxzipple.modules.authorization.domain import (
-    AuthorizationContext,
-    AuthorizationEffect,
-    AuthorizationObligation,
-    AuthorizationPolicy,
-    AuthorizationPolicyNotFoundError,
-    AuthorizationRequest,
-    AuthorizationResource,
-    AuthorizationSubject,
+
+from .http_agent_grants import (
+    grant_agent_authorization_response,
+    revoke_agent_authorization_response,
 )
-from crxzipple.modules.authorization.infrastructure import YamlAuthorizationPolicyLoader
+from .http_decision_routes import router as decision_router
+from .http_models import (
+    AuthorizationAgentGrantRequest,
+    AuthorizationAgentGrantResponse,
+    AuthorizationPolicyExportResponse,
+    AuthorizationPolicyImportRequest,
+    AuthorizationPolicyImportResponse,
+    AuthorizationPolicyResponse,
+    AuthorizationPolicyStateRequest,
+    AuthorizationPolicyWriteRequest,
+)
+from .http_policy_handlers import (
+    create_policy_response,
+    delete_policy_response,
+    export_policy_response,
+    import_policy_response,
+    list_policy_responses,
+    set_policy_enabled_response,
+    update_policy_response,
+)
+from .http_services import authorization_service
 
 
 router = APIRouter()
-
-
-class AuthorizationSubjectRequest(BaseModel):
-    type: str = "anonymous"
-    id: str | None = None
-    attrs: dict[str, Any] = Field(default_factory=dict)
-
-
-class AuthorizationResourceRequest(BaseModel):
-    kind: str
-    id: str | None = None
-    attrs: dict[str, Any] = Field(default_factory=dict)
-
-
-class AuthorizationContextRequest(BaseModel):
-    attrs: dict[str, Any] = Field(default_factory=dict)
-
-
-class AuthorizationActorRequest(BaseModel):
-    type: str | None = None
-    id: str | None = None
-
-
-class AuthorizationCheckRequest(BaseModel):
-    subject: AuthorizationSubjectRequest = Field(default_factory=AuthorizationSubjectRequest)
-    action: str
-    resource: AuthorizationResourceRequest
-    context: AuthorizationContextRequest = Field(default_factory=AuthorizationContextRequest)
-
-
-class AuthorizationObligationResponse(BaseModel):
-    name: str
-    params: dict[str, Any] = Field(default_factory=dict)
-
-
-class AuthorizationDecisionResponse(BaseModel):
-    allowed: bool
-    reason: str
-    code: str
-    matched_policy_ids: list[str] = Field(default_factory=list)
-    obligations: list[AuthorizationObligationResponse] = Field(default_factory=list)
-    details: dict[str, Any] = Field(default_factory=dict)
-
-
-class AuthorizationPolicyResponse(BaseModel):
-    id: str
-    description: str
-    effect: str
-    actions: list[str]
-    subject_type: str | None = None
-    subject_id: str | None = None
-    subject_match: dict[str, Any] = Field(default_factory=dict)
-    resource_kind: str | None = None
-    resource_id: str | None = None
-    resource_match: dict[str, Any] = Field(default_factory=dict)
-    context_match: dict[str, Any] = Field(default_factory=dict)
-    condition: dict[str, Any] | None = None
-    obligations: list[AuthorizationObligationResponse] = Field(default_factory=list)
-    priority: int
-    enabled: bool
-    source_kind: str
-
-
-class AuthorizationPolicyWriteRequest(BaseModel):
-    id: str
-    description: str = ""
-    effect: str = "deny"
-    actions: list[str]
-    subject_type: str | None = None
-    subject_id: str | None = None
-    subject_match: dict[str, Any] = Field(default_factory=dict)
-    resource_kind: str | None = None
-    resource_id: str | None = None
-    resource_match: dict[str, Any] = Field(default_factory=dict)
-    context_match: dict[str, Any] = Field(default_factory=dict)
-    condition: dict[str, Any] | None = None
-    obligations: list[AuthorizationObligationResponse] = Field(default_factory=list)
-    priority: int = 0
-    enabled: bool = True
-    source_kind: str = "local_managed"
-    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
-    reason: str = ""
-
-
-class AuthorizationPolicyStateRequest(BaseModel):
-    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
-    reason: str = ""
-
-
-class AuthorizationAgentGrantRequest(BaseModel):
-    agent_id: str
-    kind: Literal["effect", "tool"]
-    id: str
-    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
-    reason: str = ""
-
-
-class AuthorizationAgentGrantResponse(BaseModel):
-    agent_id: str
-    kind: Literal["effect", "tool"]
-    id: str
-    policy_id: str
-    status: Literal["enabled", "revoked", "not_found"]
-    policy: AuthorizationPolicyResponse | None = None
-
-
-class AuthorizationPolicyImportRequest(BaseModel):
-    content: str
-    source: str = "inline"
-    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
-    reason: str = ""
-
-
-class AuthorizationPolicyImportResponse(BaseModel):
-    imported: int
-    policy_ids: list[str]
-
-
-class AuthorizationPolicyExportResponse(BaseModel):
-    kind: str
-    version: int
-    policies: list[dict[str, Any]]
-
-
-class AuthorizationDryRunRequest(BaseModel):
-    request: AuthorizationCheckRequest
-    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
-    reason: str = ""
-
-
-class AuthorizationImpactRequest(BaseModel):
-    request: AuthorizationCheckRequest
-    proposed_policies: list[AuthorizationPolicyWriteRequest] = Field(default_factory=list)
-    remove_policy_ids: list[str] = Field(default_factory=list)
-    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
-    reason: str = ""
-
-
-class AuthorizationImpactResponse(BaseModel):
-    changed: bool
-    before: AuthorizationDecisionResponse
-    after: AuthorizationDecisionResponse
-    added_policy_ids: list[str] = Field(default_factory=list)
-    updated_policy_ids: list[str] = Field(default_factory=list)
-    removed_policy_ids: list[str] = Field(default_factory=list)
-
-
-class AuthorizationAuditResponse(BaseModel):
-    id: str
-    action: str
-    status: str
-    actor_type: str | None = None
-    actor_id: str | None = None
-    target_policy_id: str | None = None
-    reason: str = ""
-    before_payload: dict[str, Any] = Field(default_factory=dict)
-    after_payload: dict[str, Any] = Field(default_factory=dict)
-    decision_payload: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    created_at: str
+router.include_router(decision_router)
 
 
 @router.get("/policies", response_model=list[AuthorizationPolicyResponse])
 def list_policies(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[AuthorizationPolicyResponse]:
-    return [_to_policy_response(policy) for policy in container.require(AppKey.AUTHORIZATION_SERVICE).list_policies()]
+    return list_policy_responses(authorization_service(container))
 
 
 @router.post(
@@ -199,16 +54,7 @@ def create_policy(
     payload: AuthorizationPolicyWriteRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationPolicyResponse:
-    try:
-        policy = container.require(AppKey.AUTHORIZATION_SERVICE).create_policy(
-            _policy_from_request(payload),
-            actor_type=payload.actor.type,
-            actor_id=payload.actor.id,
-            reason=payload.reason,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _to_policy_response(policy)
+    return create_policy_response(payload, authorization_service(container))
 
 
 @router.post(
@@ -219,38 +65,9 @@ def grant_agent_authorization(
     payload: AuthorizationAgentGrantRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationAgentGrantResponse:
-    agent_id = payload.agent_id.strip()
-    target_id = payload.id.strip()
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="agent_id cannot be empty.")
-    if not target_id:
-        raise HTTPException(status_code=400, detail="id cannot be empty.")
-    try:
-        if payload.kind == "effect":
-            policy = container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_effect_authorization(
-                agent_id=agent_id,
-                effect_id=target_id,
-                actor_type=payload.actor.type,
-                actor_id=payload.actor.id,
-                reason=payload.reason,
-            )
-        else:
-            policy = container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_tool_authorization(
-                agent_id=agent_id,
-                tool_id=target_id,
-                actor_type=payload.actor.type,
-                actor_id=payload.actor.id,
-                reason=payload.reason,
-            )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return AuthorizationAgentGrantResponse(
-        agent_id=agent_id,
-        kind=payload.kind,
-        id=target_id,
-        policy_id=policy.id,
-        status="enabled",
-        policy=_to_policy_response(policy),
+    return grant_agent_authorization_response(
+        payload,
+        authorization_service(container),
     )
 
 
@@ -262,43 +79,9 @@ def revoke_agent_authorization(
     payload: AuthorizationAgentGrantRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationAgentGrantResponse:
-    agent_id = payload.agent_id.strip()
-    target_id = payload.id.strip()
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="agent_id cannot be empty.")
-    if not target_id:
-        raise HTTPException(status_code=400, detail="id cannot be empty.")
-    try:
-        if payload.kind == "effect":
-            policy = container.require(AppKey.AUTHORIZATION_SERVICE).revoke_agent_effect_authorization(
-                agent_id=agent_id,
-                effect_id=target_id,
-                actor_type=payload.actor.type,
-                actor_id=payload.actor.id,
-                reason=payload.reason,
-            )
-        else:
-            policy = container.require(AppKey.AUTHORIZATION_SERVICE).revoke_agent_tool_authorization(
-                agent_id=agent_id,
-                tool_id=target_id,
-                actor_type=payload.actor.type,
-                actor_id=payload.actor.id,
-                reason=payload.reason,
-            )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    policy_id = (
-        policy.id
-        if policy is not None
-        else _agent_grant_policy_id(agent_id=agent_id, kind=payload.kind, target_id=target_id)
-    )
-    return AuthorizationAgentGrantResponse(
-        agent_id=agent_id,
-        kind=payload.kind,
-        id=target_id,
-        policy_id=policy_id,
-        status="revoked" if policy is not None else "not_found",
-        policy=_to_policy_response(policy) if policy is not None else None,
+    return revoke_agent_authorization_response(
+        payload,
+        authorization_service(container),
     )
 
 
@@ -311,21 +94,7 @@ def update_policy(
     payload: AuthorizationPolicyWriteRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationPolicyResponse:
-    if payload.id != policy_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Policy id in path and payload must match.",
-        )
-    try:
-        policy = container.require(AppKey.AUTHORIZATION_SERVICE).update_policy(
-            _policy_from_request(payload),
-            actor_type=payload.actor.type,
-            actor_id=payload.actor.id,
-            reason=payload.reason,
-        )
-    except AuthorizationPolicyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _to_policy_response(policy)
+    return update_policy_response(policy_id, payload, authorization_service(container))
 
 
 @router.post(
@@ -337,10 +106,10 @@ def enable_policy(
     container: Annotated[AppContainer, Depends(get_container)],
     payload: AuthorizationPolicyStateRequest | None = None,
 ) -> AuthorizationPolicyResponse:
-    return _set_policy_enabled(
+    return set_policy_enabled_response(
         policy_id,
         payload or AuthorizationPolicyStateRequest(),
-        container,
+        authorization_service(container),
         enabled=True,
     )
 
@@ -354,10 +123,10 @@ def disable_policy(
     container: Annotated[AppContainer, Depends(get_container)],
     payload: AuthorizationPolicyStateRequest | None = None,
 ) -> AuthorizationPolicyResponse:
-    return _set_policy_enabled(
+    return set_policy_enabled_response(
         policy_id,
         payload or AuthorizationPolicyStateRequest(),
-        container,
+        authorization_service(container),
         enabled=False,
     )
 
@@ -371,17 +140,11 @@ def delete_policy(
     container: Annotated[AppContainer, Depends(get_container)],
     payload: AuthorizationPolicyStateRequest | None = None,
 ) -> AuthorizationPolicyResponse:
-    resolved_payload = payload or AuthorizationPolicyStateRequest()
-    try:
-        policy = container.require(AppKey.AUTHORIZATION_SERVICE).delete_policy(
-            policy_id,
-            actor_type=resolved_payload.actor.type,
-            actor_id=resolved_payload.actor.id,
-            reason=resolved_payload.reason,
-        )
-    except AuthorizationPolicyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _to_policy_response(policy)
+    return delete_policy_response(
+        policy_id,
+        payload or AuthorizationPolicyStateRequest(),
+        authorization_service(container),
+    )
 
 
 @router.post(
@@ -392,251 +155,11 @@ def import_policies(
     payload: AuthorizationPolicyImportRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationPolicyImportResponse:
-    try:
-        policies = YamlAuthorizationPolicyLoader().load_text(
-            payload.content,
-            source_description=payload.source,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    imported = container.require(AppKey.AUTHORIZATION_SERVICE).import_policies(
-        policies,
-        actor_type=payload.actor.type,
-        actor_id=payload.actor.id,
-        reason=payload.reason,
-        source=payload.source,
-    )
-    return AuthorizationPolicyImportResponse(
-        imported=len(imported),
-        policy_ids=[policy.id for policy in imported],
-    )
+    return import_policy_response(payload, authorization_service(container))
 
 
 @router.get("/policies/export", response_model=AuthorizationPolicyExportResponse)
 def export_policies(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationPolicyExportResponse:
-    return AuthorizationPolicyExportResponse(
-        **container.require(AppKey.AUTHORIZATION_SERVICE).export_policy_bundle(),
-    )
-
-
-@router.post("/policies/dry-run", response_model=AuthorizationDecisionResponse)
-def dry_run_authorization(
-    payload: AuthorizationDryRunRequest,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> AuthorizationDecisionResponse:
-    decision = container.require(AppKey.AUTHORIZATION_SERVICE).dry_run(
-        _authorization_request_from_payload(payload.request),
-        actor_type=payload.actor.type,
-        actor_id=payload.actor.id,
-        reason=payload.reason,
-    )
-    return _to_decision_response(decision)
-
-
-@router.post("/policies/impact", response_model=AuthorizationImpactResponse)
-def preview_policy_impact(
-    payload: AuthorizationImpactRequest,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> AuthorizationImpactResponse:
-    preview = container.require(AppKey.AUTHORIZATION_SERVICE).preview_policy_impact(
-        _authorization_request_from_payload(payload.request),
-        proposed_policies=tuple(
-            _policy_from_request(policy_payload)
-            for policy_payload in payload.proposed_policies
-        ),
-        remove_policy_ids=tuple(payload.remove_policy_ids),
-        actor_type=payload.actor.type,
-        actor_id=payload.actor.id,
-        reason=payload.reason,
-    )
-    return AuthorizationImpactResponse(
-        changed=preview.changed,
-        before=_to_decision_response(preview.before),
-        after=_to_decision_response(preview.after),
-        added_policy_ids=list(preview.added_policy_ids),
-        updated_policy_ids=list(preview.updated_policy_ids),
-        removed_policy_ids=list(preview.removed_policy_ids),
-    )
-
-
-@router.get("/audits", response_model=list[AuthorizationAuditResponse])
-def list_audits(
-    container: Annotated[AppContainer, Depends(get_container)],
-    limit: int = 50,
-    offset: int = 0,
-    action: str | None = None,
-    target_policy_id: str | None = None,
-) -> list[AuthorizationAuditResponse]:
-    return [
-        _to_audit_response(record)
-        for record in container.require(AppKey.AUTHORIZATION_SERVICE).list_audit_records(
-            limit=limit,
-            offset=offset,
-            action=action,
-            target_policy_id=target_policy_id,
-        )
-    ]
-
-
-@router.post("/check", response_model=AuthorizationDecisionResponse)
-def check_authorization(
-    payload: AuthorizationCheckRequest,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> AuthorizationDecisionResponse:
-    decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
-        _authorization_request_from_payload(payload),
-    )
-    return _to_decision_response(decision)
-
-
-def _set_policy_enabled(
-    policy_id: str,
-    payload: AuthorizationPolicyStateRequest,
-    container: AppContainer,
-    *,
-    enabled: bool,
-) -> AuthorizationPolicyResponse:
-    try:
-        policy = container.require(AppKey.AUTHORIZATION_SERVICE).set_policy_enabled(
-            policy_id,
-            enabled=enabled,
-            actor_type=payload.actor.type,
-            actor_id=payload.actor.id,
-            reason=payload.reason,
-        )
-    except AuthorizationPolicyNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _to_policy_response(policy)
-
-
-def _authorization_request_from_payload(
-    payload: AuthorizationCheckRequest,
-) -> AuthorizationRequest:
-    return AuthorizationRequest(
-        subject=AuthorizationSubject(
-            type=payload.subject.type,
-            id=payload.subject.id,
-            attrs=dict(payload.subject.attrs),
-        ),
-        action=payload.action,
-        resource=AuthorizationResource(
-            kind=payload.resource.kind,
-            id=payload.resource.id,
-            attrs=dict(payload.resource.attrs),
-        ),
-        context=AuthorizationContext(attrs=dict(payload.context.attrs)),
-    )
-
-
-def _policy_from_request(payload: AuthorizationPolicyWriteRequest) -> AuthorizationPolicy:
-    policy_id = payload.id.strip()
-    if not policy_id:
-        raise HTTPException(status_code=400, detail="Policy id cannot be empty.")
-    actions = tuple(
-        dict.fromkeys(
-            action.strip()
-            for action in payload.actions
-            if action.strip()
-        ),
-    )
-    if not actions:
-        raise HTTPException(status_code=400, detail="Policy actions cannot be empty.")
-    try:
-        effect = AuthorizationEffect(payload.effect.strip().lower())
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported authorization effect '{payload.effect}'.",
-        ) from exc
-    return AuthorizationPolicy(
-        id=policy_id,
-        description=payload.description.strip(),
-        effect=effect,
-        actions=actions,
-        subject_type=(payload.subject_type or "").strip() or None,
-        subject_id=(payload.subject_id or "").strip() or None,
-        subject_match=dict(payload.subject_match),
-        resource_kind=(payload.resource_kind or "").strip() or None,
-        resource_id=(payload.resource_id or "").strip() or None,
-        resource_match=dict(payload.resource_match),
-        context_match=dict(payload.context_match),
-        condition=dict(payload.condition) if payload.condition is not None else None,
-        obligations=tuple(
-            AuthorizationObligation(name=item.name, params=dict(item.params))
-            for item in payload.obligations
-        ),
-        priority=payload.priority,
-        enabled=payload.enabled,
-        source_kind=payload.source_kind.strip() or "local_managed",
-    )
-
-
-def _to_decision_response(decision) -> AuthorizationDecisionResponse:
-    return AuthorizationDecisionResponse(
-        allowed=decision.allowed,
-        reason=decision.reason,
-        code=decision.code.value,
-        matched_policy_ids=list(decision.matched_policy_ids),
-        obligations=[
-            AuthorizationObligationResponse(name=item.name, params=dict(item.params))
-            for item in decision.obligations
-        ],
-        details=dict(decision.details),
-    )
-
-
-def _to_policy_response(policy) -> AuthorizationPolicyResponse:
-    return AuthorizationPolicyResponse(
-        id=policy.id,
-        description=policy.description,
-        effect=policy.effect.value,
-        actions=list(policy.actions),
-        subject_type=policy.subject_type,
-        subject_id=policy.subject_id,
-        subject_match=dict(policy.subject_match),
-        resource_kind=policy.resource_kind,
-        resource_id=policy.resource_id,
-        resource_match=dict(policy.resource_match),
-        context_match=dict(policy.context_match),
-        condition=dict(policy.condition) if policy.condition is not None else None,
-        obligations=[
-            AuthorizationObligationResponse(name=item.name, params=dict(item.params))
-            for item in policy.obligations
-        ],
-        priority=policy.priority,
-        enabled=policy.enabled,
-        source_kind=policy.source_kind,
-    )
-
-
-def _to_audit_response(record) -> AuthorizationAuditResponse:
-    return AuthorizationAuditResponse(
-        id=record.id,
-        action=record.action,
-        status=record.status,
-        actor_type=record.actor_type,
-        actor_id=record.actor_id,
-        target_policy_id=record.target_policy_id,
-        reason=record.reason,
-        before_payload=dict(record.before_payload),
-        after_payload=dict(record.after_payload),
-        decision_payload=dict(record.decision_payload),
-        metadata=dict(record.metadata),
-        created_at=record.created_at.isoformat(),
-    )
-
-
-def _agent_grant_policy_id(
-    *,
-    agent_id: str,
-    kind: str,
-    target_id: str,
-) -> str:
-    def _clean(value: str) -> str:
-        return "".join(char if char.isalnum() else "_" for char in value)
-
-    if kind == "effect":
-        return f"local_allow_agent_effect__{_clean(agent_id)}__{_clean(target_id)}"
-    return f"local_allow_agent_tool__{_clean(agent_id)}__{_clean(target_id)}"
+    return export_policy_response(authorization_service(container))

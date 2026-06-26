@@ -38,13 +38,15 @@ from crxzipple.modules.settings.application.services import (
     SettingsEffectiveResolutionService,
     SettingsQueryService,
 )
+from crxzipple.modules.settings.application.service_bundle import (
+    SettingsServices,
+    create_in_memory_settings_services,
+)
 from crxzipple.modules.settings.application.setup import (
     SETTINGS_GOVERNANCE_RESOURCE_KINDS,
     SettingsBootstrapImportResult,
-    SettingsServices,
     collect_core_settings_resources,
     create_bootstrap_settings_services,
-    create_in_memory_settings_services,
     import_core_settings_resources,
     seed_core_settings_resources,
 )

@@ -18,10 +18,8 @@ from crxzipple.modules.settings.application.read_models import (
     resource_by_kind as _resource_by_kind,
     resource_detail_payload as _resource_detail_payload,
 )
-from crxzipple.modules.settings.interfaces.http_actions import (
-    SettingsActionRequest,
-    run_settings_action,
-)
+from crxzipple.modules.settings.interfaces.http_action_models import SettingsActionRequest
+from crxzipple.modules.settings.interfaces.http_actions import run_settings_action
 from crxzipple.modules.settings.interfaces.http_common import (
     require_kind as _require_kind,
     settings_action_service as _settings_action_service,

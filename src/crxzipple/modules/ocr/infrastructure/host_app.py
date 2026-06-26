@@ -6,7 +6,12 @@ from typing import Annotated
 from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from crxzipple.modules.ocr.domain import OcrExecutionError, OcrValidationError
+from crxzipple.modules.ocr.application.capacity import OcrCapacityLimiter
+from crxzipple.modules.ocr.domain import (
+    OcrCapacityExceededError,
+    OcrExecutionError,
+    OcrValidationError,
+)
 from crxzipple.modules.ocr.infrastructure.paddle_engine import PaddleOcrEngine
 from crxzipple.modules.ocr.interfaces.serializers import OcrResultSerializer
 
@@ -24,17 +29,22 @@ def create_ocr_host_app(
     engine=None,  # noqa: ANN001
     default_language: str = "ch",
     use_gpu: bool = False,
+    max_concurrent_requests: int = 1,
+    capacity_limiter: OcrCapacityLimiter | None = None,
 ) -> FastAPI:
     resolved_engine = engine or PaddleOcrEngine(
         default_language=default_language,
         use_gpu=use_gpu,
     )
+    limiter = capacity_limiter or OcrCapacityLimiter(max_concurrent_requests)
     serializer = OcrResultSerializer()
     router = APIRouter()
 
     @router.get("/health")
     def health() -> dict[str, object]:
-        return dict(resolved_engine.health())
+        payload = dict(resolved_engine.health())
+        payload["capacity"] = limiter.snapshot().as_dict()
+        return payload
 
     @router.post("/analyze")
     def analyze(
@@ -47,15 +57,18 @@ def create_ocr_host_app(
                 detail=f"Image path '{image_path}' was not found.",
             )
         try:
-            result = resolved_engine.analyze_image(
-                image_path=image_path,
-                language=payload.language,
-                detect_orientation=payload.detect_orientation,
-                artifact_id=payload.artifact_id,
-                variant=payload.variant,
-            )
+            with limiter.acquire():
+                result = resolved_engine.analyze_image(
+                    image_path=image_path,
+                    language=payload.language,
+                    detect_orientation=payload.detect_orientation,
+                    artifact_id=payload.artifact_id,
+                    variant=payload.variant,
+                )
         except OcrValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OcrCapacityExceededError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except OcrExecutionError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return serializer.serialize(result)

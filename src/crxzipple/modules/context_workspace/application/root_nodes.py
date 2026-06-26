@@ -110,13 +110,18 @@ def default_parent_id_for_node_id(node_id: str) -> str | None:
 
 
 __all__ = [
+    "CAPABILITIES_ROOT_NODE_ID",
     "CONTEXT_INSTRUCTIONS_NODE_ID",
     "CONTEXT_STATIC_GUIDE_REVISION",
     "CONTEXT_TREE_SCHEMA_VERSION",
     "DEFAULT_PARENT_BY_NODE_ID",
     "EXECUTION_CURRENT_NODE_ID",
+    "KNOWLEDGE_ROOT_NODE_ID",
+    "RENDER_ROOT_NODE_ID",
     "ROOT_SECTION_NODE_IDS",
+    "RUNTIME_ROOT_NODE_ID",
     "SESSION_CURRENT_NODE_ID",
+    "SESSION_ROOT_NODE_ID",
     "TASK_ROOT_NODE_ID",
     "default_parent_id_for_node_id",
     "default_root_node_seeds",

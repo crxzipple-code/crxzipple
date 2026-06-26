@@ -2094,7 +2094,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return_value=_FakeContainerContext(),
                 ),
                 patch(
-                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark._register_tool_io_benchmark_runtime",
+                    "crxzipple.modules.orchestration.interfaces.worker_cli_benchmark.register_tool_io_benchmark_runtime",
                     return_value=(
                         "benchmark.tool_io.fake",
                         "benchmark_tool_io_sleep_fake",

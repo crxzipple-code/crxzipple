@@ -11,3 +11,7 @@ class OcrValidationError(OcrError):
 
 class OcrExecutionError(OcrError):
     """Raised when OCR execution fails."""
+
+
+class OcrCapacityExceededError(OcrExecutionError):
+    """Raised when OCR execution cannot start because local capacity is full."""

@@ -6,8 +6,8 @@ Medium-high risk. Channels own external ingress/egress and delivery semantics. R
 
 ## Evidence
 
-- 39 Python files, about 9104 lines.
-- Large files include `application/services.py` (886), `application/webhook_runtime.py` (705), `domain/value_objects.py` (607), `application/lark_runtime.py` (489), and `application/web_runtime.py` (479).
+- 43 Python files, about 9150 lines.
+- Large files include `application/webhook_runtime.py` (705), `domain/value_objects.py` (607), `application/runtime_manager.py` (490), `application/lark_runtime.py` (489), and `application/web_runtime.py` (479). `application/services.py` is now a 15-line public export surface.
 - Dead-letter query/replay HTTP shaping is isolated in `interfaces/http_dead_letters.py`.
 
 ## Findings
@@ -29,6 +29,10 @@ Medium-high risk. Channels own external ingress/egress and delivery semantics. R
   service.
 - Lark/Webhook observe state helpers now live in `application/runtime_observation.py`; Lark session-message observation payload projection now lives in `application/lark_runtime_observation.py`; Lark outbound observe delivery payload building, artifact upload, and send calls now live in `application/lark_runtime_delivery.py`; Lark tenant-token and bot identity lookup/cache now live in `application/lark_runtime_identity.py`; Lark long-connection thread/SDK ingress now lives in `application/lark_runtime_long_connection.py`; Lark message-to-run submission now lives in `application/lark_runtime_submission.py`.
 - Webhook inbound message-to-run submission, idempotency lookup, reply-address construction, interaction upsert, and orchestration turn submission now live in `application/webhook_runtime_submission.py`.
+- Channel profile, interaction, and runtime registry management now live in focused
+  `application/profile_service.py`, `application/interaction_service.py`, and
+  `application/runtime_manager.py`; shared normalization/time helpers live in
+  `application/service_helpers.py`; `application/services.py` is a stable export surface.
 - Credential/access boundary must stay delegated to Access.
 
 ## Launch Risks
@@ -62,6 +66,10 @@ Medium-high risk. Channels own external ingress/egress and delivery semantics. R
 - `application/web_runtime.py`
 - `application/webhook_runtime.py`
 - `application/services.py`
+- `application/profile_service.py`
+- `application/interaction_service.py`
+- `application/runtime_manager.py`
+- `application/service_helpers.py`
 - `application/bindings.py`
 - `application/control.py`
 - `application/lark_messages.py`
@@ -110,9 +118,12 @@ formatting into `interfaces/http_web_events.py`, plus dead-letter query/replay p
 into `interfaces/http_dead_letters.py`. The main HTTP router now keeps profile, runtime,
 and subscription route control flow.
 
-`application/services.py`, `bindings.py`, and `control.py` are moderate in size and
-appear to represent the intended domain/application split. They should absorb stable
-channel use cases as `runtime.py` is decomposed.
+`application/services.py` is now a thin export surface over profile, interaction, and
+runtime-registry services. `application/profile_service.py` owns Channel profile config
+use cases, `application/interaction_service.py` owns interaction/run/session binding
+mutation, and `application/runtime_manager.py` owns runtime registration plus account and
+connection bindings. `bindings.py` and `control.py` remain moderate in size and represent
+the intended domain/application split.
 
 ### Boundary Cleanliness
 

@@ -2,18 +2,18 @@
 
 ## Verdict
 
-Low-medium risk. Mobile is capability-runtime oriented and relatively self-contained, but engine implementations are large.
+Low-medium risk. Mobile is capability-runtime oriented and relatively self-contained. Engine helpers are now split, though ADB/device integration remains inherently infrastructure-heavy.
 
 ## Evidence
 
-- 21 Python files, about 3684 lines.
-- Large files include `infrastructure/engines.py` (820), `infrastructure/adb_client.py` (690), `application/services.py` (320), `infrastructure/vision_layout.py` (285), `infrastructure/snapshot_builders.py` (268).
+- 24 Python files, about 4081 lines.
+- Large files include `infrastructure/engines.py` (686), `infrastructure/adb_client.py` (690), `application/services.py` (338), `infrastructure/vision_layout.py` (285), `infrastructure/snapshot_builders.py` (268), and `infrastructure/adb_engine_helpers.py` (177).
 
 ## Findings
 
 - Capability runtime boundary is appropriate.
 - Engine/ADB details belong in infrastructure.
-- Application service is modest, but engine file should be split if capability grows.
+- Application service is modest. ADB action/control helpers are now split out of the engine entrypoint.
 - Device execution now has a formal file-backed lease store wired through the
   coordinator, so simultaneous owners cannot drive the same device state path.
 - ADB subprocess failures now report bounded diagnostics instead of propagating
@@ -47,9 +47,10 @@ Low-medium risk. Mobile is capability-runtime oriented and relatively self-conta
 
 ### File-Level Assessment
 
-`infrastructure/engines.py` is now 820 lines and owns mobile action/control execution
+`infrastructure/engines.py` is now 686 lines and owns mobile action/control execution
 flow. UI XML selector/node resolution moved to `infrastructure/ui_node_resolution.py`;
-UI-tree/OCR/vision snapshot construction moved to `infrastructure/snapshot_builders.py`.
+UI-tree/OCR/vision snapshot construction moved to `infrastructure/snapshot_builders.py`;
+ADB action/control helper policy moved to `infrastructure/adb_engine_helpers.py`.
 Artifact capture remains in the action engine because it is part of command execution,
 but result payloads stay ref/metadata-backed rather than inline image bytes.
 
@@ -111,7 +112,8 @@ Mobile should be exposed through stable tools/capability actions, not raw ADB ac
 - `PYTHONPATH=src pytest -q tests/unit/test_module_architecture_guards.py::test_mobile_core_has_no_app_or_task_specific_flow_logic --tb=short` -> 1 passed.
 - `python -m ruff check tests/unit/test_module_architecture_guards.py --ignore F401,I001,E501` -> passed.
 - `PYTHONPATH=src pytest -q tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py tests/unit/test_module_architecture_guards.py::test_mobile_core_has_no_app_or_task_specific_flow_logic --tb=short` -> 52 passed.
-- `python -m ruff check src/crxzipple/modules/mobile/infrastructure/engines.py src/crxzipple/modules/mobile/infrastructure/snapshot_builders.py src/crxzipple/modules/mobile/infrastructure/ui_node_resolution.py tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py tests/unit/test_module_architecture_guards.py --ignore F401,I001,E501,F403,F405` -> passed.
+- `python -m ruff check src/crxzipple/modules/mobile/infrastructure/engines.py src/crxzipple/modules/mobile/infrastructure/adb_engine_helpers.py tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_module_architecture_guards.py` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py tests/unit/test_module_architecture_guards.py::test_mobile_core_has_no_app_or_task_specific_flow_logic --tb=short --maxfail=1` -> 52 passed.
 
 ### Notes From Current Remediation
 

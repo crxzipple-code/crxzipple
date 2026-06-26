@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from tests.unit.http_test_support import *
+from tests.unit.http_test_support import AppKey, HttpModuleTestCase, patch
 
-from crxzipple.modules.ocr.domain import OcrResult, OcrTextBlock
+from crxzipple.modules.ocr.domain import (
+    OcrCapacityExceededError,
+    OcrResult,
+    OcrTextBlock,
+)
 
 
 class OcrHttpTestCase(HttpModuleTestCase):
@@ -75,3 +79,19 @@ class OcrHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["overall_ocr_blocks"][0]["label"], "text")
         self.assertEqual(captured[0]["artifact_id"], "artifact-1")
         self.assertEqual(captured[0]["variant"].value, "preview")
+
+    def test_ocr_analyze_artifact_endpoint_maps_capacity_to_503(self) -> None:
+        container = self.client.app.state.container
+        with patch.object(
+            type(container.require(AppKey.OCR_SERVICE)),
+            "analyze_artifact",
+            autospec=True,
+            side_effect=OcrCapacityExceededError("OCR capacity is exhausted."),
+        ):
+            response = self.client.post(
+                "/ocr/analyze-artifact",
+                json={"artifact_id": "artifact-1"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("OCR capacity is exhausted", response.json()["detail"])

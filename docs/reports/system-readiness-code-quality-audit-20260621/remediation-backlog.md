@@ -118,6 +118,32 @@ identity before contributing granted tool/effect ids; regression tests cover run
 grant, session grant, and agent-managed allow/revoke state-machine boundaries.
 Authorization audit payloads now redact sensitive nested keys before persistence,
 with regression coverage against both application read models and stored audit JSON.
+Authorization tool execution decision flow now lives in a focused application helper,
+leaving the main service responsible for repository access, temporary grant aggregation,
+evaluator access, policy lifecycle, and audit.
+Authorization impact-preview projection now lives in a focused application helper,
+leaving the main service responsible for audit recording around before/after decisions.
+Authorization temporary grant construction and scoped aggregation now live in a focused
+application helper, leaving the main service responsible for storing grants and auditing
+grant creation.
+Authorization temporary grant creation/storage/audit coordination now lives in a
+focused application use-case service, leaving the main service as the public facade.
+Authorization dry-run and impact-preview decision use cases now live in a focused
+application helper, leaving the main service to expose the public API only.
+Authorization audit record construction now lives in a focused application helper,
+leaving the main service responsible for deciding when to write audit records.
+Authorization policy create/update/enable/delete/import coordination now lives in a
+focused application lifecycle helper. Public service policy, decision, grant, and audit
+entry methods now live in focused facade mixins, leaving the main service as the
+composition/audit/evaluator/check entrypoint. Agent-managed grant/revoke coordination
+now lives in a focused application helper over the policy lifecycle helper.
+Authorization SQLAlchemy/domain persistence mapping now lives in a focused repository
+mapper helper, leaving repositories responsible for query/commit/bootstrap/pagination
+behavior.
+Agent profile/home remediation now keeps `AgentApplicationService` as the public facade
+while profile lifecycle orchestration lives in `AgentProfileUseCases` and home
+migrate/sync/export/inspect/file-update orchestration lives in `AgentHomeUseCases`,
+with the Agent Unit of Work protocol split into a shared application port.
 
 ### Gate D. Request/Projection Cost
 
@@ -143,17 +169,203 @@ Purpose: make model-visible data and runtime facts predictable.
 
 | Task | Modules | Acceptance |
 | --- | --- | --- |
-| Split session replay/append/compaction services | session | Boundary coverage complete for this wave: append DTO/item construction, lifecycle/routing DTOs, query/window DTOs, Session Unit of Work port, metadata DTO/item merge helper, reset policy, appended item event payload projection, replay window, item range, context frontier, segment handle read-slice construction, and segment compaction rules/DTOs are outside `SessionApplicationService`; replay protocol preservation is covered; session item/instance sequence uniqueness, stale append sequence race rejection, and stale segment rotation race rejection are enforced at persistence schema boundary; append sequence conflicts retry through an application-level detector port; stale writes into historical segments and stale compaction on closed active instances are rejected; active-only replay stays on the current segment after compaction |
+| Split session replay/append/compaction services | session | Boundary coverage complete for this wave: append DTO/item construction, lifecycle/routing DTOs, query/window DTOs, Session Unit of Work port, metadata DTO/item merge helper, reset policy, appended item event payload projection, replay window, item range, context frontier, segment handle read-slice construction, pure read/window construction via `SessionQueryReader`, and segment compaction rules/DTOs are outside `SessionApplicationService`; replay protocol preservation is covered; session item/instance sequence uniqueness, stale append sequence race rejection, and stale segment rotation race rejection are enforced at persistence schema boundary; append sequence conflicts retry through an application-level detector port; stale writes into historical segments and stale compaction on closed active instances are rejected; active-only replay stays on the current segment after compaction |
 | Lock provider rendering boundary | llm, context_workspace | Provider adapter receives only selected renderer output and tool schemas; LLM runtime request has been split into neutral request shell, render snapshot/control metadata, runtime input item projection, Tool Surface projection, and preview/diagnostic helpers; request factory Tool Surface snapshot projection is isolated behind a focused builder, request-render projected input restoration/orphan tool-call filtering is isolated behind a focused input filter, and request factory metadata/snapshot/mode/validation helpers are isolated behind a focused helper module; LLM profile credential expectation and Access binding metadata checks now live in a focused profile credential helper; profile warmup lifecycle and warmup event recording now live in a focused warmup service; invocation event payload construction is split into runtime summary, terminal payload, completed-payload extraction, and lightweight started/provider/warmup event modules; streaming invocation event normalization, completion projection, and failure recording now live in a focused event recorder; session replay has been split into replay-window facade, item projection/content extraction, content metrics/truncation, tool-result stats, protocol diagnostics, and budget helpers; tool-result replay text now delegates bounded field normalization and detail/result excerpt extraction to focused helpers; LLM persistence repositories now delegate SQLAlchemy/domain mapping to focused mappers; OpenAI Responses and Codex Responses adapters now delegate SSE/WebSocket stream reading and completed-event projection to focused streaming/event-projection modules; Codex completed-event adapter response projection, HTTP SSE retry/dispatch, HTTP wire request construction, HTTP SSE headers/stream dispatch, and WebSocket pool/header/endpoint/retryable-transport helpers live in focused helper/transport modules; Codex renderer runtime-context prompt item construction and provider-native WebSocket continuation delta selection live in focused helper modules; Chat Compatible adapter now delegates wire parsing, completed-event/result projection, XML-ish tool-call fallback parsing, stripped assistant text construction, streamed tool-call chunk merging, and response-item construction to focused projection/event/response-item modules; provider message projection facade is retired, with renderers importing common/OpenAI/Anthropic/Gemini projection modules directly; provider request preview delegates utility fingerprint/truncation and tool-report projection to focused modules; LLM HTTP routes now delegate Pydantic models, request DTO mapping, response DTO mapping, and SSE formatting to focused interface modules with no mixed mapping facade; LLM CLI delegates payload parsing and request-preview reporting to a focused helper, with request/factory/transcript/adapter/renderer/HTTP/CLI regression coverage |
-| Split orchestration execution-chain and worker CLI hotspots | orchestration | Done: Execution-chain lifecycle tests and focused modules are in place; `domain/entities.py` is now a thin export surface over execution entities, run aggregate, ingress aggregate, executor lease aggregate, and payload helpers; `worker_cli.py` is a thin composition layer over shared runtime helpers, executor commands, scheduler commands, and isolated benchmark/synthetic runtime support; architecture guard keeps benchmark imports lazy for production worker CLI modules; daemon-managed scheduler/executor smoke completed through `benchmark-daemon-runtime` |
+| Split orchestration execution-chain and worker CLI hotspots | orchestration | Done: Execution-chain lifecycle tests and focused modules are in place; execution-chain SQLAlchemy repositories are split from run/wait/ingress/executor-lease persistence; `domain/entities.py` is now a thin export surface over execution entities, run aggregate, ingress aggregate, executor lease aggregate, and payload helpers; run aggregate route/session binding/enqueue/resume, worker claim/heartbeat/lease recovery, and terminal complete/fail/cancel lifecycle methods are split to focused domain mixins; `worker_cli.py` is a thin composition layer over shared runtime helpers, executor commands, scheduler commands, and isolated benchmark/synthetic runtime support; `worker_cli_benchmark.py` delegates common benchmark run/status helpers to `worker_cli_benchmark_common.py` and synthetic tool-IO runtime support to `worker_cli_benchmark_synthetic.py`; executor benchmark command registration lives in `worker_cli_executor_benchmarks.py`; `engine.py` delegates DTO/context records to `engine_models.py`, provider/request helper logic to `engine_runtime_helpers.py`, and outcome projection to `engine_outcomes.py`; progress/waiting duplicated execution-payload helpers are split to `coordinators/execution_payloads.py`, waiting recovery-contract payload helpers are split to `coordinators/waiting_recovery_payloads.py`, waiting approval replay/recovery lives in `coordinators/waiting_approval_recovery.py`, engine session tool-result projection lives in `engine_session_tool_results.py`, maintenance context-budget/compaction-summary/auto-compaction/run-classification flows are split to focused maintenance helper modules, and runtime request draft DTO/session replay/payload helpers are split from the collector; architecture guard keeps benchmark imports lazy for production worker CLI modules; daemon-managed scheduler/executor smoke completed through `benchmark-daemon-runtime` |
 | Add Browser lease/action cleanup guard tests | browser | Done: allocation target cleanup is profile/allocation-scoped, CDP command-session context manager detaches on body errors, `cdp-raw` and network-inspect detach CDP sessions after command failure, action-trace snapshot previews are bounded, Browser production core is guarded against task-specific site logic, and the broad Browser unit suite passes |
 | Split Browser application services | browser | Done: `services.py` is a thin export layer; profile resolver/capabilities/assemblers/planner/tab ops/selection ops/allocation target adapters, execution coordinator, profile admin, profile pool, profile allocator, and lifecycle helpers live in focused modules; broad Browser unit suite and architecture tests pass |
-| Split Browser action engine internals | browser | Done: `action_engines.py` is now the action-engine envelope/router; batch execution, raw CDP execution, action-trace coordination, interaction primitives, ref/overlay handling, and wait actions live in focused infrastructure modules; `action_engine_scripts.py` is now the expression export surface after marker/snapshot/bulk-selection/overlay-picker/target-text script split; `script_insight.py` is now the script-insight action facade after runtime expression, payload coercion, and source-analysis/search/extraction helper split; `action_trace.py` is now the action-trace service entrypoint after payload, snapshot, state, network, and envelope/recommendation helper split; `network_page_fetch.py` is now the page-network fetch service entrypoint after request normalization, page-runtime execution, safety/diff analysis, event payload, and common result helper split; `engines.py` has tab operation orchestration, tab/runtime-state metadata, CDP wire IO, host/process lifecycle helpers, and in-memory engines split out; Browser domain `value_objects.py` is now a thin export surface over type/helper/profile/tab/network/command value modules; Browser HTTP route surface now delegates request models, profile helpers, proxy egress checks, and update-clear payload rules to focused interface helpers; Browser profile payloads now delegate diagnostics/entry/aggregate assembly to focused helpers; Browser CLI is now a thin Typer root over profile/pool/allocation/host/action command modules; Browser observation now delegates value/page/runtime/interaction/projection assembly to focused helpers; broad Browser unit suite and architecture guard pass |
+| Split Browser action engine internals | browser | Done: `action_engines.py` is now the action-engine dependency assembly surface; execution lifecycle, page dispatch, batch execution, raw CDP execution, action-trace coordination, interaction primitives, locator/ref resolution, primitive page actions, ref/overlay handling, and wait actions live in focused infrastructure modules; unused toolbar/date/bulk-selection interaction helpers were retired instead of moved to another compatibility layer; `action_engine_scripts.py` is now the expression export surface after marker/snapshot/bulk-selection/overlay-picker/target-text script split; `script_insight.py` is now the script-insight action facade after runtime expression, payload coercion, and source-analysis/search/extraction helper split; `action_trace.py` is now the action-trace service entrypoint after payload, snapshot, state, network, and envelope/recommendation helper split; `network_page_fetch.py` is now the page-network fetch service entrypoint after request normalization, page-runtime execution, safety/diff analysis, event payload, and common result helper split; `engines.py` has tab operation orchestration, tab/runtime-state metadata, CDP wire IO, host/process lifecycle helpers, and in-memory engines split out; Browser domain `value_objects.py` is now a thin export surface over type/helper/profile/tab/network/command value modules; Browser HTTP route surface now delegates request models, profile helpers, proxy egress checks, and update-clear payload rules to focused interface helpers; Browser profile payloads now delegate diagnostics/entry/aggregate assembly to focused helpers; Browser CLI is now a thin Typer root over profile/pool/allocation/host/action command modules; Browser observation now delegates value/page/runtime/interaction/projection assembly to focused helpers; broad Browser unit suite and architecture guard pass |
 | Remove fallback progress in primary timeline | workbench | Done: primary timeline filters empty agent progress/thinking steps, projects only user-visible LLM response items, hides context-tree control calls and debug-only continuation text, and keeps long-chain timeline shape locked by golden coverage |
 | Add request render budget tests | context_workspace, llm, session | Done for the current request-render boundary: long session trees with many large historical session nodes still resolve and project only the current frontier item plus provider-visible schema, and persisted request-render cost reports stay bounded |
 | Add tool result/artifact ref invariant | tool, artifacts, session, llm | Done for Tool result replay: large text/raw output is externalized to artifacts, Session stores provider replay refs, and LLM transcript replay ignores trace/debug-only bodies; LLM invocation raw request/response retention remains a separate provider-boundary policy if raw payload retention expands |
-| Split Context Workspace root-node bootstrap | context_workspace | Done: root-node constants, section roots, instruction/agent guidance, run/execution seeds, planning seeds, resource roots, and estimate/payload helpers are split into focused `root_node_*` modules; `root_nodes.py` now only preserves default seed order, public constants, and parent lookup |
+| Split Context Workspace root-node bootstrap | context_workspace | Done: root-node constants, section roots, instruction/agent guidance, run/execution seeds, planning seeds, resource roots, and estimate/payload helpers are split into focused `root_node_*` modules; `root_nodes.py` now only preserves default seed order, public constants, and parent lookup. Context Workspace application services are also split by workspace, tree, snapshot, and slice roles into focused modules while `services.py` remains a thin export surface. Context Workspace application DTOs are split by workspace, slice/control, action/upsert, and render/snapshot roles while `models.py` remains a thin export surface. Context Workspace persistence mapping is split into `infrastructure/persistence/repository_mappers.py`, leaving `repositories.py` focused on query/transaction behavior. XML rendering is split into public entry, tree traversal/state labels, value normalization, and tool-node rendering modules. Provider attachment mirroring is split into public mirror flow, tool-surface policy/default parsing, and tool-schema budget/group-visibility accounting modules |
 | Add Tool worker lifecycle guards | tool, dispatch, artifacts | Done: background worker tests lock registration/staleness, assignment heartbeat, recovered dispatch handling, retry exhaustion, large-result artifact refs, result envelope persistence, dispatch terminal state, and worker slot release; architecture guard prevents Tool application from importing Orchestration runtime owner layers |
+
+Orchestration engine follow-up note: `application/engine.py` is now a 747-line
+advancement coordinator. Engine preview/context/outcome records live in
+`engine_models.py`; request option, response-format, continuation, provider
+continuation state, metadata, id de-duplication, optional text, and terminal
+diagnostic helpers live in `engine_runtime_helpers.py`; and outcome projection,
+tool execution context attributes, and background tool-call intent fallback live in
+`engine_outcomes.py`. Tests import the new helper modules directly instead of
+relying on private names from `engine.py`. Current verification:
+`python -m ruff check src/crxzipple/modules/orchestration/application/engine.py src/crxzipple/modules/orchestration/application/engine_models.py src/crxzipple/modules/orchestration/application/engine_runtime_helpers.py tests/unit/test_llm_runtime_request_factory_builder.py tests/unit/test_orchestration_context_workspace_snapshot.py --ignore F403,F405`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/orchestration/application/engine.py src/crxzipple/modules/orchestration/application/engine_models.py src/crxzipple/modules/orchestration/application/engine_runtime_helpers.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py::test_engine_carries_context_contract_metadata_for_llm_invocation tests/unit/test_llm_runtime_request_factory_builder.py --tb=short --maxfail=1`
+-> 37 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_tools.py tests/unit/test_orchestration_context.py tests/unit/test_orchestration_context_workspace_snapshot.py --tb=short --maxfail=1`
+-> 92 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_memory.py tests/unit/test_request_render_input_projection.py --tb=short --maxfail=1`
+-> 22 passed.
+
+Outcome split verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/application/engine.py src/crxzipple/modules/orchestration/application/engine_outcomes.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/application/engine.py src/crxzipple/modules/orchestration/application/engine_outcomes.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py --tb=short --maxfail=1`
+-> 32 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py --tb=short --maxfail=1`
+-> 38 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_tools.py -k 'tool_call or tool_result or background or inline' --tb=short --maxfail=1`
+-> 16 passed, 21 deselected.
+
+Orchestration run aggregate follow-up note: `domain/run_entity.py` is now a
+475-line run aggregate. Route/session binding/enqueue/resume lifecycle lives in
+`domain/run_queue_lifecycle.py`; worker ownership lifecycle (`claim`, `heartbeat`,
+`recover_worker_lease`, `_require_worker`) lives in
+`domain/run_worker_lifecycle.py`; terminal lifecycle (`complete`, `fail`, `cancel`)
+lives in `domain/run_terminal_lifecycle.py`. The aggregate still owns state fields,
+acceptance, and waiting/tool/approval state transitions; the mixins only group
+lifecycle methods around the same aggregate state. Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/domain/run_entity.py src/crxzipple/modules/orchestration/domain/run_queue_lifecycle.py src/crxzipple/modules/orchestration/domain/run_worker_lifecycle.py src/crxzipple/modules/orchestration/domain/run_terminal_lifecycle.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/domain/run_entity.py src/crxzipple/modules/orchestration/domain/run_queue_lifecycle.py src/crxzipple/modules/orchestration/domain/run_worker_lifecycle.py src/crxzipple/modules/orchestration/domain/run_terminal_lifecycle.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_queue.py tests/unit/test_orchestration_execution_chain.py --tb=short --maxfail=1`
+-> 68 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_executor_leases.py tests/unit/test_workbench_read_model.py tests/unit/test_operations_orchestration_projection_diagnostics.py --tb=short --maxfail=1`
+-> 49 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_tools.py tests/unit/test_orchestration_context.py tests/unit/test_orchestration_context_workspace_snapshot.py --tb=short --maxfail=1`
+-> 92 passed.
+
+Orchestration maintenance follow-up note: `application/maintenance.py` is now a
+303-line public maintenance service facade. Preflight context-budget detection,
+context-window threshold calculation, render-preview metrics, and session pressure
+helpers live in `maintenance_context_budget.py`; compaction-summary materialization
+lives in `maintenance_compaction_summary.py`; post-run/pre-compaction follow-up
+scheduling lives in `maintenance_auto_compaction.py`; and run classification plus
+context-limit error recognition lives in `maintenance_run_classification.py`.
+Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/application/maintenance.py src/crxzipple/modules/orchestration/application/maintenance_context_budget.py src/crxzipple/modules/orchestration/application/maintenance_compaction_summary.py src/crxzipple/modules/orchestration/application/maintenance_auto_compaction.py src/crxzipple/modules/orchestration/application/maintenance_run_classification.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/application/maintenance.py src/crxzipple/modules/orchestration/application/maintenance_context_budget.py src/crxzipple/modules/orchestration/application/maintenance_compaction_summary.py src/crxzipple/modules/orchestration/application/maintenance_auto_compaction.py src/crxzipple/modules/orchestration/application/maintenance_run_classification.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_memory.py -k 'compaction or preflight or context_budget' --tb=short --maxfail=1`
+-> 6 passed, 13 deselected;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_context.py::OrchestrationContextTestCase::test_process_next_orchestration_assignment_scales_context_budget_to_llm_context_window --tb=short --maxfail=1`
+-> 1 passed.
+
+Orchestration runtime request draft follow-up note:
+`application/runtime_llm_request_draft.py` is now a 511-line collector focused on
+runtime request fact collection and LLM resolution. Draft DTO/session context and
+the skill runtime request resolver port live in `runtime_llm_request_draft_models.py`;
+active-session replay-window selection and transcript construction live in
+`runtime_llm_request_draft_session.py`; routing input and transcript-policy payload
+projection live in `runtime_llm_request_draft_payloads.py`. Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/application/runtime_llm_request_draft.py src/crxzipple/modules/orchestration/application/runtime_llm_request_draft_models.py src/crxzipple/modules/orchestration/application/runtime_llm_request_draft_session.py src/crxzipple/modules/orchestration/application/runtime_llm_request_draft_payloads.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/application/runtime_llm_request_draft.py src/crxzipple/modules/orchestration/application/runtime_llm_request_draft_models.py src/crxzipple/modules/orchestration/application/runtime_llm_request_draft_session.py src/crxzipple/modules/orchestration/application/runtime_llm_request_draft_payloads.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_runtime_llm_request_draft_collector.py tests/unit/test_llm_runtime_request_factory_builder.py tests/unit/test_request_render_input_projection.py --tb=short --maxfail=1`
+-> 52 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py::test_engine_carries_context_contract_metadata_for_llm_invocation --tb=short --maxfail=1`
+-> 1 passed.
+
+Orchestration worker CLI benchmark follow-up note: `interfaces/worker_cli_benchmark.py`
+is now a 593-line benchmark command module. Common benchmark run creation, status
+summaries, daemon runtime snapshots, and wait loops live in
+`worker_cli_benchmark_common.py`; synthetic tool-IO benchmark LLM adapter, stats, agent
+setup, tool source/function registration, and local sleep runtime live in
+`worker_cli_benchmark_synthetic.py`. Current verification:
+`python -m ruff check src/crxzipple/modules/orchestration/interfaces/worker_cli_benchmark.py src/crxzipple/modules/orchestration/interfaces/worker_cli_benchmark_common.py src/crxzipple/modules/orchestration/interfaces/worker_cli_benchmark_synthetic.py tests/unit/test_orchestration_cli.py --ignore F403,F405`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/orchestration/interfaces/worker_cli_benchmark.py src/crxzipple/modules/orchestration/interfaces/worker_cli_benchmark_common.py src/crxzipple/modules/orchestration/interfaces/worker_cli_benchmark_synthetic.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_cli.py -k 'benchmark_runtime or benchmark_tool_io or benchmark_daemon_runtime' --tb=short --maxfail=1`
+-> 6 passed, 26 deselected.
+
+Orchestration executor CLI follow-up note: `interfaces/worker_cli_executor.py` is now
+a 425-line production executor command module. Executor benchmark command
+registration and lazy benchmark dispatch wrappers live in
+`worker_cli_executor_benchmarks.py`, while benchmark execution remains in
+`worker_cli_benchmark.py` and its helper modules. The command names are unchanged,
+but production executor lifecycle commands no longer share a file with long
+benchmark option declarations. Current verification:
+
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/interfaces/worker_cli_executor.py src/crxzipple/modules/orchestration/interfaces/worker_cli_executor_benchmarks.py`
+-> passed;
+
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/interfaces/worker_cli_executor.py src/crxzipple/modules/orchestration/interfaces/worker_cli_executor_benchmarks.py`
+-> passed;
+
+`PYTHONPATH=src pytest -q tests/unit/test_app_assembly_architecture.py::test_orchestration_worker_cli_keeps_benchmark_runtime_lazy --tb=short --maxfail=1`
+-> 1 passed;
+
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_cli.py -k 'benchmark_runtime or benchmark_tool_io or benchmark_daemon_runtime' --tb=short --maxfail=1`
+-> 6 passed, 26 deselected;
+
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_cli.py -k 'heartbeat_executor or list_executor_leases or runtime_metrics or heartbeat_assignment or advance_assignment or wait_assignment_on_tool or complete_assignment or fail_assignment' --tb=short --maxfail=1`
+-> 2 passed, 30 deselected.
+
+Full `tests/unit/test_orchestration_cli.py` reached 18 passed, then stopped on
+`PermissionError: [Errno 1] Operation not permitted` while binding the local sample
+LLM HTTP server under this sandbox.
+
+Orchestration persistence follow-up note: `infrastructure/persistence/repositories.py`
+is now a 626-line run/wait/ingress/executor-lease repository module. Execution-chain,
+execution-step, and execution-step-item SQLAlchemy repositories live in
+`execution_chain_repositories.py`; the shared SQLAlchemy UoW imports those concrete
+repositories directly from the new module. Current verification:
+`python -m ruff check src/crxzipple/modules/orchestration/infrastructure/persistence/repositories.py src/crxzipple/modules/orchestration/infrastructure/persistence/execution_chain_repositories.py src/crxzipple/modules/orchestration/infrastructure/persistence/__init__.py src/crxzipple/shared/infrastructure/sqlalchemy_uow.py tests/unit/test_orchestration_execution_chain.py --ignore F403,F405`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/orchestration/infrastructure/persistence/repositories.py src/crxzipple/modules/orchestration/infrastructure/persistence/execution_chain_repositories.py src/crxzipple/modules/orchestration/infrastructure/persistence/__init__.py src/crxzipple/shared/infrastructure/sqlalchemy_uow.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py --tb=short --maxfail=1`
+-> 32 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_queue.py tests/unit/test_orchestration_executor_leases.py --tb=short --maxfail=1`
+-> 68 passed.
+
+Orchestration coordinator payload follow-up note: `coordinators/progress.py` now
+uses shared execution-payload helpers and is 373 lines. `coordinators/waiting.py`
+now delegates LLM step summary, continuation payload, tool-run-link projection,
+recovery-contract payload construction, terminal tool-run summary projection,
+resume-reason policy, and approval replay/recovery to focused helper modules and is
+424 lines. Approval replay, replay failure, replayed background-tool wait,
+replayed tool-batch materialization, approval resume metadata, terminal tool-run
+marking, and approval replay tool-result lookup live in
+`coordinators/waiting_approval_recovery.py`. The split keeps the old behavior
+differences explicit: progress includes provider continuation state and assistant
+progress text; waiting includes `llm_invocation_id` in its LLM step summary.
+Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/application/coordinators/progress.py src/crxzipple/modules/orchestration/application/coordinators/waiting.py src/crxzipple/modules/orchestration/application/coordinators/waiting_approval_recovery.py src/crxzipple/modules/orchestration/application/coordinators/execution_payloads.py src/crxzipple/modules/orchestration/application/coordinators/waiting_recovery_payloads.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/application/coordinators/progress.py src/crxzipple/modules/orchestration/application/coordinators/waiting.py src/crxzipple/modules/orchestration/application/coordinators/waiting_approval_recovery.py src/crxzipple/modules/orchestration/application/coordinators/execution_payloads.py src/crxzipple/modules/orchestration/application/coordinators/waiting_recovery_payloads.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py`
+-> 32 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_tools.py tests/unit/test_orchestration_context.py tests/unit/test_orchestration_context_workspace_snapshot.py`
+-> 92 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_memory.py tests/unit/test_request_render_input_projection.py`
+-> 22 passed.
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_approval.py tests/unit/test_orchestration_tools.py tests/unit/test_orchestration_execution_chain.py --tb=short --maxfail=1`
+-> 86 passed.
+
+Orchestration engine session recorder follow-up note:
+`application/engine_session_recorder.py` is now a 479-line session-write
+coordinator. Tool result session item construction, provider replay envelope
+projection, model-facing tool error guidance, session metadata filtering, terminal
+tool-run text, and background tool execution-step reference resolution live in
+`engine_session_tool_results.py`. This keeps the recorder focused on when to write
+inbound, LLM response, tool-call, and tool-result session records rather than
+owning the payload projection rules. Current verification:
+
+`PYTHONPATH=src ruff check src/crxzipple/modules/orchestration/application/engine_session_recorder.py src/crxzipple/modules/orchestration/application/engine_session_tool_results.py`
+-> passed;
+
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/orchestration/application/engine_session_recorder.py src/crxzipple/modules/orchestration/application/engine_session_tool_results.py`
+-> passed;
+
+`PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py::test_background_tool_result_message_uses_execution_item_reference --tb=short --maxfail=1`
+-> 1 passed;
+
+`PYTHONPATH=src pytest -q tests/unit/test_context_workspace_session_adapter.py::test_session_adapter_renders_tool_result_envelope_refs --tb=short --maxfail=1`
+-> 1 passed;
+
+`PYTHONPATH=src pytest -q tests/unit/test_runtime_transcript.py -k tool_result_envelope --tb=short --maxfail=1`
+-> 1 passed, 15 deselected.
 
 LLM follow-up note: the provider message projection compatibility facade and the monolithic
 `domain/value_objects.py` have both been retired. Provider renderers now import focused
@@ -741,13 +953,13 @@ Purpose: make powerful local capabilities safe and generic.
 | Task | Modules | Acceptance |
 | --- | --- | --- |
 | Split browser application/runtime engines | browser | Profile admin, pool allocation, execution coordination, action engine, snapshot, error mapping are distinct |
-| Split Tool worker/source runtime services | tool | Complete: Tool worker artifact externalization moved to `tool_result_artifacts.py`, result validation to `tool_result_validation.py`, runtime execution to `worker_runtime_execution.py`, failure normalization to `worker_errors.py`, background tracking to `worker_tracking.py`, capability payloads to `worker_capabilities.py`, execution context decoration to `worker_execution_context.py`, result completion/failure application to `worker_completion.py`, recovered dispatch handling to `worker_recovery.py`, registration/stale/prune helpers to `worker_registration.py`, assignment concurrency selection to `worker_assignment_selection.py`, wakeup waiting to `worker_wakeup.py`, and processing heartbeat threading to `worker_processing_heartbeat.py`; source runtime request bundle DTO/building moved to `source_runtime_bundles.py`, credential/runtime requirement parsing to `source_requirements.py`, entity/record mapping to `source_record_mapping.py`, merge/change state to `source_state.py`, event payloads to `source_events.py`, write validation to `source_validation.py`, command DTOs to `source_command_models.py`, UoW protocol to `source_unit_of_work.py`, function commands to `source_function_commands.py`, and source commands/sync use cases to `source_commands.py`; CLI source safety/runtime concerns are split into focused `cli_source_*` modules for config parsing, discovery/spec construction, process execution, process-output observation, credential injection, envelopes, redaction, and path validation; outer worker run loop shell intentionally remains in `ToolWorkerService` |
+| Split Tool worker/source runtime services | tool | Complete: Tool worker artifact externalization moved to `tool_result_artifacts.py`, result validation to `tool_result_validation.py`, runtime execution to `worker_runtime_execution.py`, failure normalization to `worker_errors.py`, background tracking to `worker_tracking.py`, capability payloads to `worker_capabilities.py`, execution context decoration to `worker_execution_context.py`, result completion/failure application to `worker_completion.py`, recovered dispatch handling to `worker_recovery.py`, registration/stale/prune helpers to `worker_registration.py`, assignment concurrency selection to `worker_assignment_selection.py`, wakeup waiting to `worker_wakeup.py`, processing heartbeat threading to `worker_processing_heartbeat.py`, worker run-loop control to `worker_run_loop.py`, and run function/source resolution to `worker_run_resolution.py`; source runtime request bundle DTO/building moved to `source_runtime_bundles.py`, credential/runtime requirement parsing to `source_requirements.py`, entity/record mapping to `source_record_mapping.py`, merge/change state to `source_state.py`, event payloads to `source_events.py`, write validation to `source_validation.py`, command DTOs to `source_command_models.py`, UoW protocol to `source_unit_of_work.py`, function commands to `source_function_commands.py`, and source commands/sync use cases to `source_commands.py`; CLI source safety/runtime concerns are split into focused `cli_source_*` modules for config parsing, discovery/spec construction, process execution, process-output observation, credential injection, envelopes, redaction, and path validation |
 | Add browser lease/cleanup/timeout tests | browser | CDP/session/action cleanup is deterministic |
-| Split channel runtime by transport path | channels | Done: Web, Webhook, and Lark runtime services are isolated in transport-specific files, while `application/runtime.py` keeps shared bootstrap only. Transport-neutral observe cursor/status/settled-state helpers are shared; Lark session-message observation projection, outbound observe delivery, identity lookup/cache, long-connection ingress, and message-to-run submission are isolated behind focused helpers/services. Webhook inbound message-to-run submission and idempotency lookup now live behind a focused submission runtime |
+| Split channel runtime by transport path | channels | Done: Web, Webhook, and Lark runtime services are isolated in transport-specific files, while `application/runtime.py` keeps shared bootstrap only. Transport-neutral observe cursor/status/settled-state helpers are shared; Lark session-message observation projection, outbound observe delivery, identity lookup/cache, long-connection ingress, and message-to-run submission are isolated behind focused helpers/services. Webhook inbound message-to-run submission and idempotency lookup now live behind a focused submission runtime. Channel profile, interaction, and runtime registry management now live in `profile_service.py`, `interaction_service.py`, and `runtime_manager.py`; `services.py` is a thin export surface |
 | Add channel idempotency tests | channels | Complete for current channel lifecycle: Lark observe delivery has regression coverage for duplicate successful message skips; webhook inbound supports an explicit idempotency key that reuses the original run on duplicate submission; webhook automatic outbound retry/dead-letter loops are covered against duplicate delivery/dead-letter emission. Explicit dead-letter replay is documented as deliberate resend, not hidden idempotency |
 | Add channel payload redaction tests | channels | Complete for current observation exits: dead-letter HTTP listing and Operations channels projection redact callback URLs, webhook callback URLs, tokens, secrets, authorization, and cookies without mutating owner event truth |
 | Split mobile engine concerns | mobile | ADB, screenshot/artifact, OCR/layout, refs are separately testable |
-| Add OCR timeout/error tests | ocr | Done for adapter request/invalid-payload/HTTP/provider errors and result-size budgets; OCR host capacity policy remains a follow-up |
+| Add OCR timeout/error tests | ocr | Complete for current OCR runtime: adapter request/invalid-payload/HTTP/provider errors, result-size budgets, application/host capacity metadata, capacity exhaustion domain mapping, and HTTP 503 surfacing are covered |
 
 Tool package follow-up note: OpenAPI provider manifest parsing and Access credential
 requirement parsing now live in `tool_package_access.py`; runtime request metadata,
@@ -791,6 +1003,65 @@ verification:
 `[Errno 1] Operation not permitted`, matching the known process capability
 restriction rather than persistence behavior.
 
+Tool HTTP follow-up note: Pydantic HTTP request/response models now live in
+`interfaces/http_models.py`; route payload/request projection and provider backend
+readiness payload shaping live in `interfaces/http_payloads.py`; `interfaces/http.py`
+is now a route surface for parsing, authorization handoff, owner service lookup, and
+HTTP exception mapping. Current verification:
+`python -m ruff check src/crxzipple/modules/tool/interfaces/http.py src/crxzipple/modules/tool/interfaces/http_models.py src/crxzipple/modules/tool/interfaces/http_payloads.py`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/tool/interfaces/http.py src/crxzipple/modules/tool/interfaces/http_models.py src/crxzipple/modules/tool/interfaces/http_payloads.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_http.py -k 'not openapi_provider_endpoints_discover_and_execute_remote_tools' --tb=short --maxfail=1`
+-> 24 passed, 1 deselected. The deselected OpenAPI provider HTTP test requires
+binding a local `ThreadingHTTPServer`, which the current sandbox denies with
+`PermissionError`.
+
+Tool domain follow-up note: the former 1147-line `domain/entities.py` is now a
+61-line public domain export surface. Catalog/source/function/provider/tool
+definition aggregates live in `domain/catalog_entities.py`; run/assignment/worker
+lifecycle aggregates live in `domain/runtime_entities.py`; shared validation and
+normalization live in `domain/entity_normalization.py`. Current verification:
+`python -m ruff check src/crxzipple/modules/tool/domain`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/tool/domain`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_http.py tests/unit/test_tool_provider_backend_service.py --tb=short --maxfail=1 -k 'not openapi_provider_endpoints_discover_and_execute_remote_tools'`
+-> 28 passed, 1 deselected;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_background.py --tb=short --maxfail=1 -k 'not executes_local_background_process_tool_and_updates_lifecycle'`
+-> 23 passed, 1 deselected;
+`PYTHONPATH=src pytest -q tests/unit/test_operations_tool_metrics.py tests/unit/test_operations_tool_run_filters.py tests/unit/test_operations_tool_run_error_diagnostics.py tests/unit/test_operations_tool_scheduling_sections.py --tb=short --maxfail=1`
+-> 10 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_execution.py tests/unit/test_tool_source_service.py tests/unit/test_tool_catalog_reconcile.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_context_tree_tool.py tests/unit/test_module_architecture_guards.py --tb=short --maxfail=1 -k 'not executes_local_inline_process_tool_and_reports_process_context'`
+-> 95 passed, 1 deselected.
+
+Tool catalog-model follow-up note: the former 943-line
+`application/catalog_models.py` is now a 37-line application export surface.
+Catalog enums/requirement types live in `catalog_model_types.py`; stable payload,
+schema, and hashing helpers live in `catalog_model_helpers.py`; function candidate,
+provider backend candidate, and function record models live in
+`catalog_function_models.py`; source and discovery records live in
+`catalog_source_models.py`. Current verification:
+`python -m ruff check src/crxzipple/modules/tool/application/catalog_models.py src/crxzipple/modules/tool/application/catalog_model_types.py src/crxzipple/modules/tool/application/catalog_model_helpers.py src/crxzipple/modules/tool/application/catalog_function_models.py src/crxzipple/modules/tool/application/catalog_source_models.py`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/tool/application/catalog_models.py src/crxzipple/modules/tool/application/catalog_model_types.py src/crxzipple/modules/tool/application/catalog_model_helpers.py src/crxzipple/modules/tool/application/catalog_function_models.py src/crxzipple/modules/tool/application/catalog_source_models.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_catalog_reconcile.py tests/unit/test_tool_source_service.py tests/unit/test_tool_source_catalog_persistence.py tests/unit/test_tool_providers.py tests/unit/test_openapi_access.py tests/unit/test_operations_tool_read_model.py tests/unit/test_ui_access_http.py --tb=short --maxfail=1 -k 'not discovers_and_executes_openapi_remote_tools and not openapi_provider_endpoints_discover_and_execute_remote_tools'`
+-> 73 passed, 1 deselected.
+
+Tool worker follow-up note: `application/worker_service.py` is now a 762-line worker
+coordinator. Long-running worker loop control lives in `worker_run_loop.py`, and
+function/source catalog resolution for worker concurrency and execution lives in
+`worker_run_resolution.py`. Current verification:
+`python -m ruff check src/crxzipple/modules/tool/application/worker_service.py src/crxzipple/modules/tool/application/worker_run_loop.py src/crxzipple/modules/tool/application/worker_run_resolution.py`
+-> passed;
+`python -m compileall -q src/crxzipple/modules/tool/application/worker_service.py src/crxzipple/modules/tool/application/worker_run_loop.py src/crxzipple/modules/tool/application/worker_run_resolution.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_background.py -k 'not executes_local_background_process_tool_and_updates_lifecycle' --tb=short --maxfail=1`
+-> 23 passed, 1 deselected;
+`PYTHONPATH=src pytest -q tests/unit/test_tool_execution.py -k 'not executes_local_inline_process_tool_and_reports_process_context' --tb=short --maxfail=1`
+-> 20 passed, 1 deselected.
+
 ## Wave 4. Governance, Credentials, And Extensibility
 
 Purpose: keep external integration and configuration clean under growth.
@@ -799,12 +1070,280 @@ Purpose: keep external integration and configuration clean under growth.
 | --- | --- | --- |
 | Split Access OAuth/query/action/settings flows | access | Done for this audit wave: OAuth repository/token-store contracts and OAuth result DTOs moved to `oauth_contracts.py`; OAuth payload redaction moved to `oauth_redaction.py` and is covered by a no-raw-secret setup payload test; token endpoint HTTP behavior, retryable provider HTTP/network failure handling, and redacted endpoint exceptions moved to `oauth_token_client.py` with refresh/revoke lifecycle and retry coverage; file-backed token storage now exposes a storage-key lock used by auto-refresh and revoke coordination; local Codex callback/browser opener logic moved to `oauth_callback_listener.py`; setup-session record/result and authorization/device-code payload shaping moved to `oauth_setup_flows.py`; Codex provider constants and identity extraction moved to `oauth_codex.py`; token payload expiry/scope/subject extraction, token masking, default account id, PKCE challenge, scope diff payload, and small text normalization moved to `oauth_token_payloads.py`; OAuth provider/account record construction, token document construction, account status replacement, refresh account shaping, and Settings credential-binding request construction moved to `oauth_account_records.py`; query result DTOs moved to `query_results.py`; synthetic asset compatibility projection moved to `query_assets.py`; overview counts, empty overview, asset-list projection, and readiness lookup moved to `query_overview_assets.py`; read-model record shaping and consumer merge rules moved to `query_record_models.py`; Settings/Access record collection and setup/OAuth/readiness conversion moved to `query_records.py`; Access/Settings audit pagination, merge, and sorting moved to `query_audits.py`; credential requirement projection moved to `query_requirements.py`; read model timestamp, normalization, setup hint, source masking, masked preview, and sensitive-key redaction helpers moved to `read_model_payloads.py`; inventory requirement check-spec construction, credential binding labels, requirement masking, credential asset kind calculation, and metadata redaction moved to focused `inventory_*` modules; migration legacy value extraction and migration requirement/credential payload rules moved to focused `migration_*` modules; persistence SQLAlchemy model/application record mapping moved to `repository_mappers.py`; action contracts/change parsing/redaction/payload/readiness helpers moved to focused `action_*` modules; setup/verify and OAuth action handlers moved to focused handler modules; Settings action contracts, payload parsing, Access record mapping, credential binding conversion, consumer binding conversion, and materialized config view/provider moved to focused `settings_*` modules; requirement parsing/canonical binding/compatibility rules moved to `credential_requirement_rules.py`; env/file/literal credential resolution moved to `credential_resolver.py`; credential resolution audit context, event payloads, safe source refs, trace redaction, consumer audit payloads, and audit text truncation moved to `credential_resolution_audit.py`; setup-flow object construction moved to `credential_setup_flows.py`; configured credential record lookup, source derivation, OAuth provider lookup, and configured credential resolution moved to `configured_credentials.py`; current Access checklist is complete, with deeper audit persistence hardening tracked as a cross-module follow-up |
 | Add no-raw-secret tests | access, settings, operations | Logs/events/projections/errors redact sensitive values |
-| Split Settings HTTP governance surface | settings | Done: HTTP routes, action policy, redaction, runtime defaults, and Settings page presenters are separated |
+| Split Settings HTTP governance surface | settings | Done: HTTP routes, action policy, redaction, runtime defaults, and Settings page presenters are separated; Settings HTTP action request DTOs, response projection, request/helper/error-audit logic, execution gate, create/update mutations, and dry-run/validation handling are split to `http_action_models.py`, `http_action_responses.py`, `http_action_helpers.py`, `http_action_execution.py`, `http_action_mutations.py`, and `http_action_validation.py`; Settings setup resource collection/import/seed/result/payload helpers are split to `setup_resources.py`, `setup_importer.py`, `setup_seeder.py`, `setup_results.py`, and `setup_payloads.py`; Settings setup database URL summary/redaction is split to `setup_database.py`; Access bootstrap resource declarations are split to `setup_access_resources.py`; core bootstrap resource collectors are split to `setup_core_resources.py`; in-memory service bundle assembly is split to `service_bundle.py`; Settings action result payload construction is split to `action_results.py`; resource action facade is split to `resource_actions.py`; resource create/update lifecycle is split to `resource_definition_actions.py`; resource publish/rollback lifecycle is split to `resource_publication_actions.py`; override action lifecycle is split to `override_actions.py`; Settings action-attempt audit construction is split to `action_audit.py`; resource-version construction/publish mechanics are split to `resource_versioning.py`; effective resolution, query/read operations, and shared service helpers are split to `resolution_service.py`, `query_service.py`, and `service_common.py`; Settings domain aggregates are split to focused resource/version/override/snapshot/audit modules behind an 18-line `domain/entities.py` export surface; Settings materialization warning DTO and payload/profile/tool/access normalization are split from the materializer; Settings persistence record DTOs, SQLAlchemy model/record mappers, domain/repository mappers, and resource/version/override/snapshot/audit repository families are split from repository query classes; Settings action service audit metadata now reuses the shared redaction helper instead of carrying a private redaction copy |
 | Add Settings owner metadata invariant | settings | Every resource declares owner, truth source, write path, apply behavior |
 | Split Skills filesystem package repository | skills | Done for this audit wave: path safety moved to `path_safety.py`; SKILL.md frontmatter, legacy manifest parsing, requirement normalization, and markdown rendering moved to `manifest_parser.py`; bounded file reads, legacy manifest file reads, resource discovery, and fingerprinting moved to `package_files.py`; directory discovery/loading moved to `package_loader.py`; `repository.py` now keeps root selection and public mutation/read orchestration; support-file write/delete traversal tests prevent `..` paths from modifying `SKILL.md`; targeted Skills tests pass |
 | Split Skills interfaces/authoring/owner state | skills | Done for this audit wave: authoring payload projection moved to `authoring_payloads.py`, draft/package/request conversion and requirement merge moved to `authoring_conversions.py`, validation/readiness projection moved to `authoring_validation.py` and `authoring_readiness.py`, draft diff building moved to `authoring_diff.py`, apply lifecycle rules moved to `authoring_apply.py`, and audit/event observation moved to `authoring_observation.py`; owner package/source index helpers moved to `owner_package_index.py`; owner readiness snapshot/check/event payload projection moved to `owner_readiness_projection.py`; persistence model/application mapper helpers moved to `repository_mappers.py`; HTTP request/response DTOs moved to `http_models.py`; CLI option parsing and payload projection moved to `cli_options.py` and `cli_payloads.py`; Source and Draft CLI command groups moved to `cli_source_commands.py` and `cli_draft_commands.py`; source/skill runtime visibility, Context Workspace runtime-resolution golden coverage, and install/create race normalization are covered; remaining Skills hardening is trusted source/provenance policy |
 | Add trusted source and path isolation tests | skills | Skill package install/update cannot escape allowed roots |
-| Add Authorization grant state-machine tests | authorization | Done: run/session temporary grants cannot leak across run/session/agent scope; agent-managed tool/effect allow/revoke, dry-run/impact preview, Access boundary, and audit redaction are covered. Remaining follow-up is HTTP DTO/read-helper split if the interface grows further |
+| Add Authorization grant state-machine tests | authorization | Complete for current authorization surface: run/session temporary grants cannot leak across run/session/agent scope; agent-managed tool/effect allow/revoke, dry-run/impact preview, Access boundary, audit redaction, HTTP DTO/payload/service/agent-grant/policy-handler/decision-route split, agent-managed policy construction helper split, tool execution authorization helper split, policy impact helper split, temporary grant helper/use-case split, decision use-case split, audit record helper split, audit redaction helper split, policy lifecycle helper split, public service facade split, agent grant/revoke coordinator split, and persistence mapper split are covered |
+
+Settings application follow-up note: bootstrap setup now delegates core
+Tool/Memory/runtime-default/environment resource seed construction to
+`application/setup_core_resources.py`, Access seed declarations to
+`application/setup_access_resources.py`, database URL redaction to
+`application/setup_database.py`, and in-memory service bundle construction to
+`application/service_bundle.py`. Bootstrap resource collection, explicit import,
+startup seed, bootstrap result DTOs, and seed payload comparison now live in
+`application/setup_resources.py`, `application/setup_importer.py`,
+`application/setup_seeder.py`, `application/setup_results.py`, and
+`application/setup_payloads.py`; `application/setup.py` is now the public setup
+entrypoint instead of owning every seed payload and service assembly rule.
+Override create/update/enable/disable lifecycle now lives in
+`application/override_actions.py`, and action-attempt audit construction now lives in
+`application/action_audit.py`, leaving `SettingsActionService` as the public use-case
+coordinator for resource/version actions plus delegation to focused sub-lifecycles.
+Resource-version construction, publish/supersede sequencing, resource publish state
+mutation, snapshot creation, and snapshot persistence now live in
+`application/resource_versioning.py`. Resource create/update orchestration now lives
+in `application/resource_definition_actions.py`, publish/rollback orchestration now
+lives in `application/resource_publication_actions.py`, and resource enable/disable
+delegation lives in `application/resource_actions.py`, reducing
+`application/services.py` to a stable public facade over resource actions, override
+actions, and operator audit helpers. Settings HTTP action request models, response
+projection, request/helper/error-audit logic, execution gate, create/update mutations,
+and dry-run/validation handling now live in focused interface helper modules,
+reducing `interfaces/http_actions.py` to a thin HTTP boundary and error mapper.
+Settings domain aggregates are split out of the former 425-line `domain/entities.py`
+into focused resource, resource-version, override, effective-snapshot, action-audit,
+and shared entity-normalization modules. `domain/entities.py` remains only the stable
+export surface so existing application and infrastructure imports do not become a
+second behavior track.
+Materialization warning DTOs and payload normalization helpers are split out of
+`application/materialization.py`, reducing the materializer to query/cache/warning
+coordination plus typed config parser dispatch.
+Settings persistence record DTOs now live in
+`infrastructure/persistence/records.py`; SQLAlchemy model/record mapping and
+timestamp/text normalization live in
+`infrastructure/persistence/repository_mappers.py`; domain aggregate conversion and
+domain-repository model copy helpers live in
+`infrastructure/persistence/domain_repository_mappers.py`. The governance repository
+module now owns query/transaction behavior only, while `domain_repositories.py` imports
+the shared mapper modules instead of reaching into repository-private helpers. Domain
+repository implementations are split by resource/version/override/snapshot/action-audit
+family, leaving `domain_repositories.py` as the 74-line service assembly surface.
+Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/settings/domain src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence src/crxzipple/modules/settings/interfaces tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/domain src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence src/crxzipple/modules/settings/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py --tb=short --maxfail=1`
+-> 44 passed.
+
+Authorization application follow-up note: tool execution authorization branching now
+lives in `application/tool_execution_authorization.py`; `application/services.py`
+delegates the decision flow after collecting temporary run/session authorization and
+keeps repository access, evaluator access, public facade methods, and audit entrypoint
+coordination.
+Impact preview DTO/projection logic now lives in `application/policy_impact.py`; the
+decision dry-run and impact-preview use cases now live in
+`application/decision_use_cases.py`, including audit writes around request/decision
+payloads.
+Temporary run/session grant construction and scoped temporary authorization aggregation
+now live in `application/temporary_grants.py`; temporary run/session grant
+creation/storage/audit coordination now lives in `application/temporary_grant_service.py`.
+Audit record id/timestamp construction, text normalization, and payload redaction now
+live in `application/audit_records.py`; the service decides when to emit audit records.
+Policy create/update/enable/delete/import coordination now lives in
+`application/policy_lifecycle.py`; agent-managed grant/revoke coordination now lives in
+`application/agent_grants.py`.
+Authorization HTTP request/domain/response mapping remains in `interfaces/http_payloads.py`;
+service lookup lives in `interfaces/http_services.py`; agent-grant response/status
+handling lives in `interfaces/http_agent_grants.py`; policy CRUD/import/export
+handlers live in `interfaces/http_policy_handlers.py`; dry-run, impact-preview, audit,
+and check routes live in `interfaces/http_decision_routes.py`; `interfaces/http.py` is a
+policy/grant route composition surface.
+Authorization persistence repositories now delegate SQLAlchemy/domain mapping to
+`infrastructure/persistence/repository_mappers.py`; repository classes retain query,
+commit, bootstrap import, and audit pagination behavior.
+Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/authorization/application src/crxzipple/modules/authorization/interfaces tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/authorization/application src/crxzipple/modules/authorization/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py tests/unit/test_module_architecture_guards.py::test_access_and_authorization_do_not_cross_own_truth_boundaries --tb=short --maxfail=1`
+-> 29 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/authorization/interfaces/http.py src/crxzipple/modules/authorization/interfaces/http_decision_routes.py src/crxzipple/modules/authorization/interfaces/http_models.py src/crxzipple/modules/authorization/interfaces/http_payloads.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/authorization/interfaces/http.py src/crxzipple/modules/authorization/interfaces/http_decision_routes.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_auth_http.py tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py tests/unit/test_module_architecture_guards.py::test_access_and_authorization_do_not_cross_own_truth_boundaries --tb=short --maxfail=1`
+-> 33 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/authorization/application src/crxzipple/modules/authorization/infrastructure src/crxzipple/modules/authorization/interfaces tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/authorization/application src/crxzipple/modules/authorization/infrastructure src/crxzipple/modules/authorization/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py tests/unit/test_module_architecture_guards.py::test_access_and_authorization_do_not_cross_own_truth_boundaries --tb=short --maxfail=1`
+-> 29 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/authorization/application src/crxzipple/modules/authorization/interfaces tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/authorization/application src/crxzipple/modules/authorization/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py tests/unit/test_module_architecture_guards.py::test_access_and_authorization_do_not_cross_own_truth_boundaries --tb=short --maxfail=1`
+-> 29 passed.
+
+Agent HTTP follow-up note: request DTOs now live in
+`interfaces/http_request_models.py`; request-to-application input conversion lives in
+`interfaces/http_requests.py` with shared private value mappers for register/update
+paths; response presenters remain in `interfaces/http_models.py`; resolution endpoint
+response DTOs and presenter functions live in `interfaces/http_resolution_models.py`;
+Agent service lookup, resolution service construction, and Agent error-to-HTTP mapping
+live in `interfaces/http_services.py`. Home migration/config response projection and
+profile-list projection live in `interfaces/http_models.py`; `interfaces/http.py` keeps
+profile route parsing and owner service calls, while `interfaces/http_home_routes.py`
+owns profile-home migration/sync/export/inspect/update endpoints. Current verification:
+`python -m ruff check src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_requests.py`
+-> passed;
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application/resolution.py src/crxzipple/modules/agent/application/resolution_models.py src/crxzipple/modules/agent/application/resolution_values.py src/crxzipple/modules/agent/application/resolution_authorization.py src/crxzipple/modules/agent/application/services.py src/crxzipple/modules/agent/application/home_runtime.py src/crxzipple/modules/agent/application/models.py src/crxzipple/modules/agent/application/event_payloads.py src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_resolution_models.py src/crxzipple/modules/agent/interfaces/http_requests.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application/resolution.py src/crxzipple/modules/agent/application/resolution_models.py src/crxzipple/modules/agent/application/resolution_values.py src/crxzipple/modules/agent/application/resolution_authorization.py src/crxzipple/modules/agent/application/services.py src/crxzipple/modules/agent/application/home_runtime.py src/crxzipple/modules/agent/application/models.py src/crxzipple/modules/agent/application/event_payloads.py src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_resolution_models.py src/crxzipple/modules/agent/interfaces/http_requests.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_http.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 23 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_services.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_services.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_home_routes.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_requests.py src/crxzipple/modules/agent/interfaces/http_services.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_home_routes.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_requests.py src/crxzipple/modules/agent/interfaces/http_services.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+
+Agent CLI follow-up note: register/update payload construction and profile-settings
+sync conversion now live in `interfaces/cli_payloads.py`; `interfaces/cli.py` keeps
+Typer app composition only. Profile command registration lives in
+`interfaces/cli_profile_commands.py`; home command registration lives in
+`interfaces/cli_home_commands.py`. Profile sync command registration lives in
+`interfaces/cli_profile_sync_commands.py`; enable/disable/delete command registration
+lives in `interfaces/cli_profile_state_commands.py`. CLI and HTTP profile sync now
+both delegate Settings profile import to
+`application/settings_integration.py` instead of carrying duplicate conversion logic.
+Current verification:
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/interfaces/cli_profile_commands.py src/crxzipple/modules/agent/interfaces/cli_profile_sync_commands.py src/crxzipple/modules/agent/interfaces/cli_profile_state_commands.py src/crxzipple/modules/agent/interfaces/cli.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/interfaces/cli_profile_commands.py src/crxzipple/modules/agent/interfaces/cli_profile_sync_commands.py src/crxzipple/modules/agent/interfaces/cli_profile_state_commands.py src/crxzipple/modules/agent/interfaces/cli.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+
+Agent application follow-up note: application DTOs are split by lifecycle:
+profile command/action DTOs live in `application/profile_models.py`, home
+migrate/sync/export/snapshot DTOs live in `application/home_models.py`, and
+`application/models.py` remains the public export surface. Profile event
+payload/action coercion helpers live in `application/event_payloads.py`, and
+pure home root/default directory plus runtime preference normalization rules
+live in `application/home_runtime.py`.
+Home registry lookup/write, home config load/write/apply, scaffold/migration hooks,
+runtime preference normalization, and home file read/write snapshot projection now
+live in `application/home_operations.py`. Profile lifecycle orchestration now lives in
+`application/profile_use_cases.py`, home migrate/sync/export/inspect/file-update
+orchestration now lives in `application/home_use_cases.py`, and the shared Agent Unit
+of Work protocol lives in `application/unit_of_work.py`. `AgentApplicationService` is
+now a public facade and dependency composition point rather than the owner of every
+profile/home branch.
+Agent home config infrastructure is split behind the stable
+`infrastructure/home_config.py` entrypoint: JSON load/atomic write lives in
+`home_config_io.py`, profile payload projection lives in `home_config_payloads.py`,
+and migration-aware payload helpers plus timestamp/runtime merge helpers live in
+`home_config_payload_helpers.py`. The runtime preference compatibility alias and
+legacy-shaped helper name have been retired; callers use `resolved_workdir` and
+`runtime_payload_from_config_payload` directly.
+Registration input to `AgentProfile` construction now lives in
+`application/profile_factory.py`, keeping register/sync profile construction,
+created-at preservation, and runtime preference normalization in one application helper.
+Update input to domain update kwargs conversion now lives in
+`application/profile_updates.py`, keeping `UNSET_FIELD` field-presence semantics out of
+the service coordinator.
+Agent profile resolution DTOs now live in `application/resolution_models.py`,
+resolution value coercion helpers live in `application/resolution_values.py`, and
+authorization policy-to-agent/tool grant projection rules live in
+`application/resolution_authorization.py`. LLM route resolution, Tool catalog
+resolution, Access readiness resolution, and Authorization policy query coordination
+now live in focused `resolution_llm.py`, `resolution_tools.py`,
+`resolution_access.py`, and `resolution_authorization_query.py` helpers.
+Agent domain value objects are split behind the stable `domain/value_objects.py`
+export surface: identity/instruction values, LLM policy values, execution policy,
+memory binding, runtime preferences, and shared value helpers now live in focused
+domain modules.
+`AgentProfileResolutionQueryService` remains the resolution orchestration point instead
+of being the DTO, source-specific projection, and helper owner. Current verification:
+`python -m ruff check src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_requests.py src/crxzipple/modules/agent/__init__.py`
+-> passed;
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application/services.py src/crxzipple/modules/agent/application/home_runtime.py src/crxzipple/modules/agent/application/models.py src/crxzipple/modules/agent/application/event_payloads.py src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_requests.py`
+-> passed;
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application/resolution.py src/crxzipple/modules/agent/application/resolution_models.py src/crxzipple/modules/agent/application/resolution_values.py src/crxzipple/modules/agent/application/resolution_authorization.py src/crxzipple/modules/agent/application/services.py src/crxzipple/modules/agent/application/home_runtime.py src/crxzipple/modules/agent/application/models.py src/crxzipple/modules/agent/application/event_payloads.py src/crxzipple/modules/agent/interfaces/http.py src/crxzipple/modules/agent/interfaces/http_models.py src/crxzipple/modules/agent/interfaces/http_requests.py`
+-> passed;
+`python -m ruff check tests/unit/test_agent_http.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --ignore F403,F405`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application/services.py src/crxzipple/modules/agent/application/home_runtime.py src/crxzipple/modules/agent/application/models.py src/crxzipple/modules/agent/application/event_payloads.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application/resolution.py src/crxzipple/modules/agent/application/resolution_models.py src/crxzipple/modules/agent/application/resolution_values.py src/crxzipple/modules/agent/application/resolution_authorization.py src/crxzipple/modules/agent/application/services.py src/crxzipple/modules/agent/application/home_runtime.py src/crxzipple/modules/agent/application/models.py src/crxzipple/modules/agent/application/event_payloads.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_http.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 23 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/domain/runtime_preferences.py src/crxzipple/modules/agent/interfaces/dto.py src/crxzipple/modules/agent/infrastructure/home_config_payload_helpers.py src/crxzipple/modules/agent/infrastructure/home_config_payloads.py`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/domain/runtime_preferences.py src/crxzipple/modules/agent/interfaces/dto.py src/crxzipple/modules/agent/infrastructure/home_config_payload_helpers.py src/crxzipple/modules/agent/infrastructure/home_config_payloads.py`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/domain src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/domain src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed;
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/domain src/crxzipple/modules/agent/application src/crxzipple/modules/agent/infrastructure src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/domain src/crxzipple/modules/agent/application src/crxzipple/modules/agent/infrastructure src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed;
+`PYTHONPATH=src pytest -q tests/unit/test_module_architecture_guards.py --tb=short --maxfail=1`
+-> 18 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/domain src/crxzipple/modules/agent/application src/crxzipple/modules/agent/infrastructure src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/domain src/crxzipple/modules/agent/application src/crxzipple/modules/agent/infrastructure src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --ignore F403,F405`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
+`PYTHONPATH=src ruff check src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src python -m compileall -q src/crxzipple/modules/agent/application src/crxzipple/modules/agent/interfaces`
+-> passed;
+`PYTHONPATH=src pytest -q tests/unit/test_agent_cli.py tests/unit/test_agent_http.py tests/unit/test_agent_settings_integration.py tests/unit/test_agent_home_persistence.py tests/unit/test_agent_home_scaffold.py tests/unit/test_context_workspace_agent_adapter.py --tb=short --maxfail=1`
+-> 35 passed.
 
 ## Wave 5. Support Module Hardening
 
@@ -816,7 +1355,7 @@ Purpose: remove small but sharp operational risks.
 | Add Daemon lifecycle smoke tests | daemon | start/ensure/status/stop/recover pass with process health checks |
 | Decide Event Relay ownership | event_relay, operations | Done: retained as narrow event-to-Workbench bridge, with Events subscription cursors as progress truth and Operations remaining the durable projection owner |
 | Add artifact retention/quota/download authorization | artifacts | Retention/quota cleanup, missing-file, and artifact-root containment behavior are tested; subject-aware preview/download authorization remains after the HTTP surface receives identity context |
-| Add Process cleanup/output caps | process | Done for launch-risk controls: bounded output windows, traversal rejection, stale process refresh, and termination CLI cleanup are tested; old process-log retention/quota remains a support cleanup follow-up |
+| Add Process cleanup/output caps | process | Done: bounded output windows, traversal rejection, stale process refresh, termination CLI cleanup, and terminal-session retention/quota cleanup are tested; cleanup never deletes running sessions |
 | Decide Delivery placeholder | delivery, channels, events | Done: empty placeholder retired; future generic Delivery requires a fresh bounded-context design before code appears |
 
 ## Suggested Verification Commands

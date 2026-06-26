@@ -1,6 +1,7 @@
 from crxzipple.modules.process.application import ProcessApplicationService
 from crxzipple.modules.process.domain import (
     ProcessError,
+    ProcessCleanupResult,
     ProcessNotFoundError,
     ProcessOutputWindow,
     ProcessSession,
@@ -17,6 +18,7 @@ from crxzipple.modules.process.infrastructure import (
 __all__ = [
     "FilesystemProcessSessionRepository",
     "ProcessApplicationService",
+    "ProcessCleanupResult",
     "ProcessError",
     "ProcessNotFoundError",
     "ProcessOutputWindow",

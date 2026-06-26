@@ -9,9 +9,13 @@ import hashlib
 import subprocess
 
 from crxzipple.modules.process.domain import (
+    ProcessCleanupResult,
     ProcessNotFoundError,
     ProcessSession,
     ProcessStatus,
+)
+from crxzipple.modules.process.infrastructure.repository_retention import (
+    cleanup_terminal_sessions,
 )
 
 
@@ -89,6 +93,20 @@ class FilesystemProcessSessionRepository:
         for child in sorted(session_dir.iterdir(), reverse=True):
             child.unlink(missing_ok=True)
         session_dir.rmdir()
+
+    def cleanup_terminal_sessions(
+        self,
+        *,
+        ended_before: datetime | None = None,
+        max_terminal_sessions: int | None = None,
+        max_terminal_bytes: int | None = None,
+    ) -> ProcessCleanupResult:
+        return cleanup_terminal_sessions(
+            self,
+            ended_before=ended_before,
+            max_terminal_sessions=max_terminal_sessions,
+            max_terminal_bytes=max_terminal_bytes,
+        )
 
     def read_stdout(self, process_id: str) -> str:
         return self._read_text_file(self._stdout_path(process_id))

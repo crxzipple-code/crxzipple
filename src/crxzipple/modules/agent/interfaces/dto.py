@@ -127,7 +127,7 @@ class AgentRuntimePreferencesDTO:
         return cls(
             home_dir=value.resolved_home_dir,
             workdir=value.resolved_workdir,
-            workspace=value.compat_workspace,
+            workspace=value.resolved_workdir,
             sandbox_mode=value.sandbox_mode,
             attrs=dict(value.attrs),
         )

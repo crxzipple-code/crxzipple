@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from crxzipple.modules.ocr.domain import (
+    OcrCapacityExceededError,
     OcrExecutionError,
     OcrPoint,
     OcrResult,
@@ -172,6 +173,8 @@ class OcrHostClient:
             message = str(detail or "OCR host request failed.")
             if response.status_code < 500:
                 raise OcrValidationError(message)
+            if response.status_code == 503:
+                raise OcrCapacityExceededError(message)
             raise OcrExecutionError(message)
         if not isinstance(payload, dict):
             raise OcrExecutionError("OCR host returned an invalid OCR payload.")

@@ -82,6 +82,38 @@ class ProcessCliTestCase(CliModuleTestCase):
             get_payload = json.loads(get_result.stdout)
             self.assertIn(get_payload["status"], {"exited", "failed", "killed"})
 
+    def test_process_cli_cleanup_removes_terminal_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            start_result = self.invoke_cli(
+                [
+                    "process",
+                    "start",
+                    "printf 'cleanup-done\\n'",
+                    "--working-directory",
+                    tempdir,
+                ],
+            )
+            self.assertEqual(start_result.exit_code, 0)
+            process_id = json.loads(start_result.stdout)["id"]
+
+            deadline = time.monotonic() + 0.5
+            while True:
+                output_result = self.invoke_cli(["process", "output", process_id])
+                self.assertEqual(output_result.exit_code, 0)
+                output_payload = json.loads(output_result.stdout)
+                if "cleanup-done" in output_payload["stdout"]:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+
+            cleanup_result = self.invoke_cli(
+                ["process", "cleanup", "--max-terminal-sessions", "0"],
+            )
+            self.assertEqual(cleanup_result.exit_code, 0)
+            cleanup_payload = json.loads(cleanup_result.stdout)
+            self.assertIn(process_id, cleanup_payload["removed_process_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()

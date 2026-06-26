@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from crxzipple.modules.ocr.domain import OcrExecutionError, OcrValidationError
+from crxzipple.modules.ocr.domain import (
+    OcrCapacityExceededError,
+    OcrExecutionError,
+    OcrValidationError,
+)
 from crxzipple.modules.ocr.infrastructure.http_client import OcrHostClient
 from crxzipple.modules.ocr.infrastructure.ppstructure_client import PPStructureV3Client
 
@@ -88,7 +92,10 @@ class OcrInfrastructureTestCase(unittest.TestCase):
                 json_error=ValueError("bad json"),
             ),
         ):
-            with self.assertRaisesRegex(OcrExecutionError, "OCR host request failed"):
+            with self.assertRaisesRegex(
+                OcrCapacityExceededError,
+                "OCR host request failed",
+            ):
                 OcrHostClient(base_url="http://ocr-host").analyze_image(
                     image_path=Path("sample.png"),
                     language="ch",

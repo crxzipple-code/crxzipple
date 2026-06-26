@@ -16,6 +16,8 @@ around daemon. Current consumers include:
 - read stdout and stderr slices
 - report status and exit codes
 - terminate and remove finished sessions
+- clean up terminal sessions by age, terminal-session count, or terminal byte
+  budget
 
 ## Boundaries
 
@@ -55,7 +57,11 @@ APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.ma
 APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process output <process-id>
 APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process terminate <process-id>
 APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process remove <process-id>
+APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process cleanup --older-than-days 7 --max-terminal-sessions 100 --max-terminal-bytes 104857600
 ```
+
+Cleanup only removes terminal sessions. Running sessions must be explicitly
+terminated before removal.
 
 ## HTTP
 

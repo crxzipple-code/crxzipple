@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,12 @@ import typer
 from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.process import ProcessNotFoundError, ProcessValidationError
+from crxzipple.modules.process.interfaces.cli_payloads import (
+    cleanup_to_payload,
+    matches_filters,
+    output_to_payload,
+    session_to_payload,
+)
 
 
 MAX_PROCESS_COMMAND_CHARS = 8_000
@@ -53,53 +60,6 @@ def _normalize_command(command: str) -> str:
     return normalized
 
 
-def _session_to_payload(session) -> dict[str, object]:  # noqa: ANN001
-    return {
-        "id": session.id,
-        "command": session.command,
-        "shell": session.shell,
-        "working_directory": session.working_directory,
-        "session_key": session.session_key,
-        "metadata": dict(session.metadata),
-        "pid": session.pid,
-        "status": session.status.value,
-        "exit_code": session.exit_code,
-        "created_at": session.created_at.isoformat(),
-        "started_at": session.started_at.isoformat(),
-        "updated_at": session.updated_at.isoformat(),
-        "ended_at": session.ended_at.isoformat() if session.ended_at is not None else None,
-        "termination_requested_at": (
-            session.termination_requested_at.isoformat()
-            if session.termination_requested_at is not None
-            else None
-        ),
-    }
-
-
-def _output_to_payload(output) -> dict[str, object]:  # noqa: ANN001
-    return {
-        "process_id": output.process_id,
-        "status": output.status.value,
-        "exit_code": output.exit_code,
-        "stdout": output.stdout,
-        "stderr": output.stderr,
-        "stdout_offset": output.stdout_offset,
-        "stderr_offset": output.stderr_offset,
-        "next_stdout_offset": output.next_stdout_offset,
-        "next_stderr_offset": output.next_stderr_offset,
-        "started_at": output.started_at.isoformat(),
-        "ended_at": output.ended_at.isoformat() if output.ended_at is not None else None,
-    }
-
-
-def _matches_filters(session, *, session_key: str | None, working_directory: str | None) -> bool:  # noqa: ANN001
-    if session_key is not None and session.session_key != session_key:
-        return False
-    if working_directory is not None and session.working_directory != working_directory:
-        return False
-    return True
-
-
 def _exit_not_found(message: str) -> None:
     typer.secho(message, err=True, fg=typer.colors.RED)
     raise typer.Exit(code=1) from None
@@ -130,7 +90,7 @@ def build_cli() -> typer.Typer:
             working_directory=_resolve_working_directory(working_directory),
             session_key=session_key.strip() or None if session_key is not None else None,
         )
-        echo_data(_session_to_payload(session))
+        echo_data(session_to_payload(session))
 
     @app.command("list")
     def list_processes(
@@ -153,11 +113,11 @@ def build_cli() -> typer.Typer:
             else None
         )
         sessions = [
-            _session_to_payload(session)
+            session_to_payload(session)
             for session in container.require(
                 AppKey.PROCESS_SERVICE,
             ).list_sessions_metadata()
-            if _matches_filters(
+            if matches_filters(
                 session,
                 session_key=session_key,
                 working_directory=normalized_working_directory,
@@ -175,7 +135,7 @@ def build_cli() -> typer.Typer:
             session = container.require(AppKey.PROCESS_SERVICE).get_session(process_id=process_id)
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
-        echo_data(_session_to_payload(session))
+        echo_data(session_to_payload(session))
 
     @app.command("output")
     def get_process_output(
@@ -195,7 +155,7 @@ def build_cli() -> typer.Typer:
             )
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
-        echo_data(_output_to_payload(output))
+        echo_data(output_to_payload(output))
 
     @app.command("terminate")
     def terminate_process(
@@ -208,7 +168,7 @@ def build_cli() -> typer.Typer:
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
         session = container.require(AppKey.PROCESS_SERVICE).terminate_session(process_id=process_id)
-        echo_data(_session_to_payload(session))
+        echo_data(session_to_payload(session))
 
     @app.command("remove")
     def remove_process(
@@ -231,5 +191,43 @@ def build_cli() -> typer.Typer:
                 "status": session.status.value,
             },
         )
+
+    @app.command("cleanup")
+    def cleanup_processes(
+        ctx: typer.Context,
+        older_than_days: int | None = typer.Option(
+            None,
+            "--older-than-days",
+            min=0,
+            help="Remove terminal process sessions older than this many days.",
+        ),
+        max_terminal_sessions: int | None = typer.Option(
+            None,
+            "--max-terminal-sessions",
+            min=0,
+            help="Keep at most this many newest terminal process sessions.",
+        ),
+        max_terminal_bytes: int | None = typer.Option(
+            None,
+            "--max-terminal-bytes",
+            min=0,
+            help="Keep terminal process session files under this byte budget.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=older_than_days)
+            if older_than_days is not None
+            else None
+        )
+        try:
+            result = container.require(AppKey.PROCESS_SERVICE).cleanup_sessions(
+                ended_before=cutoff,
+                max_terminal_sessions=max_terminal_sessions,
+                max_terminal_bytes=max_terminal_bytes,
+            )
+        except ProcessValidationError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        echo_data(cleanup_to_payload(result))
 
     return app

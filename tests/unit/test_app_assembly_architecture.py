@@ -858,6 +858,13 @@ def test_orchestration_worker_cli_keeps_benchmark_runtime_lazy() -> None:
         / "modules"
         / "orchestration"
         / "interfaces"
+        / "worker_cli_executor_benchmarks.py",
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "interfaces"
         / "worker_cli_scheduler.py",
     )
     forbidden_top_level_imports = (

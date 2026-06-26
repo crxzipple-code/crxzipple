@@ -33,6 +33,7 @@ def _build_ocr_service(ctx) -> dict[str, object]:
             engine=build_ocr_engine(settings),
             artifact_service=ctx.require(AppKey.ARTIFACT_SERVICE),
             default_language=settings.ocr_language,
+            max_concurrent_requests=settings.ocr_max_concurrent_requests,
         ),
         AppKey.OCR_RESULT_SERIALIZER: OcrResultSerializer(),
     }

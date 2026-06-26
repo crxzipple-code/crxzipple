@@ -7,10 +7,12 @@ from crxzipple.modules.orchestration.infrastructure.persistence.models import (
     OrchestrationRunModel,
     OrchestrationRunWaitModel,
 )
-from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
+from crxzipple.modules.orchestration.infrastructure.persistence.execution_chain_repositories import (
     SqlAlchemyExecutionChainRepository,
     SqlAlchemyExecutionStepItemRepository,
     SqlAlchemyExecutionStepRepository,
+)
+from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
     SqlAlchemyOrchestrationExecutorLeaseRepository,
     SqlAlchemyOrchestrationIngressRequestRepository,
     SqlAlchemyOrchestrationRunRepository,

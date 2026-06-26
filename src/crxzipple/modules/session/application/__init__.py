@@ -44,6 +44,7 @@ from crxzipple.modules.session.application.session_windows import (
 from crxzipple.modules.session.application.services import (
     SessionApplicationService,
 )
+from crxzipple.modules.session.application.session_reader import SessionQueryReader
 from crxzipple.modules.session.application.unit_of_work import SessionUnitOfWork
 from crxzipple.modules.session.application.runtime import (
     SessionRuntimeControlPort,
@@ -85,6 +86,7 @@ __all__ = [
     "SessionContextFrontier",
     "SessionItemRange",
     "SessionItemsBundle",
+    "SessionQueryReader",
     "SessionReplayWindow",
     "SessionResolutionService",
     "SessionResolutionResult",

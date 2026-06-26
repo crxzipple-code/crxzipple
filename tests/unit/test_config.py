@@ -249,6 +249,7 @@ max_concurrency: 7
         os.environ["APP_OCR_LANGUAGE"] = "en"
         os.environ["APP_OCR_USE_GPU"] = "true"
         os.environ["APP_OCR_REQUEST_TIMEOUT_SECONDS"] = "12.5"
+        os.environ["APP_OCR_MAX_CONCURRENT_REQUESTS"] = "3"
 
         settings = load_settings()
 
@@ -261,6 +262,7 @@ max_concurrency: 7
         self.assertEqual(settings.ocr_language, "en")
         self.assertTrue(settings.ocr_use_gpu)
         self.assertEqual(settings.ocr_request_timeout_seconds, 12.5)
+        self.assertEqual(settings.ocr_max_concurrent_requests, 3)
 
     def test_load_settings_reads_redis_events_overrides(self) -> None:
         os.environ["APP_EVENTS_BACKEND"] = "redis"

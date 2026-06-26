@@ -31,26 +31,26 @@ Module scale from `src/crxzipple/modules`:
 | Module | Python files | Approx lines | Coupling signal |
 | --- | ---: | ---: | ---: |
 | operations | 82 | 42698 | high |
-| browser | 66 | 32431 | high |
-| orchestration | 114 | 30953 | very high |
-| tool | 110 | 27065 | very high |
+| browser | 118 | 33860 | high |
+| orchestration | 140 | 31602 | very high |
+| tool | 131 | 27614 | very high |
 | llm | 109 | 18519 | very high |
 | access | 72 | 13935 | medium |
 | skills | 52 | 11185 | medium-high |
-| context_workspace | 42 | 8891 | medium-high |
-| channels | 39 | 9104 | medium |
-| settings | 26 | 7997 | medium |
+| context_workspace | 57 | 9446 | medium-high |
+| channels | 43 | 9150 | medium |
+| settings | 69 | 9322 | medium |
 | workbench | 27 | 7169 | high projection coupling |
 | memory | 35 | 6468 | medium |
-| session | 33 | 5008 | medium |
-| agent | 19 | 4613 | medium |
+| session | 34 | 5151 | medium |
+| agent | 57 | 5704 | medium |
 | events | 28 | 4615 | medium |
-| mobile | 21 | 3684 | low-medium |
+| mobile | 24 | 4081 | low-medium |
 | daemon | 17 | 3324 | low |
-| authorization | 18 | 2848 | low-medium |
+| authorization | 41 | 3807 | low-medium |
 | dispatch | 22 | 2656 | medium |
-| ocr | 17 | 1316 | low |
-| process | 13 | 794 | low |
+| ocr | 18 | 1481 | low |
+| process | 15 | 1324 | low |
 | event_relay | 8 | 698 | low retained bridge |
 | artifacts | 11 | 666 | low |
 | delivery | 0 | 0 | retired placeholder |
@@ -76,6 +76,10 @@ Largest hotspots observed in the initial audit baseline:
 - `browser/interfaces/profile_payloads.py`: 667 lines baseline; now 23-line export surface after diagnostics/entry/aggregate payload split
 - `operations/application/read_models/orchestration.py`: 1597 lines baseline; now 574 after status/failure/metric/action/runtime-fact split
 - `tool/infrastructure/persistence/repositories.py`: 1553 lines baseline; now 33-line export surface after source/function/provider/surface/runtime repository split
+- `tool/domain/entities.py`: 1147 lines baseline; now 61-line export surface after catalog/runtime entity and normalization split
+- `tool/application/catalog_models.py`: 943 lines baseline; now 37-line export surface after catalog type/helper/function/source model split
+- `tool/application/worker_service.py`: 1713 lines baseline; now 762-line worker coordinator after run-loop, run-resolution, execution, completion, recovery, assignment, wakeup, heartbeat, tracking, artifact, validation, and error helpers were split out
+- `tool/interfaces/http.py`: 1106 lines baseline; now 494-line route surface after Pydantic HTTP models and payload projection helpers were split to `http_models.py` and `http_payloads.py`
 
 ## Cross-Cutting Findings
 
@@ -150,27 +154,27 @@ Detailed review status:
 | Module | Status | Notes |
 | --- | --- | --- |
 | operations | Detailed pass 1 complete | Projection bloat and HTTP surface risk documented |
-| orchestration | Detailed pass 1 complete | Lifecycle coordinator and worker CLI risks documented |
-| tool | Detailed pass 1 remediation in progress | Worker/source split covered; Tool package facade remediated; Tool persistence repository facade remediated with source/function/provider/surface/runtime split |
+| orchestration | Detailed pass 1 remediation in progress | Lifecycle coordinator, worker CLI, benchmark runtime, executor benchmark command registration, engine model/helper/outcome split, execution-chain repository, coordinator payload-helper split, waiting approval recovery split, engine session tool-result projection split, run queue/session/worker/terminal lifecycle mixins, maintenance context-budget/compaction/classification split, and runtime request draft model/session/payload split covered; remaining tool-wait recovery breadth and long-chain invariants remain the main hotspots |
+| tool | Detailed pass 1 remediation in progress | Worker/source/run-loop/run-resolution split covered; Tool package facade remediated; Tool persistence repository facade remediated; Tool domain entity, catalog model, and HTTP models/payload projection split |
 | llm | Detailed pass 1 complete | Provider adapter/request rendering risks documented |
-| session | Detailed pass 1 complete | Replay/window/service split risks documented |
-| context_workspace | Detailed pass 1 complete | Context control/render snapshot risks documented |
+| session | Detailed pass 1 complete | Replay/window/service split risks documented; query/read window construction split into `SessionQueryReader` |
+| context_workspace | Detailed pass 1 complete | Context control/render snapshot risks documented; workspace/tree/snapshot/slice services split behind a thin export surface |
 | workbench | Detailed pass 1 complete | Timeline projector, fallback risks, and projection diagnostics documented |
-| browser | Detailed pass 1 complete | Action engine/runtime split risks documented |
-| channels | Detailed pass 1 complete | Runtime transport/submission split and delivery lifecycle risks documented |
+| browser | Detailed pass 1 complete | Action engine/runtime split risks documented; execution lifecycle, primitive page actions, and locator/ref resolution are split from the action-engine dependency assembly |
+| channels | Detailed pass 1 complete | Runtime transport/submission split and delivery lifecycle risks documented; profile, interaction, and runtime-registry services split behind a thin export surface |
 | memory | Detailed pass 1 complete | Storage/index/runtime retrieval risks documented |
 | skills | Detailed pass 1 complete | Package/catalog/runtime resolution risks documented |
 | access | Detailed pass 1 complete | Credential/OAuth/readiness boundary risks documented |
-| authorization | Detailed pass 1 complete | Grant state-machine and audit redaction covered |
-| settings | Detailed pass 1 complete | Governance truth-source and HTTP bulk risks documented |
-| agent | Detailed pass 1 complete | Profile/home/context handoff risks documented |
+| authorization | Detailed pass 1 complete | Grant state-machine, audit redaction, HTTP DTO/payload/service/agent-grant/policy-handler/decision-route split, agent-managed policy helper split, tool execution authorization helper split, policy impact helper split, temporary grant helper/use-case split, decision use-case split, audit record helper split, audit redaction helper split, policy lifecycle split, public service facade split, agent grant/revoke coordinator split, and persistence mapper split covered |
+| settings | Detailed pass 1 remediation in progress | Governance truth-source and HTTP bulk risks documented; HTTP action models/helpers/responses/execution/mutation/validation helpers are split; setup resource collection/import/seed/result helpers, database URL summary, Access bootstrap resources, core bootstrap resource collectors, service bundle construction, action result helpers, resource definition/publication/action helpers, override action helper, action-audit helper, resource-versioning helper, effective resolution, query service, and shared service helpers are split; Settings domain aggregates are split behind an 18-line `domain/entities.py` export surface; materialization payload/profile/tool/access normalization is split from the effective config materializer; persistence record DTOs, SQLAlchemy model/record mappers, domain/repository mappers, and resource/version/override/snapshot/audit repository families are split from repository query classes; service-layer audit redaction now delegates to shared Settings redaction helper; application service/setup hotspots are reduced to facades |
+| agent | Detailed pass 1 complete | Profile/home/context handoff risks documented; HTTP profile/home route split, request model/request mapper/response/service/error helper split, CLI payload and command split, profile sync/state CLI command split, profile factory/update helper, profile lifecycle use-case split, resolution response, application DTO/event payload, home runtime rule, home registry/config/file operations helper, home use-case orchestration split, Settings import rule, resolution DTO/helper split, source-specific resolution split, domain value-object split, and home-config IO/payload split covered |
 | events | Detailed pass 1 complete | Backend mode and contract neutrality risks documented |
 | dispatch | Detailed pass 1 complete | Queue/claim/lease concurrency risks documented |
 | daemon | Detailed pass 1 complete | Service supervision and health surface risks documented |
 | event_relay | Detailed pass 1 complete | Retained bridge boundary and cursor/retry behavior documented |
 | artifacts | Detailed pass 1 complete | Filesystem lifecycle cleanup covered; access risk documented |
-| mobile | Detailed pass 1 complete | Device isolation and bounded ADB diagnostics covered; engine split risk remains |
-| ocr | Detailed pass 1 complete | OCR adapter errors and result-size budgets covered; host capacity policy remains |
+| mobile | Detailed pass 1 complete | Device isolation, bounded ADB diagnostics, and engine helper split covered |
+| ocr | Detailed pass 1 complete | OCR adapter errors, result-size budgets, and host/application capacity policy covered |
 | process | Detailed pass 1 complete | Bounded output/stale-session behavior documented |
 | delivery | Detailed pass 1 complete | Placeholder retired |
 | core config | Remediation pass in progress | Runtime guards, env coercion, browser profiles, mobile device config, Tool provider config, LLM profile config, Agent profile config, and Channel profile config split from global Settings entry |
@@ -241,15 +245,15 @@ Use this rollup to turn the per-module findings into implementation waves.
 
 - `memory`: add index freshness, recall latency, and storage-mode tests.
 - `skills`: split interfaces/authoring/owner-state, add trusted source and runtime resolution tests.
-- `authorization`: HTTP/read-helper split remains after grant lifecycle, dry-run, Access-boundary, and audit-redaction coverage.
+- `authorization`: HTTP DTO/read-helper/decision-route split now covered after grant lifecycle, dry-run, Access-boundary, and audit-redaction coverage.
 - `events`: enforce Redis for shared runtime and add contract/cursor/outbox tests.
 - `dispatch`: add concurrent claim, lease expiry, and idempotency tests.
 - `daemon`: add lifecycle smoke tests and host/workspace scope documentation.
 - `agent`: test agent.home Context Workspace handoff and avoid hidden prompt input.
 - `mobile`: split engine concerns and add screenshot/artifact retention budget tests.
 - `artifacts`: subject-aware preview/download authorization remains after retention/quota cleanup coverage.
-- `ocr`: add host capacity/concurrency policy after adapter error and result-size coverage.
-- `process`: retention/quota cleanup remains after bounded output and stale-session tests.
+- `ocr`: host capacity/concurrency policy now covered after adapter error and result-size coverage.
+- `process`: terminal-session retention/quota cleanup is covered after bounded output and stale-session tests.
 - `event_relay`: retained as separate Workbench update bridge; add Operations health counters if needed.
 
 ### Ownership Decision

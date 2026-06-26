@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from pydantic import BaseModel, Field
 
-from crxzipple.modules.agent.application import (
-    AgentAccessGrant,
-    AgentAuthorizationGrant,
+from crxzipple.modules.agent.application.home_models import (
     AgentHomeFileSnapshot,
     AgentHomeSnapshot,
-    AgentProfileResolution,
-    AgentResolvedLlm,
-    AgentResolvedTool,
-    AgentResolutionSummary,
-    AgentResolutionTrace,
-    AgentValidationIssue,
+    ExportAgentHomeResult,
+    MigrateAgentHomeResult,
+    SyncAgentHomeResult,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
+from crxzipple.modules.agent.interfaces.http_resolution_models import (
+    AgentProfileResolutionResponse as AgentProfileResolutionResponse,
+    agent_profile_resolution_response as agent_profile_resolution_response,
+)
 
 
 class AgentIdentityResponse(BaseModel):
@@ -113,90 +114,6 @@ class AgentHomeSnapshotResponse(BaseModel):
     files: list[AgentHomeFileResponse]
 
 
-class AgentResolutionSummaryResponse(BaseModel):
-    status: str
-    llm_routes: int
-    tools: int
-    access_grants: int
-    authorization_grants: int
-    issues: int
-
-
-class AgentResolvedLlmResponse(BaseModel):
-    slot: str
-    llm_id: str
-    resolved: bool
-    enabled: bool
-    provider: str | None = None
-    model_name: str | None = None
-    capabilities: list[str] = Field(default_factory=list)
-    context_window_tokens: int | None = None
-    credential_binding_id: str | None = None
-
-
-class AgentResolvedToolResponse(BaseModel):
-    tool_id: str
-    resolved: bool
-    enabled: bool
-    name: str | None = None
-    kind: str | None = None
-    definition_origin: str | None = None
-    access_requirements: list[str] = Field(default_factory=list)
-    access_requirement_sets: list[list[str]] = Field(default_factory=list)
-    required_effect_ids: list[str] = Field(default_factory=list)
-    requires_confirmation: bool = False
-    mutates_state: bool = False
-
-
-class AgentAccessGrantResponse(BaseModel):
-    source_type: str
-    source_id: str
-    requirement: str
-    grant_kind: str
-    status: str
-    ready: bool
-    setup_available: bool
-    reason: str | None = None
-
-
-class AgentAuthorizationGrantResponse(BaseModel):
-    policy_id: str
-    effect: str
-    action: str
-    status: str
-    effect_ids: list[str] = Field(default_factory=list)
-    tool_ids: list[str] = Field(default_factory=list)
-    source_kind: str | None = None
-    description: str = ""
-
-
-class AgentValidationIssueResponse(BaseModel):
-    severity: str
-    code: str
-    message: str
-    ref: str | None = None
-
-
-class AgentResolutionTraceResponse(BaseModel):
-    source: str
-    status: str
-    detail: str
-
-
-class AgentProfileResolutionResponse(BaseModel):
-    profile_id: str
-    profile_updated_at: str
-    summary: AgentResolutionSummaryResponse
-    llm_routes: list[AgentResolvedLlmResponse] = Field(default_factory=list)
-    tools: list[AgentResolvedToolResponse] = Field(default_factory=list)
-    access_grants: list[AgentAccessGrantResponse] = Field(default_factory=list)
-    authorization_grants: list[AgentAuthorizationGrantResponse] = Field(
-        default_factory=list,
-    )
-    validation: list[AgentValidationIssueResponse] = Field(default_factory=list)
-    trace: list[AgentResolutionTraceResponse] = Field(default_factory=list)
-
-
 def agent_profile_response(dto: AgentProfileDTO) -> AgentProfileResponse:
     return AgentProfileResponse(
         id=dto.id,
@@ -250,25 +167,11 @@ def agent_profile_response(dto: AgentProfileDTO) -> AgentProfileResponse:
     )
 
 
-def agent_profile_resolution_response(
-    resolution: AgentProfileResolution,
-) -> AgentProfileResolutionResponse:
-    return AgentProfileResolutionResponse(
-        profile_id=resolution.profile_id,
-        profile_updated_at=resolution.profile_updated_at,
-        summary=_resolution_summary_response(resolution.summary),
-        llm_routes=[_resolved_llm_response(item) for item in resolution.llm_routes],
-        tools=[_resolved_tool_response(item) for item in resolution.tools],
-        access_grants=[
-            _access_grant_response(item) for item in resolution.access_grants
-        ],
-        authorization_grants=[
-            _authorization_grant_response(item)
-            for item in resolution.authorization_grants
-        ],
-        validation=[_validation_issue_response(item) for item in resolution.validation],
-        trace=[_resolution_trace_response(item) for item in resolution.trace],
-    )
+def agent_profile_responses(profiles: Iterable[object]) -> list[AgentProfileResponse]:
+    return [
+        agent_profile_response(AgentProfileDTO.from_entity(profile))
+        for profile in profiles
+    ]
 
 
 def agent_home_snapshot_response(snapshot: AgentHomeSnapshot) -> AgentHomeSnapshotResponse:
@@ -281,95 +184,26 @@ def agent_home_snapshot_response(snapshot: AgentHomeSnapshot) -> AgentHomeSnapsh
     )
 
 
-def _resolution_summary_response(
-    summary: AgentResolutionSummary,
-) -> AgentResolutionSummaryResponse:
-    return AgentResolutionSummaryResponse(
-        status=summary.status,
-        llm_routes=summary.llm_routes,
-        tools=summary.tools,
-        access_grants=summary.access_grants,
-        authorization_grants=summary.authorization_grants,
-        issues=summary.issues,
+def agent_home_migration_response(
+    result: MigrateAgentHomeResult,
+) -> AgentHomeMigrationResponse:
+    return AgentHomeMigrationResponse(
+        source_dir=result.source_dir,
+        home_dir=result.profile.runtime_preferences.resolved_home_dir,
+        workdir=result.profile.runtime_preferences.resolved_workdir,
+        copied_paths=list(result.copied_paths),
+        skipped_paths=list(result.skipped_paths),
+        profile=agent_profile_response(AgentProfileDTO.from_entity(result.profile)),
     )
 
 
-def _resolved_llm_response(item: AgentResolvedLlm) -> AgentResolvedLlmResponse:
-    return AgentResolvedLlmResponse(
-        slot=item.slot,
-        llm_id=item.llm_id,
-        resolved=item.resolved,
-        enabled=item.enabled,
-        provider=item.provider,
-        model_name=item.model_name,
-        capabilities=list(item.capabilities),
-        context_window_tokens=item.context_window_tokens,
-        credential_binding_id=item.credential_binding_id,
-    )
-
-
-def _resolved_tool_response(item: AgentResolvedTool) -> AgentResolvedToolResponse:
-    return AgentResolvedToolResponse(
-        tool_id=item.tool_id,
-        resolved=item.resolved,
-        enabled=item.enabled,
-        name=item.name,
-        kind=item.kind,
-        definition_origin=item.definition_origin,
-        access_requirements=list(item.access_requirements),
-        access_requirement_sets=[list(group) for group in item.access_requirement_sets],
-        required_effect_ids=list(item.required_effect_ids),
-        requires_confirmation=item.requires_confirmation,
-        mutates_state=item.mutates_state,
-    )
-
-
-def _access_grant_response(item: AgentAccessGrant) -> AgentAccessGrantResponse:
-    return AgentAccessGrantResponse(
-        source_type=item.source_type,
-        source_id=item.source_id,
-        requirement=item.requirement,
-        grant_kind=item.grant_kind,
-        status=item.status,
-        ready=item.ready,
-        setup_available=item.setup_available,
-        reason=item.reason,
-    )
-
-
-def _authorization_grant_response(
-    item: AgentAuthorizationGrant,
-) -> AgentAuthorizationGrantResponse:
-    return AgentAuthorizationGrantResponse(
-        policy_id=item.policy_id,
-        effect=item.effect,
-        action=item.action,
-        status=item.status,
-        effect_ids=list(item.effect_ids),
-        tool_ids=list(item.tool_ids),
-        source_kind=item.source_kind,
-        description=item.description,
-    )
-
-
-def _validation_issue_response(
-    item: AgentValidationIssue,
-) -> AgentValidationIssueResponse:
-    return AgentValidationIssueResponse(
-        severity=item.severity,
-        code=item.code,
-        message=item.message,
-        ref=item.ref,
-    )
-
-
-def _resolution_trace_response(
-    item: AgentResolutionTrace,
-) -> AgentResolutionTraceResponse:
-    return AgentResolutionTraceResponse(
-        source=item.source,
-        status=item.status,
-        detail=item.detail,
+def agent_home_config_response(
+    result: SyncAgentHomeResult | ExportAgentHomeResult,
+) -> AgentHomeConfigResponse:
+    return AgentHomeConfigResponse(
+        home_dir=result.home_dir,
+        path=result.path,
+        profile=agent_profile_response(AgentProfileDTO.from_entity(result.profile)),
     )
 
 

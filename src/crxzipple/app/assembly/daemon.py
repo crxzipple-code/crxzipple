@@ -282,7 +282,13 @@ def build_runtime_daemon_specs(
                 restart_policy="on-failure",
                 metadata={
                     "server_url": settings.ocr_base_url,
-                    "cli_args": ["ocr", "host", "run"],
+                    "cli_args": [
+                        "ocr",
+                        "host",
+                        "run",
+                        "--max-concurrent-requests",
+                        str(settings.ocr_max_concurrent_requests),
+                    ],
                 },
             ),
         )

@@ -17,10 +17,12 @@ from crxzipple.modules.llm.infrastructure.persistence.repositories import (
     SqlAlchemyLlmInvocationRepository,
     SqlAlchemyLlmProfileRepository,
 )
-from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
+from crxzipple.modules.orchestration.infrastructure.persistence.execution_chain_repositories import (
     SqlAlchemyExecutionChainRepository,
     SqlAlchemyExecutionStepItemRepository,
     SqlAlchemyExecutionStepRepository,
+)
+from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
     SqlAlchemyOrchestrationExecutorLeaseRepository,
     SqlAlchemyOrchestrationIngressRequestRepository,
     SqlAlchemyOrchestrationRunRepository,

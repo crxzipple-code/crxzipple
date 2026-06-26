@@ -2699,9 +2699,11 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
     context = engine._build_advance_context(_run())  # noqa: SLF001
 
     assert context.request_render_snapshot_metadata["runtime_contract_hash"] == "abc123"
-    from crxzipple.modules.orchestration.application.engine import _llm_request_metadata
+    from crxzipple.modules.orchestration.application.engine_runtime_helpers import (
+        llm_request_metadata,
+    )
 
-    request_metadata = _llm_request_metadata(context)
+    request_metadata = llm_request_metadata(context)
     assert request_metadata["runtime_request_mode"] == "normal_turn"
     assert request_metadata["tree_schema_version"] == CONTEXT_TREE_SCHEMA_VERSION
     assert request_metadata["request_render_snapshot_id"] == "snapshot-run-context"

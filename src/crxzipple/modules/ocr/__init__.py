@@ -1,7 +1,9 @@
 """OCR bounded context."""
 
-from .application import OcrApplicationService, OcrEngine
+from .application import OcrApplicationService, OcrCapacityLimiter, OcrEngine
 from .domain import (
+    OcrCapacityExceededError,
+    OcrCapacitySnapshot,
     OcrError,
     OcrExecutionError,
     OcrPoint,
@@ -21,6 +23,9 @@ __all__ = [
     "create_ocr_host_app",
     "OcrAnalyzeArtifactRequest",
     "OcrApplicationService",
+    "OcrCapacityExceededError",
+    "OcrCapacityLimiter",
+    "OcrCapacitySnapshot",
     "OcrEngine",
     "OcrError",
     "OcrExecutionError",

@@ -5,12 +5,14 @@ from crxzipple.modules.process.domain.exceptions import (
     ProcessValidationError,
 )
 from crxzipple.modules.process.domain.value_objects import (
+    ProcessCleanupResult,
     ProcessOutputWindow,
     ProcessStatus,
     ProcessStream,
 )
 
 __all__ = [
+    "ProcessCleanupResult",
     "ProcessError",
     "ProcessNotFoundError",
     "ProcessOutputWindow",

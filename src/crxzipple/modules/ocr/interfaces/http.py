@@ -8,7 +8,11 @@ from pydantic import BaseModel, Field
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
-from crxzipple.modules.ocr.domain import OcrExecutionError, OcrValidationError
+from crxzipple.modules.ocr.domain import (
+    OcrCapacityExceededError,
+    OcrExecutionError,
+    OcrValidationError,
+)
 
 
 router = APIRouter()
@@ -27,6 +31,8 @@ def health(
 ) -> dict[str, object]:
     try:
         return container.require(AppKey.OCR_SERVICE).health()
+    except OcrCapacityExceededError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (OcrValidationError, OcrExecutionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -50,6 +56,8 @@ def analyze_artifact(
             language=payload.language,
             detect_orientation=payload.detect_orientation,
         )
+    except OcrCapacityExceededError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (OcrValidationError, OcrExecutionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return container.require(AppKey.OCR_RESULT_SERIALIZER).serialize(result)

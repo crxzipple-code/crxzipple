@@ -12,7 +12,9 @@ from crxzipple.modules.artifacts.infrastructure.filesystem_store import (
     FilesystemArtifactStore,
 )
 from crxzipple.modules.ocr.application import OcrApplicationService
+from crxzipple.modules.ocr.application.capacity import OcrCapacityLimiter
 from crxzipple.modules.ocr.domain import (
+    OcrCapacityExceededError,
     OcrExecutionError,
     OcrResult,
     OcrTextBlock,
@@ -102,6 +104,7 @@ class OcrApplicationServiceTestCase(unittest.TestCase):
                 default_language="ch",
                 max_result_blocks=9,
                 max_result_text_chars=99,
+                max_concurrent_requests=3,
             )
 
             metadata = service.capability_metadata()
@@ -111,10 +114,46 @@ class OcrApplicationServiceTestCase(unittest.TestCase):
         self.assertEqual(metadata["features"], ("layout", "orientation"))
         self.assertEqual(metadata["limits"]["max_result_blocks"], 9)
         self.assertEqual(metadata["limits"]["max_result_text_chars"], 99)
+        self.assertEqual(metadata["limits"]["max_concurrent_requests"], 3)
+        self.assertEqual(metadata["capacity"]["max_concurrent_requests"], 3)
+        self.assertEqual(metadata["capacity"]["in_flight_requests"], 0)
+        self.assertEqual(metadata["capacity"]["available_requests"], 3)
         self.assertEqual(
             metadata["large_output_policy"]["mode"],
             "reject_until_artifact_externalization",
         )
+
+    def test_health_reports_capacity_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = OcrApplicationService(
+                engine=_FakeOcrEngine(),
+                artifact_service=ArtifactApplicationService(FilesystemArtifactStore(tempdir)),
+                max_concurrent_requests=2,
+            )
+
+            health = service.health()
+
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["capacity"]["max_concurrent_requests"], 2)
+        self.assertEqual(health["capacity"]["available_requests"], 2)
+
+    def test_analyze_artifact_rejects_when_capacity_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifact_service = ArtifactApplicationService(FilesystemArtifactStore(tempdir))
+            artifact = self._create_image_artifact(artifact_service)
+            limiter = OcrCapacityLimiter(1)
+            engine = _FakeOcrEngine()
+            service = OcrApplicationService(
+                engine=engine,
+                artifact_service=artifact_service,
+                capacity_limiter=limiter,
+            )
+
+            with limiter.acquire():
+                with self.assertRaises(OcrCapacityExceededError):
+                    service.analyze_artifact(artifact_id=artifact.id)
+
+        self.assertEqual(engine.calls, [])
 
     def test_analyze_artifact_rejects_non_image_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

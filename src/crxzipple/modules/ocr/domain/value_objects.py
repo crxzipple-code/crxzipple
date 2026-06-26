@@ -57,3 +57,20 @@ class OcrResult:
             (self.variant.strip() if isinstance(self.variant, str) else None) or None,
         )
         object.__setattr__(self, "metadata", dict(self.metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class OcrCapacitySnapshot:
+    max_concurrent_requests: int
+    in_flight_requests: int
+
+    @property
+    def available_requests(self) -> int:
+        return max(self.max_concurrent_requests - self.in_flight_requests, 0)
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "max_concurrent_requests": max(int(self.max_concurrent_requests), 1),
+            "in_flight_requests": max(int(self.in_flight_requests), 0),
+            "available_requests": self.available_requests,
+        }

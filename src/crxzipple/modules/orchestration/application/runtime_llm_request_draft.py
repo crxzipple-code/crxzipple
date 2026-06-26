@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from dataclasses import dataclass, field
 
 from crxzipple.modules.llm.domain import (
-    LlmCapability,
-    LlmInputItem,
     LlmMessage,
     LlmProfile,
-    ToolSchema,
 )
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
@@ -32,9 +28,22 @@ from crxzipple.modules.orchestration.application.runtime_request_bootstrap_hint 
     runtime_request_bootstrap_hint_from_metadata,
 )
 from crxzipple.modules.orchestration.application.runtime_request_report import (
-    RuntimeRequestReport,
     RunSurfacePolicy,
     resolve_run_surface_policy,
+)
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft_models import (
+    RuntimeLlmRequestDraft,
+    SkillRuntimeRequestResolutionPort,
+)
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft_payloads import (
+    routing_input_content as build_routing_input_content,
+    routing_input_block_count,
+    session_replay_window_event_payload,
+    transcript_policy_payload,
+)
+from crxzipple.modules.orchestration.application.runtime_llm_request_draft_session import (
+    build_runtime_replay_window,
+    build_session_draft_context,
 )
 from crxzipple.modules.orchestration.application.runtime_request_report_builder import (
     ExecutionContinuationQueryPort,
@@ -47,23 +56,10 @@ from crxzipple.modules.orchestration.application.runtime_tool_schema_policy impo
     RuntimeToolSchemaPolicy,
 )
 from crxzipple.modules.llm.application.session_runtime_transcript import (
-    RuntimeTranscript,
-    RuntimeTranscriptReport,
     RuntimeReplayWindowBuilder,
-    build_current_inbound_runtime_transcript,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet
-from crxzipple.modules.session.application import (
-    GetSessionItemBySourceInput,
-    ListSessionItemsInput,
-    SessionReplayWindow,
-)
-from crxzipple.modules.session.domain import Session, SessionItem
 from crxzipple.modules.session.domain import SessionRuntimeBinding
-from crxzipple.shared.content_blocks import (
-    content_blocks_from_payload,
-    normalize_content_blocks,
-)
 from crxzipple.shared.domain.events import Event
 from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
@@ -100,60 +96,6 @@ def _runtime_context_facts(
         "available_tool_ids": tuple(available_tool_ids),
         **step_budget.to_payload(),
     }
-
-
-class SkillRuntimeRequestResolutionPort(Protocol):
-    def resolve_runtime_request_catalog(
-        self,
-        *,
-        workspace_dir: str | None,
-        surface: str,
-        available_tool_ids: tuple[str, ...],
-        interface: str | None = None,
-        agent_id: str | None = None,
-        run_id: str | None = None,
-        session_key: str | None = None,
-        active_session_id: str | None = None,
-    ) -> Any:
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeLlmRequestDraft:
-    llm_id: str
-    session_key: str
-    active_session_id: str
-    messages: tuple[LlmMessage, ...]
-    input_items: tuple[LlmInputItem, ...] = ()
-    transcript_policy: dict[str, object] = field(default_factory=dict)
-    llm_capabilities: tuple[LlmCapability, ...] = ()
-    llm_api_family: str | None = None
-    runtime_llm_defaults: dict[str, object] = field(default_factory=dict)
-    llm_defaults: dict[str, object] = field(default_factory=dict)
-    llm_policy: dict[str, object] = field(default_factory=dict)
-    mode: RuntimeRequestMode = RuntimeRequestMode.NORMAL_TURN
-    report: RuntimeRequestReport | None = None
-    agent_instruction: str | None = None
-    runtime_context: dict[str, object] = field(default_factory=dict)
-    workspace_dir: str | None = None
-    tool_schemas: tuple[ToolSchema, ...] = ()
-    flow_hint: dict[str, object] = field(default_factory=dict)
-    surface_policy: RunSurfacePolicy = field(default_factory=RunSurfacePolicy)
-    skill_runtime_request_metadata: dict[str, object] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class _SessionDraftContext:
-    session: Session
-    lightweight_items: tuple[SessionItem, ...] = ()
-    replay_window: object | None = None
-
-    @property
-    def replay_items(self) -> tuple[SessionItem, ...]:
-        if self.replay_window is None:
-            return self.lightweight_items
-        items = getattr(self.replay_window, "items", ())
-        return tuple(items or ())
 
 
 @dataclass(slots=True)
@@ -221,7 +163,8 @@ class RuntimeLlmRequestDraftCollector:
             profile = self.agent_service.get_profile(run.agent_id)
         resolved_mode = self._resolve_runtime_request_mode(run, mode=mode)
         with self._timed_phase("session_context_read"):
-            session_context = self._session_draft_context(
+            session_context = build_session_draft_context(
+                self.session_service,
                 run=run,
                 session_key=session_key,
                 mode=resolved_mode,
@@ -239,19 +182,26 @@ class RuntimeLlmRequestDraftCollector:
         )
 
         with self._timed_phase("transcript_build"):
-            transcript = self._build_runtime_replay_window(
+            transcript = build_runtime_replay_window(
+                self.runtime_replay_window_builder,
                 run,
                 session_items=session_context.replay_items,
                 mode=resolved_mode,
+                memory_flush_transcript_max_chars=(
+                    self.memory_flush_transcript_max_chars
+                ),
+                session_item_transcript_max_chars=(
+                    self.session_item_transcript_max_chars
+                ),
             )
-            transcript_policy = _transcript_policy_payload(
+            transcript_policy = transcript_policy_payload(
                 session_key=session.id,
                 session_replay_window=session_context.replay_window,
                 mode=resolved_mode,
             )
         with self._timed_phase("llm_resolve"):
             routing_input_content = (
-                _routing_input_content(
+                build_routing_input_content(
                     transcript_messages=transcript.messages,
                     session_items=(),
                 )
@@ -405,105 +355,6 @@ class RuntimeLlmRequestDraftCollector:
     def _resolve_surface_policy(mode: RuntimeRequestMode) -> RunSurfacePolicy:
         return resolve_run_surface_policy(mode)
 
-    def _session_draft_context(
-        self,
-        *,
-        run: OrchestrationRun,
-        session_key: str,
-        mode: RuntimeRequestMode,
-    ) -> _SessionDraftContext:
-        if mode is RuntimeRequestMode.MEMORY_FLUSH or _mode_includes_direct_history(mode):
-            bundle = self.session_service.get_session_with_items(
-                ListSessionItemsInput(
-                    session_key=session_key,
-                    active_session_only=True,
-                ),
-            )
-            replay_window = _session_replay_window_from_items(
-                session=bundle.session,
-                items=tuple(bundle.items),
-                active_session_only=True,
-            )
-            return _SessionDraftContext(
-                session=replay_window.session,
-                replay_window=replay_window,
-            )
-        current_item = _get_current_inbound_session_item(
-            self.session_service,
-            run=run,
-            session_key=session_key,
-        )
-        if current_item is not None:
-            bundle = self.session_service.get_session_with_items(
-                ListSessionItemsInput(
-                    session_key=session_key,
-                    active_session_only=True,
-                    limit=0,
-                ),
-            )
-            return _SessionDraftContext(
-                session=bundle.session,
-                lightweight_items=(current_item,),
-            )
-        bundle = self.session_service.get_session_with_items(
-            ListSessionItemsInput(
-                session_key=session_key,
-                active_session_only=True,
-                limit=1,
-            ),
-        )
-        return _SessionDraftContext(
-            session=bundle.session,
-            lightweight_items=tuple(bundle.items),
-        )
-
-    def _build_runtime_replay_window(
-        self,
-        run: OrchestrationRun,
-        *,
-        session_items: tuple[SessionItem, ...] = (),
-        mode: RuntimeRequestMode,
-    ) -> RuntimeTranscript:
-        if mode is RuntimeRequestMode.MEMORY_FLUSH:
-            return self.runtime_replay_window_builder.build_from_session_items(
-                session_items,
-                max_chars=self.memory_flush_transcript_max_chars,
-                include_non_protocol_history=True,
-            )
-        if mode in {
-            RuntimeRequestMode.NORMAL_TURN,
-            RuntimeRequestMode.SESSION_START,
-        }:
-            return _current_inbound_transcript(run)
-        if session_items:
-            transcript = self.runtime_replay_window_builder.build_from_session_items(
-                session_items,
-                max_chars=self.session_item_transcript_max_chars,
-                include_non_protocol_history=_mode_includes_direct_history(mode),
-            )
-            if transcript.input_items or transcript.messages:
-                return transcript
-            if mode in {
-                RuntimeRequestMode.NORMAL_TURN,
-                RuntimeRequestMode.SESSION_START,
-            }:
-                return _current_inbound_transcript(run)
-            return transcript
-        if mode not in {
-            RuntimeRequestMode.NORMAL_TURN,
-            RuntimeRequestMode.SESSION_START,
-        }:
-            return RuntimeTranscript(
-                messages=(),
-                report=RuntimeTranscriptReport(
-                    message_count=0,
-                    chars=0,
-                    estimated_tokens=0,
-                    tool_result_stats={},
-                ),
-            )
-        return _current_inbound_transcript(run)
-
     @staticmethod
     def _resolve_requested_llm_id(
         *,
@@ -588,10 +439,10 @@ class RuntimeLlmRequestDraftCollector:
             "current_step": run.current_step,
             "stage": run.stage.value,
         }
-        input_block_count = _routing_input_block_count(routing_input_content)
+        input_block_count = routing_input_block_count(routing_input_content)
         if input_block_count is not None:
             payload["routing_input_block_count"] = input_block_count
-        replay_window_payload = _session_replay_window_event_payload(
+        replay_window_payload = session_replay_window_event_payload(
             session_replay_window,
         )
         if replay_window_payload:
@@ -658,176 +509,3 @@ class RuntimeLlmRequestDraftCollector:
             if candidate is not None and candidate.strip():
                 return candidate.strip()
         return None
-
-
-def _routing_input_content_from_transcript(
-    messages: tuple[LlmMessage, ...],
-) -> dict[str, object] | None:
-    blocks: list[dict[str, object]] = []
-    for message in messages:
-        try:
-            normalized_blocks = normalize_content_blocks(message.content)
-        except ValueError:
-            continue
-        blocks.extend(normalized_blocks)
-    if not blocks:
-        return None
-    return {"blocks": blocks}
-
-
-def _routing_input_content(
-    *,
-    transcript_messages: tuple[LlmMessage, ...],
-    session_items: tuple[SessionItem, ...],
-) -> dict[str, object] | None:
-    transcript_payload = _routing_input_content_from_transcript(transcript_messages)
-    if isinstance(transcript_payload, dict):
-        raw_blocks = transcript_payload.get("blocks")
-        if isinstance(raw_blocks, list):
-            transcript_blocks = [
-                dict(block) for block in raw_blocks if isinstance(block, dict)
-            ]
-            if transcript_blocks:
-                return {"blocks": transcript_blocks}
-    blocks: list[dict[str, object]] = []
-    for item in session_items:
-        blocks.extend(content_blocks_from_payload(item.content_payload))
-    if not blocks:
-        return None
-    return {"blocks": blocks}
-
-
-def _get_current_inbound_session_item(
-    session_service: object,
-    *,
-    run: OrchestrationRun,
-    session_key: str,
-) -> SessionItem | None:
-    lookup = getattr(session_service, "get_item_by_source", None)
-    if not callable(lookup):
-        return None
-    active_session_id = _optional_text(run.active_session_id)
-    if active_session_id is None:
-        return None
-    try:
-        item = lookup(
-            GetSessionItemBySourceInput(
-                session_key=session_key,
-                session_id=active_session_id,
-                source_module="orchestration",
-                source_kind="orchestration_run",
-                source_id=run.id,
-            ),
-        )
-    except Exception:
-        return None
-    if isinstance(item, SessionItem) and item.role == "user":
-        return item
-    return None
-
-
-def _routing_input_block_count(value: dict[str, object] | None) -> int | None:
-    if not isinstance(value, dict):
-        return None
-    blocks = value.get("blocks")
-    if not isinstance(blocks, list):
-        return None
-    return len(tuple(block for block in blocks if isinstance(block, dict)))
-
-
-def _session_replay_window_event_payload(value: object) -> dict[str, object]:
-    if value is None:
-        return {}
-    payload: dict[str, object] = {}
-    for attr in (
-        "active_session_only",
-        "from_sequence_no",
-        "to_sequence_no",
-        "item_count",
-    ):
-        item = getattr(value, attr, None)
-        if item is not None:
-            payload[attr] = item
-    protocol_call_ids = getattr(value, "protocol_call_ids", None)
-    if protocol_call_ids:
-        payload["protocol_call_ids"] = list(protocol_call_ids)
-    return payload
-
-
-def _session_replay_window_policy_payload(
-    value: object,
-    *,
-    session_key: str,
-) -> dict[str, object]:
-    payload = _session_replay_window_event_payload(value)
-    payload["session_key"] = session_key
-    return payload
-
-
-def _transcript_policy_payload(
-    *,
-    session_key: str,
-    session_replay_window: object | None,
-    mode: RuntimeRequestMode,
-) -> dict[str, object]:
-    if session_replay_window is not None:
-        return {
-            "session_replay_window": _session_replay_window_policy_payload(
-                session_replay_window,
-                session_key=session_key,
-            ),
-        }
-    return {
-        "session_binding_lookup": {
-            "session_key": session_key,
-            "active_session_only": True,
-            "item_limit": 0,
-            "mode": mode.value,
-        },
-    }
-
-
-def _current_inbound_transcript(run: OrchestrationRun) -> RuntimeTranscript:
-    try:
-        return build_current_inbound_runtime_transcript(
-            run.inbound_instruction.content,
-            source=run.inbound_instruction.source,
-            source_id=run.id,
-        )
-    except ValueError as exc:
-        raise OrchestrationValidationError(
-            "Current inbound instruction content must be structured content blocks.",
-        ) from exc
-
-
-def _session_replay_window_from_items(
-    *,
-    session: Session,
-    items: tuple[SessionItem, ...],
-    active_session_only: bool,
-) -> SessionReplayWindow:
-    return SessionReplayWindow(
-        session=session,
-        items=items,
-        active_session_only=active_session_only,
-        from_sequence_no=items[0].sequence_no if items else None,
-        to_sequence_no=items[-1].sequence_no if items else None,
-        item_count=len(items),
-        protocol_call_ids=tuple(
-            dict.fromkeys(item.call_id for item in items if item.call_id),
-        ),
-    )
-
-
-def _mode_includes_direct_history(mode: RuntimeRequestMode) -> bool:
-    return mode in {
-        RuntimeRequestMode.COMPACTION,
-        RuntimeRequestMode.MEMORY_FLUSH,
-    }
-
-
-def _optional_text(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None

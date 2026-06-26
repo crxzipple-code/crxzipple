@@ -6,8 +6,8 @@ High importance, medium risk. Context Workspace is the correct owner of context 
 
 ## Evidence
 
-- 42 Python files, about 8891 lines.
-- Large files include `application/rendering/xml_renderer.py` (884), `application/rendering/provider_mirror.py` (758), `infrastructure/persistence/repositories.py` (741), `application/services.py` (735), `application/models.py` (458), `application/context_slice_item_projection.py` (429), `application/context_tree_maintenance.py` (396), and `interfaces/http.py` (320).
+- 57 Python files, about 9446 lines.
+- Large files include `application/rendering/xml_renderer_tool_nodes.py` (457), `application/context_slice_item_projection.py` (452), `infrastructure/persistence/repositories.py` (435), `application/context_tree_maintenance.py` (396), `infrastructure/persistence/repository_mappers.py` (332), and `interfaces/http.py` (320). `application/services.py` is now a 23-line public export surface; `application/models.py` is now a 57-line public model export surface after workspace/slice/action/render DTO splits; `application/rendering/xml_renderer.py` is now a 289-line public XML render entry after tree/value/tool-node rendering splits; `application/rendering/provider_mirror.py` is now a 256-line attachment mirror entry after policy/budget splits.
 
 ## Findings
 
@@ -73,6 +73,28 @@ High importance, medium risk. Context Workspace is the correct owner of context 
   visible-input summary and cost/budget calculations live in focused helper
   modules. `request_render_snapshot_pipeline.py` is intentionally left as the
   phase coordinator rather than split into hidden micro-facades.
+- Context Workspace application services are now split by service role:
+  `workspace_service.py`, `tree_service.py`, `snapshot_services.py`, and
+  `slice_services.py`; `services.py` is only the stable export surface.
+- Context Workspace application DTOs are now split by model role:
+  workspace bootstrap/view models live in `workspace_models.py`, context
+  slice/control models live in `slice_models.py`, action/upsert inputs live in
+  `action_models.py`, and render/snapshot DTOs live in `render_models.py`;
+  `models.py` remains only the stable export surface.
+- Context Workspace SQLAlchemy/domain persistence mapping is now split from
+  repository query/transaction behavior. `infrastructure/persistence/repositories.py`
+  keeps repository methods and Unit-of-Work-facing persistence flow, while
+  `infrastructure/persistence/repository_mappers.py` owns node/snapshot/report
+  and provider-attachment conversion.
+- Context Workspace XML rendering is now split by concern. The public XML render
+  entry keeps tree rendering dispatch and session/evidence node rendering; tree
+  traversal/state labels live in `xml_renderer_tree.py`; XML value normalization
+  lives in `xml_renderer_values.py`; tool interaction/function/bundle node rules
+  live in `xml_renderer_tool_nodes.py`.
+- Provider attachment mirroring is now split by concern. `provider_mirror.py`
+  keeps the attachment mirror flow, while `provider_mirror_policy.py` owns
+  tool-surface policy/default metadata parsing and `provider_mirror_budget.py`
+  owns tool-schema budget accounting and group-visibility summaries.
 - Request render snapshots now record `request_render_cost` with selected node count,
   selected session item count, provider-visible tool count, projected input item count,
   rendered input character count, and elapsed milliseconds. The same cost payload is
@@ -105,14 +127,30 @@ High importance, medium risk. Context Workspace is the correct owner of context 
 ### Files Reviewed
 
 - `application/root_nodes.py`
+- `application/models.py`
+- `application/workspace_models.py`
+- `application/slice_models.py`
+- `application/action_models.py`
+- `application/render_models.py`
 - `application/services.py`
+- `application/workspace_service.py`
+- `application/tree_service.py`
+- `application/snapshot_services.py`
+- `application/slice_services.py`
 - `application/context_slice_item_projection.py`
 - `application/context_tree_maintenance.py`
 - `application/context_control_slice_builder.py`
 - `application/context_tool_surface_projection.py`
 - `application/rendering/pipeline.py`
 - `application/rendering/xml_renderer.py`
+- `application/rendering/xml_renderer_tree.py`
+- `application/rendering/xml_renderer_values.py`
+- `application/rendering/xml_renderer_tool_nodes.py`
+- `application/rendering/provider_mirror.py`
+- `application/rendering/provider_mirror_policy.py`
+- `application/rendering/provider_mirror_budget.py`
 - `infrastructure/persistence/repositories.py`
+- `infrastructure/persistence/repository_mappers.py`
 - `interfaces/http.py`
 
 ### File-Level Assessment
@@ -123,7 +161,31 @@ resource roots, constants, and shared estimate/payload helpers into focused
 `root_node_*` modules. It now keeps ordering, public constant re-exports, and parent
 lookup.
 
-`application/services.py` has already been reduced to distinct services: `ContextWorkspaceService`, `ContextTreeService`, `ContextObservationSnapshotService`, `RequestRenderSnapshotService`, `ContextSliceBuilderService`, and `ContextControlSliceService`. This is a good direction.
+`application/services.py` is now a thin export surface. `ContextWorkspaceService`,
+`ContextTreeService`, `ContextObservationSnapshotService`, `RequestRenderSnapshotService`,
+`ContextSliceBuilderService`, and `ContextControlSliceService` now live in focused
+application modules that match their runtime roles.
+
+`application/models.py` is now a thin model export surface. Workspace bootstrap/view
+models, slice/control models, action/upsert command models, and render/snapshot
+recording models live in focused `*_models.py` modules.
+
+`infrastructure/persistence/repositories.py` now keeps repository query and
+transaction behavior only. SQLAlchemy/domain conversion for context nodes,
+observation snapshots, request-render snapshots/reports, and provider
+attachment mirrors lives in `repository_mappers.py`.
+
+`application/rendering/xml_renderer.py` now keeps the public XML rendering entry,
+generic node dispatch, session-item rendering, and evidence rendering. Tree
+snapshot traversal and node state/action labels live in `xml_renderer_tree.py`;
+XML text/metadata normalization lives in `xml_renderer_values.py`; and tool
+interaction/function/bundle XML rules live in `xml_renderer_tool_nodes.py`.
+
+`application/rendering/provider_mirror.py` now keeps provider attachment mirror
+orchestration and artifact/schema candidate extraction. Tool-surface policy
+construction and default matching live in `provider_mirror_policy.py`; budget
+initialization, skip accounting, default mirror records, and group visibility
+summaries live in `provider_mirror_budget.py`.
 
 `context_slice_item_projection.py`, `context_control_slice_builder.py`, and `context_tool_surface_projection.py` show the intended control-plane/projection split.
 
@@ -164,6 +226,11 @@ Context nodes must be scoped by session/run/workspace/agent. Multi-user readines
 - [x] Add selected-slice coverage that guards LLM provider input from full debug tree/root body replay in covered paths.
 - [x] Add mirror consistency tests against Tool owner catalog and Session item refs.
 - [x] Track render elapsed time, selected node count, selected session item count, provider-visible tool count, and rendered char count in request render snapshots.
+- [x] Split Context Workspace application service implementations by workspace, tree, snapshot, and slice roles behind a thin export surface.
+- [x] Split Context Workspace application DTO/model surface by workspace, slice/control, action/upsert, and render/snapshot roles behind a thin export surface.
+- [x] Split Context Workspace persistence mapping from repository query/transaction behavior.
+- [x] Split XML renderer traversal, value-normalization, and tool-node rendering rules from the public XML render entry.
+- [x] Split provider attachment mirror policy and budget accounting from the public mirror flow.
 
 ### Remediation Verification
 
@@ -232,3 +299,35 @@ Result:
   -> passed.
   `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_session_adapter.py tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_tree_tool.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_request_render_input_projection.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_runtime_tool_schema_policy.py tests/unit/test_llm_runtime_request_factory.py tests/unit/test_provider_request_renderer_protocol.py tests/unit/test_context_snapshot_metadata.py --tb=short --maxfail=1`
   -> 169 passed.
+- 2026-06-26 application service / persistence mapper split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/context_workspace/infrastructure/persistence/repositories.py src/crxzipple/modules/context_workspace/infrastructure/persistence/repository_mappers.py src/crxzipple/modules/context_workspace/application/services.py src/crxzipple/modules/context_workspace/application/workspace_service.py src/crxzipple/modules/context_workspace/application/tree_service.py src/crxzipple/modules/context_workspace/application/snapshot_services.py src/crxzipple/modules/context_workspace/application/slice_services.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_tree_tool.py --tb=short --maxfail=1`
+  -> 46 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_request_render_input_projection.py --tb=short --maxfail=1`
+  -> 41 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_session_adapter.py tests/unit/test_context_workspace_tool_adapter.py --tb=short --maxfail=1`
+  -> 58 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_runtime_tool_schema_policy.py tests/unit/test_app_assembly_module_local.py::test_context_workspace_factory_builds_tree_services --tb=short --maxfail=1`
+  -> 5 passed.
+- 2026-06-26 XML renderer tree/value/tool-node split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/context_workspace/application/rendering/xml_renderer.py src/crxzipple/modules/context_workspace/application/rendering/xml_renderer_tool_nodes.py src/crxzipple/modules/context_workspace/application/rendering/xml_renderer_tree.py src/crxzipple/modules/context_workspace/application/rendering/xml_renderer_values.py src/crxzipple/modules/context_workspace/application/rendering/estimates.py tests/unit/test_context_render_xml_renderer.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_render_xml_renderer.py --tb=short --maxfail=1`
+  -> 10 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_tree_tool.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_request_render_input_projection.py --tb=short --maxfail=1`
+  -> 87 passed.
+- 2026-06-26 provider attachment mirror policy/budget split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/context_workspace/application/rendering/provider_mirror.py src/crxzipple/modules/context_workspace/application/rendering/provider_mirror_policy.py src/crxzipple/modules/context_workspace/application/rendering/provider_mirror_budget.py tests/unit/test_context_provider_mirror.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_provider_mirror.py --tb=short --maxfail=1`
+  -> 7 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_llm_runtime_request_factory_builder.py --tb=short --maxfail=1`
+  -> 74 passed.
+- 2026-06-26 application model split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/context_workspace/application src/crxzipple/modules/context_workspace/infrastructure/persistence/repositories.py src/crxzipple/modules/context_workspace/infrastructure/persistence/repository_mappers.py tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_tree_tool.py tests/unit/test_context_provider_mirror.py tests/unit/test_context_render_xml_renderer.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_tree_tool.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_request_render_input_projection.py tests/unit/test_context_workspace_session_adapter.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_runtime_tool_schema_policy.py tests/unit/test_context_provider_mirror.py tests/unit/test_context_render_xml_renderer.py tests/unit/test_llm_runtime_request_factory_builder.py --tb=short --maxfail=1`
+  -> 202 passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/context_workspace/application src/crxzipple/modules/context_workspace/infrastructure/persistence/repositories.py src/crxzipple/modules/context_workspace/infrastructure/persistence/repository_mappers.py`
+  -> passed.

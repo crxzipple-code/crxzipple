@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 from crxzipple.modules.process.domain import (
+    ProcessCleanupResult,
     ProcessOutputWindow,
     ProcessSession,
     ProcessValidationError,
@@ -102,6 +104,28 @@ class ProcessApplicationService:
                 f"Process '{process_id}' is still running; kill it before removing it.",
             )
         self.repository.remove(process_id)
+
+    def cleanup_sessions(
+        self,
+        *,
+        ended_before: datetime | None = None,
+        max_terminal_sessions: int | None = None,
+        max_terminal_bytes: int | None = None,
+    ) -> ProcessCleanupResult:
+        if (
+            ended_before is None
+            and max_terminal_sessions is None
+            and max_terminal_bytes is None
+        ):
+            raise ProcessValidationError(
+                "Process cleanup requires a retention age, terminal-session limit, "
+                "or terminal-byte limit.",
+            )
+        return self.repository.cleanup_terminal_sessions(
+            ended_before=ended_before,
+            max_terminal_sessions=max_terminal_sessions,
+            max_terminal_bytes=max_terminal_bytes,
+        )
 
     def close(self) -> None:
         self.supervisor.close()

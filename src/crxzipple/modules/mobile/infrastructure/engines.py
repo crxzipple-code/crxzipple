@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from xml.etree import ElementTree as ET
 
 from crxzipple.modules.artifacts.application.services import ArtifactApplicationService
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
@@ -22,6 +20,18 @@ from crxzipple.modules.mobile.domain import (
 from crxzipple.modules.ocr.application.services import OcrApplicationService
 
 from .adb_client import AndroidAdbClient
+from .adb_engine_helpers import (
+    ANDROID_KEYCODES as _ANDROID_KEYCODES,
+    SWIPE_DIRECTIONS as _SWIPE_DIRECTIONS,
+    WAIT_POLL_SECONDS as _WAIT_POLL_SECONDS,
+    clear_and_type_text as _clear_and_type_text,
+    coerce_int as _coerce_int,
+    make_client as _make_client,
+    ref_generation as _ref_generation,
+    swipe_points_for_direction as _swipe_points_for_direction,
+    verify_typed_text as _verify_typed_text,
+    wait_for_input_ready as _wait_for_input_ready,
+)
 from .snapshot_builders import (
     snapshot_from_ocr_result as _snapshot_from_ocr_result,
     snapshot_from_source as _snapshot_from_source,
@@ -31,152 +41,8 @@ from .ui_node_resolution import (
     ResolvedNode as _ResolvedNode,
     bounds_center as _bounds_center,
     find_nodes_by_selector as _find_nodes_by_selector,
-    matches_target as _matches_target,
-    resolved_nodes_from_source as _resolved_nodes_from_source,
 )
 from .vision_layout import detect_visual_layout_candidates
-
-_ANDROID_KEYCODES = {
-    "TAB": 61,
-    "ENTER": 66,
-    "BACK": 4,
-    "HOME": 3,
-    "DEL": 67,
-    "A": 29,
-    "CTRL_LEFT": 113,
-}
-_REF_PATTERN = re.compile(r"^g(?P<generation>\d+)-m(?P<index>\d+)$")
-_WAIT_POLL_SECONDS = 0.5
-_SWIPE_DIRECTIONS = frozenset({"up", "down", "left", "right"})
-
-
-def _adb_timeout_seconds(timeout_ms: int | None) -> float:
-    if timeout_ms is None:
-        return 30.0
-    return max(timeout_ms / 1000.0, 1.0)
-
-
-def _require_device_serial(plan: MobileExecutionPlan) -> str:
-    if plan.device is None:
-        raise MobileExecutionError("Resolved mobile device is required.")
-    serial = (plan.device.udid or plan.device.name).strip()
-    if not serial:
-        raise MobileExecutionError("Resolved mobile device does not include an adb serial.")
-    return serial
-
-
-def _make_client(plan: MobileExecutionPlan, *, timeout_ms: int | None) -> AndroidAdbClient:
-    serial = _require_device_serial(plan)
-    return AndroidAdbClient(
-        adb_binary=plan.system.adb_binary,
-        device_serial=serial,
-        timeout_seconds=_adb_timeout_seconds(timeout_ms),
-    )
-
-
-def _coerce_int(value: object, *, label: str) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise MobileValidationError(f"{label} must be an integer.") from exc
-
-
-def _swipe_points_for_direction(
-    *,
-    bounds: tuple[int, int, int, int],
-    direction: str,
-) -> tuple[int, int, int, int]:
-    left, top, right, bottom = bounds
-    width = max(right - left, 1)
-    height = max(bottom - top, 1)
-    x_mid = left + width // 2
-    y_mid = top + height // 2
-    horizontal_margin = max(int(width * 0.2), 1)
-    vertical_margin = max(int(height * 0.2), 1)
-    if direction == "up":
-        return (x_mid, bottom - vertical_margin, x_mid, top + vertical_margin)
-    if direction == "down":
-        return (x_mid, top + vertical_margin, x_mid, bottom - vertical_margin)
-    if direction == "left":
-        return (right - horizontal_margin, y_mid, left + horizontal_margin, y_mid)
-    return (left + horizontal_margin, y_mid, right - horizontal_margin, y_mid)
-
-
-def _verify_typed_text(
-    *,
-    client: AndroidAdbClient,
-    target: _ResolvedNode,
-    expected_text: str,
-    timeout_seconds: float = 0.8,
-    poll_seconds: float = 0.1,
-) -> bool:
-    expected = expected_text.strip()
-    if not expected:
-        return True
-    deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
-    while True:
-        try:
-            source = client.dump_ui_xml()
-            for candidate in _resolved_nodes_from_source(source):
-                if not _matches_target(candidate, target):
-                    continue
-                candidate_text = (candidate.text or "").strip()
-                if candidate_text == expected or expected in candidate_text:
-                    return True
-        except (MobileExecutionError, ET.ParseError, MobileValidationError):
-            pass
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(max(poll_seconds, 0.01), remaining))
-
-
-def _wait_for_input_ready(
-    *,
-    client: AndroidAdbClient,
-    target: _ResolvedNode,
-) -> None:
-    if not client.wait_for_input_connection(
-        expected_resource_id=target.resource_id,
-        timeout_seconds=0.8,
-    ):
-        time.sleep(0.2)
-
-
-def _clear_and_type_text(
-    *,
-    client: AndroidAdbClient,
-    target: _ResolvedNode,
-    text: str,
-    clear: bool,
-) -> None:
-    if clear:
-        existing_text = (target.text or "").strip()
-        if existing_text:
-            try:
-                client.press_key_combination(
-                    keycodes=(
-                        _ANDROID_KEYCODES["CTRL_LEFT"],
-                        _ANDROID_KEYCODES["A"],
-                    ),
-                )
-                time.sleep(0.1)
-                client.press_keycode(keycode=_ANDROID_KEYCODES["DEL"])
-            except MobileExecutionError:
-                for _ in existing_text:
-                    client.press_keycode(keycode=_ANDROID_KEYCODES["DEL"])
-    client.input_text(text)
-
-
-def _ref_generation(ref: str) -> int:
-    match = _REF_PATTERN.fullmatch(ref.strip().lower())
-    if match is None:
-        raise MobileValidationError(
-            f"Mobile ref '{ref}' is invalid. Capture a new snapshot and use the returned ref.",
-        )
-    return max(int(match.group("generation")), 1)
 
 
 @dataclass(frozen=True, slots=True)
