@@ -6,14 +6,16 @@ Low-medium risk. Mobile is capability-runtime oriented and relatively self-conta
 
 ## Evidence
 
-- 24 Python files, about 4081 lines.
-- Large files include `infrastructure/engines.py` (686), `infrastructure/adb_client.py` (690), `application/services.py` (338), `infrastructure/vision_layout.py` (285), `infrastructure/snapshot_builders.py` (268), and `infrastructure/adb_engine_helpers.py` (177).
+- 28 Python files, about 4266 lines.
+- Large files include `infrastructure/adb_client.py` (690), `application/services.py` (338), `infrastructure/stores.py` (308), `infrastructure/vision_layout.py` (285), `infrastructure/mobile_interaction_actions.py` (282), `infrastructure/snapshot_builders.py` (268), and `infrastructure/mobile_snapshot_actions.py` (225). `infrastructure/engines.py` is now a 115-line action dispatcher.
 
 ## Findings
 
 - Capability runtime boundary is appropriate.
 - Engine/ADB details belong in infrastructure.
-- Application service is modest. ADB action/control helpers are now split out of the engine entrypoint.
+- Application service is modest. ADB control execution, snapshot/screenshot actions,
+  target resolution, interaction primitives, and shared ADB helpers are now split
+  out of the action-engine entrypoint.
 - Device execution now has a formal file-backed lease store wired through the
   coordinator, so simultaneous owners cannot drive the same device state path.
 - ADB subprocess failures now report bounded diagnostics instead of propagating
@@ -47,12 +49,16 @@ Low-medium risk. Mobile is capability-runtime oriented and relatively self-conta
 
 ### File-Level Assessment
 
-`infrastructure/engines.py` is now 686 lines and owns mobile action/control execution
-flow. UI XML selector/node resolution moved to `infrastructure/ui_node_resolution.py`;
-UI-tree/OCR/vision snapshot construction moved to `infrastructure/snapshot_builders.py`;
-ADB action/control helper policy moved to `infrastructure/adb_engine_helpers.py`.
-Artifact capture remains in the action engine because it is part of command execution,
-but result payloads stay ref/metadata-backed rather than inline image bytes.
+`infrastructure/engines.py` is now a 115-line ADB-backed action dispatcher. ADB
+control execution moved to `infrastructure/mobile_control_engine.py`;
+screenshot/snapshot command behavior moved to `infrastructure/mobile_snapshot_actions.py`;
+tap/type/swipe/press/wait primitives moved to
+`infrastructure/mobile_interaction_actions.py`; ref/selector target resolution moved
+to `infrastructure/mobile_action_targets.py`; UI XML selector/node resolution moved
+to `infrastructure/ui_node_resolution.py`; UI-tree/OCR/vision snapshot construction
+moved to `infrastructure/snapshot_builders.py`; shared ADB action helper policy moved
+to `infrastructure/adb_engine_helpers.py`. Artifact capture remains generic and
+ref/metadata-backed rather than inline image bytes.
 
 `infrastructure/adb_client.py` is 690 lines and uses subprocess-backed ADB operations.
 It is correctly in infrastructure. Timeout handling exists at the subprocess call
@@ -114,6 +120,10 @@ Mobile should be exposed through stable tools/capability actions, not raw ADB ac
 - `PYTHONPATH=src pytest -q tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py tests/unit/test_module_architecture_guards.py::test_mobile_core_has_no_app_or_task_specific_flow_logic --tb=short` -> 52 passed.
 - `python -m ruff check src/crxzipple/modules/mobile/infrastructure/engines.py src/crxzipple/modules/mobile/infrastructure/adb_engine_helpers.py tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_module_architecture_guards.py` -> passed.
 - `PYTHONPATH=src pytest -q tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py tests/unit/test_module_architecture_guards.py::test_mobile_core_has_no_app_or_task_specific_flow_logic --tb=short --maxfail=1` -> 52 passed.
+- `PYTHONPATH=src ruff check src/crxzipple/modules/mobile/infrastructure/engines.py src/crxzipple/modules/mobile/infrastructure/mobile_control_engine.py src/crxzipple/modules/mobile/infrastructure/__init__.py tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py --ignore F403,F405` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_mobile_domain.py tests/unit/test_mobile_device_leases.py tests/unit/test_mobile_cli.py tests/unit/test_mobile_http.py tests/unit/test_mobile_tool_http.py --tb=short --maxfail=1` -> 51 passed.
+- `PYTHONPATH=src ruff check src/crxzipple/modules/mobile/infrastructure/engines.py src/crxzipple/modules/mobile/infrastructure/mobile_action_targets.py src/crxzipple/modules/mobile/infrastructure/mobile_interaction_actions.py tests/unit/test_mobile_domain.py --ignore F403,F405` -> passed.
+- `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/mobile/infrastructure/engines.py src/crxzipple/modules/mobile/infrastructure/mobile_action_targets.py src/crxzipple/modules/mobile/infrastructure/mobile_interaction_actions.py src/crxzipple/modules/mobile/infrastructure/mobile_control_engine.py` -> passed.
 
 ### Notes From Current Remediation
 

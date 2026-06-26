@@ -7,6 +7,9 @@ from sqlalchemy import delete, select
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.operations.application.observation_models import OperationsProjection
+from crxzipple.modules.operations.application.observation_payloads import (
+    redact_sensitive_payload,
+)
 from crxzipple.modules.operations.infrastructure.persistence.models import (
     OperationsProjectionModel,
 )
@@ -32,6 +35,7 @@ class SqlAlchemyOperationsProjectionStore:
         projection_updated_at = coerce_utc_datetime(
             updated_at or datetime.now(timezone.utc),
         )
+        safe_payload = dict(redact_sensitive_payload(payload))
         with self._session_factory() as session:
             model = session.get(
                 OperationsProjectionModel,
@@ -44,13 +48,13 @@ class SqlAlchemyOperationsProjectionStore:
                     query_key=normalized_query_key,
                     version=1,
                     updated_at=projection_updated_at,
-                    payload=dict(payload),
+                    payload=safe_payload,
                 )
                 session.add(model)
             else:
                 model.version += 1
                 model.updated_at = projection_updated_at
-                model.payload = dict(payload)
+                model.payload = safe_payload
             session.commit()
 
     def get_projection(

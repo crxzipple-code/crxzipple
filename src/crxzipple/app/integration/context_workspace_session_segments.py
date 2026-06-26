@@ -78,6 +78,36 @@ def session_instance_seed(
     )
 
 
+def session_segments_root_seed(
+    *,
+    instance: SessionInstance,
+    parent_id: str,
+    active: bool,
+) -> ContextNodeSeed:
+    summary = f"Segments for session instance #{instance.sequence_no}."
+    return ContextNodeSeed(
+        node_id=(
+            "session.segments.active"
+            if active
+            else f"session.segments.closed.{node_part(instance.id)}"
+        ),
+        parent_id=parent_id,
+        owner="session",
+        kind="session_segments_root",
+        title="Segments",
+        summary=summary,
+        state=ContextNodeState(collapsed=False, loaded=True),
+        actions=_BASIC_ACTIONS,
+        owner_ref={
+            "session_key": instance.session_key,
+            "session_id": instance.id,
+            "active": active,
+        },
+        estimate=text_estimate(summary),
+        display_order=10,
+    )
+
+
 def session_segment_seed(
     *,
     instance: SessionInstance,
@@ -225,4 +255,3 @@ def historical_segment_seed(
         display_order=display_order,
         metadata=metadata,
     )
-

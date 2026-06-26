@@ -5,6 +5,7 @@ import unittest
 
 from crxzipple.modules.settings.application.action_policy import (
     SUPPORTED_KINDS,
+    WRITE_ACTIONS,
     kind_action_allowed,
     kind_policy_payload,
     normalize_kind,
@@ -55,6 +56,37 @@ class SettingsApplicationReadModelTestCase(unittest.TestCase):
                     or apply_policy["requires_owner_api"]
                 ):
                     self.assertTrue(action_policy["owner_api"])
+
+    def test_every_supported_kind_declares_write_path_and_apply_behavior(self) -> None:
+        valid_apply_modes = {
+            "owner_module_api",
+            "read_only",
+            "read_only_environment_snapshot",
+            "read_only_placeholder",
+            "settings_action_service",
+            "unavailable",
+        }
+        for kind in SUPPORTED_KINDS:
+            with self.subTest(kind=kind):
+                policy = kind_policy_payload(kind)
+                ownership = policy["ownership"]
+                action_policy = policy["action_policy"]
+                apply_policy = policy["apply_policy"]
+
+                self.assertIn("owner_api", action_policy)
+                self.assertIn(apply_policy["mode"], valid_apply_modes)
+                self.assertIn("hot_apply", apply_policy)
+                self.assertIn("requires_owner_api", apply_policy)
+
+                if action_policy["write_actions_allowed"]:
+                    self.assertTrue(set(action_policy["allowed_actions"]) & WRITE_ACTIONS)
+                    self.assertTrue(action_policy["owner_api"])
+                    self.assertEqual(ownership["truth_owner"], "settings")
+                    self.assertFalse(apply_policy["requires_owner_api"])
+
+                if apply_policy["requires_owner_api"]:
+                    self.assertTrue(action_policy["owner_api"])
+                    self.assertNotEqual(ownership["truth_owner"], "settings")
 
     def test_module_owned_kinds_route_actions_to_owner_api_not_settings_mutation(self) -> None:
         module_owned_kinds = (

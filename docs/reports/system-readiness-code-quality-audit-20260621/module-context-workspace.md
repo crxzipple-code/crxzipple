@@ -19,9 +19,20 @@ High importance, medium risk. Context Workspace is the correct owner of context 
   node projection, segment seed projection, segment range projection, segment
   id/scope values, session message node projection, item/tool-call pairing,
   consumed tool-history folding, tool-interaction node projection, and
-  tool-interaction summary formatting live outside the provider. The provider
-  still maps Session owner facts to Context Tree children, but it no longer owns
-  those pure formatting and projection rules.
+  tool-interaction summary formatting live outside the provider. Execution-summary
+  consumption boundaries and tool-lifecycle fact projection now live in
+  `context_workspace_session_execution_facts.py`, and active segment current-item
+  range seed construction lives in `context_workspace_session_item_nodes.py`.
+  Session segments root seed construction lives in
+  `context_workspace_session_segments.py`, and current-turn steps root seed
+  construction lives in `context_workspace_session_execution.py`. Historical segment
+  range paging/range-item budget checks live in
+  `context_workspace_session_segment_ranges.py`, while current item and consumed
+  tool-history message projection lives in `context_workspace_session_item_nodes.py`.
+  Session owner reads, instance lookup, and transcript window queries now live in
+  `context_workspace_session_reader.py`.
+  The provider still maps Session owner facts to Context Tree children, but it no
+  longer owns those pure formatting, projection, and owner-read rules.
 - The app integration orchestration tool-schema bootstrap has been split into
   focused units: the public bootstrap entry now coordinates draft metadata,
   catalog-backed defaults, and tree fallback; catalog lookup, tree fallback
@@ -119,8 +130,8 @@ High importance, medium risk. Context Workspace is the correct owner of context 
 - Treat tree as control plane of refs/state, not duplicate storage of owner facts.
 - Continue splitting app integration adapters by pure projection concern first
   before touching owner session lifecycle behavior. The current session adapter
-  split should remain a control-plane mapping layer, not a second source of
-  Session truth.
+  split should remain a control-plane mapping layer over focused owner-read and
+  projection helpers, not a second source of Session truth.
 
 ## Detailed Pass 1
 
@@ -257,6 +268,13 @@ Result:
   -> passed.
   `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_session_adapter.py tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_tree_tool.py tests/unit/test_orchestration_context_workspace_snapshot.py --tb=short --maxfail=1`
   -> 122 passed.
+- 2026-06-26 session owner reader split:
+  `PYTHONPATH=src ruff check src/crxzipple/app/integration/context_workspace_session.py src/crxzipple/app/integration/context_workspace_session_reader.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/app/integration/context_workspace_session.py src/crxzipple/app/integration/context_workspace_session_reader.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_context_workspace_session_adapter.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_request_render_input_projection.py --tb=short --maxfail=1`
+  -> 79 passed.
 - 2026-06-25 tool-schema bootstrap split:
   `python -m ruff check src/crxzipple/app/integration/context_workspace_orchestration/tool_schema_bootstrap.py src/crxzipple/app/integration/context_workspace_orchestration/tool_schema_catalog_bootstrap.py src/crxzipple/app/integration/context_workspace_orchestration/tool_schema_tree_bootstrap.py src/crxzipple/app/integration/context_workspace_orchestration/tool_schema_tree_nodes.py src/crxzipple/app/integration/context_workspace_orchestration/tool_schema_group_refs.py tests/unit/test_context_workspace_tool_adapter.py tests/unit/test_orchestration_context_workspace_snapshot.py`
   -> passed.

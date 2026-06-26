@@ -12,6 +12,12 @@ discipline.
 
 - 118 Python files, about 33860 lines after the current split.
 - `application/services.py` is now a thin 11-line export layer.
+- `application/profile_allocator_service.py` is now a 454-line allocation
+  lifecycle service after reusable-allocation lookup, pool candidate filtering,
+  cooldown/runtime blocking, and round-robin/least-busy profile selection moved
+  to `application/profile_allocation_selection.py`, and target recycle policy
+  plus target tracking/reconciliation moved to
+  `application/profile_allocation_targets.py`.
 - `infrastructure/action_engines.py` is now a 131-line dependency assembly
   surface. Execution lifecycle lives in
   `infrastructure/action_engine_execution.py`; page-level action dispatch lives
@@ -110,6 +116,18 @@ assemblers, execution planner, tab ops, selection ops, allocation target
 recycler/inspector, execution coordinator, profile admin, pool service, and
 allocator service.
 
+`application/profile_allocator_service.py` now owns allocation lifecycle,
+heartbeat, release/fail/expire/drain, event emission, and allocation persistence.
+Pool/profile selection rules live in
+`application/profile_allocation_selection.py`: reusable allocation lookup,
+explicit/manual pool selection, disabled/attach-only filtering, runtime blocked
+checks, cooldown filtering, round-robin selection, and least-busy selection. This
+keeps the allocator service from mixing lifecycle side effects with pure
+candidate strategy. Target recycle defaults and close-target metadata now live in
+`application/profile_allocation_targets.py`; target remember/forget projection and
+target reconcile/lost-state projection live there as well, keeping target-set
+mutation rules outside release/expire/reconcile orchestration.
+
 `infrastructure/action_engines.py` has been reduced to the CDP/Playwright-backed
 action-engine dependency assembly surface. Focused modules now own execution
 lifecycle, page dispatch, batch execution, `cdp-raw`, action-trace runner
@@ -176,6 +194,7 @@ Browser can become a powerful external capability if exposed through stable tool
 - [x] Split Browser observation projection into value, page/snapshot, runtime/code/network, interaction/guidance, and final assembly helpers.
 - [x] Split Browser page-network fetch into request normalization, browser-page runtime execution, safety/diff analysis, event payload, and common result helpers.
 - [x] Split Browser control-engine tab operations, tab/runtime-state, CDP IO, host/process lifecycle helpers, and in-memory engines out of `engines.py`.
+- [x] Split Browser profile allocation selection strategy, target recycle policy, and target tracking/reconciliation projection out of the allocation lifecycle service.
 - [x] Add profile lease/isolation guard tests for current Browser allocation cleanup scope.
 - [x] Add CDP/action cleanup guard tests for current command-session, `cdp-raw`, network-inspect, and action-trace preview paths.
 - [x] Add trace/snapshot retention and size budgets.
@@ -286,6 +305,15 @@ Result:
 - Browser control-engine helper split lint and compileall: passed
 - Browser domain/interface/profile allocator regression: 52 passed
 - Browser tool/runtime regression after control-engine helper split: 113 passed
+- 2026-06-26 Browser profile allocation selection/target lifecycle split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/application/profile_allocator_service.py src/crxzipple/modules/browser/application/profile_allocation_selection.py src/crxzipple/modules/browser/application/profile_allocation_targets.py tests/unit/test_browser_profile_allocator.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/application/profile_allocator_service.py src/crxzipple/modules/browser/application/profile_allocation_selection.py src/crxzipple/modules/browser/application/profile_allocation_targets.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_profile_allocator.py --tb=short --maxfail=1`
+  -> 14 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_profile_allocator.py tests/unit/test_browser_interfaces.py tests/unit/test_browser_domain.py tests/unit/test_operations_browser_read_model.py --tb=short --maxfail=1`
+  -> 62 passed.
 - `tests/unit/test_browser_cdp_control.py` and
   `tests/unit/test_browser_cdp_host_daemon.py` remain socket-bound in this
   sandbox for the same `ThreadingHTTPServer(("127.0.0.1", 0))` reason.

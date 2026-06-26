@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from crxzipple.app.integration.context_workspace_session_content import (
+    items_estimate,
     is_function_call_message,
     tool_call_id,
+)
+from crxzipple.app.integration import context_workspace_session_execution_facts as execution_facts
+from crxzipple.app.integration.context_workspace_session_content_values import (
+    truncate,
 )
 from crxzipple.app.integration.context_workspace_session_message_nodes import (
     current_inbound_sequence_no,
@@ -17,9 +22,14 @@ from crxzipple.app.integration.context_workspace_session_tool_interactions impor
     tool_interaction_node_seed,
     tool_lifecycle_facts_for_result,
 )
-from crxzipple.modules.context_workspace.domain import ContextNodeSeed
+from crxzipple.modules.context_workspace.domain import (
+    ContextAction,
+    ContextNodeSeed,
+    ContextNodeState,
+)
 from crxzipple.modules.session.domain import SessionItem
 
+_CURRENT_MESSAGES_RANGE_REVISION = "2026-06-09.current_messages_visible_history.v2"
 _TOOL_INTERACTION_NODE_REVISION = "2026-06-09.tool_interaction_visible_result.v2"
 
 
@@ -96,6 +106,68 @@ def message_node_seeds(
     )
 
 
+def current_item_message_node_seeds(
+    messages: tuple[SessionItem, ...],
+    *,
+    parent_id: str,
+    current_run_id: str | None,
+    session_id: str | None,
+    execution_summaries: tuple[dict[str, object], ...],
+    consumed_tool_history_visible_limit: int,
+) -> tuple[ContextNodeSeed, ...]:
+    consumed_through_sequence_no = (
+        execution_facts.consumed_draft_input_through_sequence_no_from_summaries(
+            execution_summaries,
+            session_id=session_id,
+        )
+        if current_run_id is not None and session_id is not None
+        else None
+    )
+    tool_lifecycle_facts = (
+        execution_facts.tool_lifecycle_facts_from_execution_summaries(
+            execution_summaries,
+        )
+    )
+    return message_node_seeds(
+        messages,
+        parent_id=parent_id,
+        current_run_id=current_run_id,
+        consumed_through_sequence_no=consumed_through_sequence_no,
+        tool_lifecycle_facts=tool_lifecycle_facts,
+        collapse_consumed_tool_history=True,
+        consumed_tool_history_visible_limit=consumed_tool_history_visible_limit,
+    )
+
+
+def consumed_tool_history_message_node_seeds(
+    messages: tuple[SessionItem, ...],
+    *,
+    parent_id: str,
+    current_run_id: str | None,
+    session_id: str,
+    execution_summaries: tuple[dict[str, object], ...],
+) -> tuple[ContextNodeSeed, ...]:
+    consumed_through_sequence_no = (
+        execution_facts.consumed_draft_input_through_sequence_no_from_summaries(
+            execution_summaries,
+            session_id=session_id,
+        )
+        if current_run_id is not None
+        else None
+    )
+    return message_node_seeds(
+        messages,
+        parent_id=parent_id,
+        current_run_id=current_run_id,
+        consumed_through_sequence_no=consumed_through_sequence_no,
+        tool_lifecycle_facts=execution_facts.tool_lifecycle_facts_from_execution_summaries(
+            execution_summaries,
+        ),
+        collapse_consumed_tool_history=False,
+        only_tool_interactions=True,
+    )
+
+
 def current_items_range_prompt_content(
     messages: tuple[SessionItem, ...],
     *,
@@ -134,3 +206,55 @@ def current_items_range_prompt_content(
             for line in tool_interaction_range_preview(seed).splitlines()
         )
     return "\n".join(lines)
+
+
+def current_items_range_seed(
+    messages: tuple[SessionItem, ...],
+    *,
+    parent_id: str,
+    session_key: str,
+    session_id: str,
+    segment_id: str,
+    current_run_id: str | None,
+    visible_tool_limit: int,
+    actions: tuple[ContextAction, ...],
+) -> ContextNodeSeed:
+    first_sequence = messages[0].sequence_no
+    last_sequence = messages[-1].sequence_no
+    content = current_items_range_prompt_content(
+        messages,
+        current_run_id=current_run_id,
+        visible_tool_limit=visible_tool_limit,
+    )
+    return ContextNodeSeed(
+        node_id="session.items.current",
+        parent_id=parent_id,
+        owner="session",
+        kind="session_item_range",
+        title="Current Items",
+        summary=truncate(content.replace("\n", " "), 320),
+        content=content,
+        state=ContextNodeState(
+            collapsed=False,
+            loaded=True,
+        ),
+        actions=actions,
+        owner_ref={
+            "session_key": session_key,
+            "session_id": session_id,
+            "from_sequence_no": first_sequence,
+            "to_sequence_no": last_sequence,
+            "segment_id": segment_id,
+        },
+        estimate=items_estimate(
+            messages,
+            current_run_id=current_run_id,
+        ),
+        revision=(
+            f"{_CURRENT_MESSAGES_RANGE_REVISION}.run"
+            if current_run_id is not None
+            else f"{_CURRENT_MESSAGES_RANGE_REVISION}.inspect"
+        ),
+        display_order=10,
+        metadata={"item_count": len(messages)},
+    )

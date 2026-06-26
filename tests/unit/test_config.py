@@ -157,6 +157,94 @@ max_concurrency: 7
         with self.assertRaisesRegex(ValueError, "must not contain credentials"):
             load_settings()
 
+    def test_load_settings_reads_browser_runtime_fields(self) -> None:
+        os.environ["APP_BROWSER_EXECUTABLE_PATH"] = "/usr/bin/chrome"
+        os.environ["APP_BROWSER_SANDBOX_EXECUTABLE_PATH"] = "/sandbox/chrome"
+        os.environ["APP_BROWSER_PROXY_BASE_URL"] = "http://127.0.0.1:18880"
+        os.environ["APP_BROWSER_PROXY_EGRESS_CHECK_URL"] = "https://example.test/ip"
+        os.environ["APP_BROWSER_CDP_HOST"] = "0.0.0.0"
+        os.environ["APP_BROWSER_CDP_PORT"] = "18888"
+        os.environ["APP_BROWSER_HEADLESS"] = "true"
+        os.environ["APP_BROWSER_START_TIMEOUT_SECONDS"] = "12"
+        os.environ["APP_BROWSER_SANDBOX_DOCKER_IMAGE"] = "browser/sandbox:test"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.browser_executable_path, "/usr/bin/chrome")
+        self.assertEqual(
+            settings.browser_sandbox_executable_path,
+            "/sandbox/chrome",
+        )
+        self.assertEqual(settings.browser_proxy_base_url, "http://127.0.0.1:18880")
+        self.assertEqual(
+            settings.browser_proxy_egress_check_url,
+            "https://example.test/ip",
+        )
+        self.assertEqual(settings.browser_cdp_host, "0.0.0.0")
+        self.assertEqual(settings.browser_cdp_port, 18888)
+        self.assertTrue(settings.browser_headless)
+        self.assertEqual(settings.browser_start_timeout_seconds, 12)
+        self.assertEqual(settings.browser_sandbox_docker_image, "browser/sandbox:test")
+
+    def test_load_settings_uses_sandbox_image_for_empty_browser_sandbox_image(
+        self,
+    ) -> None:
+        os.environ["APP_BROWSER_SANDBOX_DOCKER_IMAGE"] = ""
+        os.environ["APP_SANDBOX_DOCKER_IMAGE"] = "python:test"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.browser_sandbox_docker_image, "python:test")
+
+    def test_load_settings_reads_sandbox_environment(self) -> None:
+        os.environ["APP_SANDBOX_BASE_DIR"] = "/tmp/custom-sandboxes"
+        os.environ["APP_SANDBOX_BACKEND"] = "Docker"
+        os.environ["APP_SANDBOX_DOCKER_BINARY"] = "podman"
+        os.environ["APP_SANDBOX_DOCKER_IMAGE"] = "python:custom"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.sandbox_base_dir, "/tmp/custom-sandboxes")
+        self.assertEqual(settings.sandbox_backend, "docker")
+        self.assertEqual(settings.sandbox_docker_binary, "podman")
+        self.assertEqual(settings.sandbox_docker_image, "python:custom")
+
+    def test_load_settings_reads_authorization_policy_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            policy_dir = root / "policies"
+            policy_dir.mkdir()
+            yaml_policy = policy_dir / "allow.yaml"
+            json_policy = policy_dir / "deny.json"
+            extra_policy = root / "extra.yml"
+            runtime_policy = root / "runtime.yaml"
+            yaml_policy.write_text("policies: []\n", encoding="utf-8")
+            json_policy.write_text('{"policies":[]}', encoding="utf-8")
+            extra_policy.write_text("policies: []\n", encoding="utf-8")
+
+            os.environ["APP_AUTHORIZATION_ENABLED"] = "false"
+            os.environ["APP_AUTHORIZATION_POLICY_PATHS"] = os.pathsep.join(
+                [str(policy_dir), str(extra_policy), str(policy_dir)],
+            )
+            os.environ["APP_AUTHORIZATION_RUNTIME_POLICY_PATH"] = str(runtime_policy)
+
+            settings = load_settings()
+
+        self.assertFalse(settings.authorization_enabled)
+        self.assertEqual(
+            settings.authorization_policy_paths,
+            (
+                str(yaml_policy.resolve()),
+                str(json_policy.resolve()),
+                str(extra_policy.resolve()),
+                str(runtime_policy.resolve()),
+            ),
+        )
+        self.assertEqual(
+            settings.authorization_runtime_policy_path,
+            str(runtime_policy),
+        )
+
     def test_load_settings_reads_http_mcp_provider(self) -> None:
         os.environ["APP_TOOL_MCP_PROVIDERS"] = """
         [

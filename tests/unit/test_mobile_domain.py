@@ -578,7 +578,7 @@ class MobileDomainTestCase(unittest.TestCase):
                     return_value=_FakeClient(),
                 ),
                 patch(
-                    "crxzipple.modules.mobile.infrastructure.engines.detect_visual_layout_candidates",
+                    "crxzipple.modules.mobile.infrastructure.mobile_snapshot_actions.detect_visual_layout_candidates",
                     return_value=(
                         SimpleNamespace(
                             kind="vision.input",
@@ -1106,7 +1106,7 @@ class MobileDomainTestCase(unittest.TestCase):
             "crxzipple.modules.mobile.infrastructure.engines._make_client",
             return_value=_FakeClient(),
         ), patch(
-            "crxzipple.modules.mobile.infrastructure.engines._verify_typed_text",
+            "crxzipple.modules.mobile.infrastructure.mobile_interaction_actions._verify_typed_text",
             side_effect=[False, True],
         ):
             result, updated_state = engine.execute(plan=plan, runtime_state=runtime_state)
@@ -1162,7 +1162,7 @@ class MobileDomainTestCase(unittest.TestCase):
                 launched.append((app_package, app_activity))
 
         with patch(
-            "crxzipple.modules.mobile.infrastructure.engines._make_client",
+            "crxzipple.modules.mobile.infrastructure.mobile_control_engine._make_client",
             return_value=_FakeClient(),
         ):
             result, updated_state = engine.execute(plan=plan, runtime_state=runtime_state)

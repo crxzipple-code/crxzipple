@@ -6,7 +6,7 @@ Medium-high risk. Settings is a governance surface, not owner of every module's 
 
 ## Evidence
 
-- 61 Python files, about 9170 lines.
+- 72 Python files, about 9384 lines.
 - Large files include `application/materialization.py` (205). `application/setup.py` is now a 35-line public setup entrypoint over focused resource collection, import, seed, result, database, Access seed, and core seed modules. `domain/entities.py` is now an 18-line export surface over focused resource/version/override/snapshot/audit aggregate modules. `application/materialization.py` now delegates warning DTOs and payload/profile/tool/access normalization to focused modules. `interfaces/http_actions.py` is now a 55-line HTTP boundary over focused execution/mutation/validation helpers. `application/services.py` is now a 192-line action-service facade, `application/resource_actions.py` is now a 126-line resource-action facade, and `interfaces/http.py` is now a 147-line router.
 
 ## Findings
@@ -120,6 +120,14 @@ id helpers live in `application/materialization_payloads.py`. The legacy profile
 helpers remain quarantined as materialization payload adapters and must not blur owner
 truth: module-owned profiles belong to their owner modules.
 
+Settings page read-model projection is now split by page concern. Overview counts,
+homepage sections, and resource inventory shaping live in
+`application/read_models/pages_overview.py`; common validation, impact, and section
+helpers live in `application/read_models/pages_common.py`; audit pagination and audit
+payload projection live in `application/read_models/pages_audits.py`.
+`application/read_models/pages.py` is now a 245-line resource kind/detail/summary
+projection surface rather than a mixed overview/audit/detail presenter.
+
 Settings governance persistence is now split between record DTOs, SQLAlchemy
 model/record mappers, domain/repository mappers, and repository query/transaction
 classes.
@@ -215,6 +223,9 @@ should not call generic Settings actions for module-owned entity mutation.
 - `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/domain src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence/domain_repositories.py src/crxzipple/modules/settings/interfaces` -> passed.
 - `PYTHONPATH=src pytest -q tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py --tb=short --maxfail=1` -> 44 passed.
 - `PYTHONPATH=src ruff check src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence/domain_repositories.py src/crxzipple/modules/settings/interfaces tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py` -> passed.
+- `PYTHONPATH=src ruff check src/crxzipple/modules/settings/application/read_models/pages.py src/crxzipple/modules/settings/application/read_models/pages_overview.py src/crxzipple/modules/settings/application/read_models/pages_common.py src/crxzipple/modules/settings/application/read_models/pages_audits.py src/crxzipple/modules/settings/application/read_models/__init__.py tests/unit/test_settings_application_read_models.py` -> passed.
+- `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/application/read_models/pages.py src/crxzipple/modules/settings/application/read_models/pages_overview.py src/crxzipple/modules/settings/application/read_models/pages_common.py src/crxzipple/modules/settings/application/read_models/pages_audits.py src/crxzipple/modules/settings/application/read_models/__init__.py` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_settings_application_read_models.py tests/unit/test_settings_http.py tests/unit/test_settings_materialization.py --tb=short --maxfail=1` -> 35 passed.
 - `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence/domain_repositories.py src/crxzipple/modules/settings/interfaces` -> passed.
 - `PYTHONPATH=src pytest -q tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py --tb=short --maxfail=1` -> 44 passed.
 - `PYTHONPATH=src ruff check src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence/domain_repositories.py src/crxzipple/modules/settings/interfaces tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py` -> passed.

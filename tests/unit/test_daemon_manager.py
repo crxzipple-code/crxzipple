@@ -333,6 +333,45 @@ class DaemonManagerTestCase(unittest.TestCase):
             self.assertEqual(refreshed[0].status, "stopped")
             self.assertEqual(refreshed[1].status, "ready")
 
+    def test_process_lifecycle_smoke_ensure_status_stop_and_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            daemon_service = self._build_service(Path(temp_dir))
+            process_service = _FakeProcessService()
+            manager = DaemonManager(
+                daemon_service=daemon_service,
+                process_service=process_service,
+                working_directory=temp_dir,
+                shell_resolver=lambda: "/bin/sh",
+                python_executable="/usr/bin/python3",
+            )
+
+            ensured = manager.ensure_service("worker:orchestration")
+            self.assertEqual(len(ensured), 2)
+            self.assertTrue(all(instance.status == "ready" for instance in ensured))
+            self.assertEqual(len(process_service.started_commands), 2)
+
+            status = manager.list_instances(service_key="worker:orchestration")
+            self.assertEqual(len(status), 2)
+            self.assertTrue(all(instance.status == "ready" for instance in status))
+
+            first_process_id = str(ensured[0].metadata["process_id"])
+            process_service.sessions[first_process_id].mark_exited(exit_code=1)
+            checked = manager.healthcheck_service("worker:orchestration")
+            self.assertEqual(
+                sorted(instance.status for instance in checked),
+                ["failed", "ready"],
+            )
+
+            recovered = manager.reconcile_service("worker:orchestration")
+            self.assertEqual(len([instance for instance in recovered if instance.status == "ready"]), 2)
+            self.assertEqual(len(process_service.started_commands), 3)
+
+            stopped = manager.stop_service("worker:orchestration")
+            self.assertEqual(len(stopped), 2)
+            self.assertTrue(all(instance.status == "stopped" for instance in stopped))
+            final_status = manager.list_instances(service_key="worker:orchestration", refresh=False)
+            self.assertFalse(any(instance.status == "ready" for instance in final_status))
+
     def test_healthcheck_service_discovers_running_process_sessions_without_instance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             daemon_service = self._build_service(Path(temp_dir))

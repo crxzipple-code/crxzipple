@@ -218,6 +218,9 @@ def test_tool_execution_binding_assembly_lives_in_app_tool_assembly() -> None:
     app_tool_assembly = (
         REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool.py"
     ).read_text(encoding="utf-8")
+    app_tool_service_graph_assembly = (
+        REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_service_graph.py"
+    ).read_text(encoding="utf-8")
     app_tool_package_assembly = (
         REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_packages.py"
     ).read_text(encoding="utf-8")
@@ -226,7 +229,8 @@ def test_tool_execution_binding_assembly_lives_in_app_tool_assembly() -> None:
     assert "ToolDependencyBinding(" not in app_runtime_assembly
     assert "ToolPackageApplyContext(" not in app_runtime_assembly
     assert "def build_tool_execution_capability_bindings(" in app_tool_package_assembly
-    assert "def build_tool_execution_services(" in app_tool_assembly
+    assert "build_tool_execution_services" in app_tool_assembly
+    assert "def build_tool_execution_services(" in app_tool_service_graph_assembly
     assert "artifact_service" in app_tool_package_assembly
     assert "browser_tool_application" in app_tool_package_assembly
     assert "mobile_facade" in app_tool_package_assembly

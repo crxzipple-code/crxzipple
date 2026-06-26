@@ -8,6 +8,9 @@ from crxzipple.modules.operations.application.observation_models import (
     OperationsObserverHeartbeat,
     OperationsObservedEvent,
 )
+from crxzipple.modules.operations.application.observation_payloads import (
+    redact_sensitive_payload,
+)
 from crxzipple.modules.operations.infrastructure.persistence.models import (
     OperationsEventTimeBucketModel,
     OperationsModuleObservationModel,
@@ -39,7 +42,7 @@ def observed_event_model(
         trace_id=event.trace_id,
         source_event_name=event.source_event_name,
         occurred_at=coerce_utc_datetime(event.occurred_at),
-        payload=dict(event.payload),
+        payload=dict(redact_sensitive_payload(event.payload)),
         recorded_at=coerce_utc_datetime(recorded_at),
     )
 
@@ -62,7 +65,7 @@ def apply_observed_event_model(
     model.trace_id = event.trace_id
     model.source_event_name = event.source_event_name
     model.occurred_at = coerce_utc_datetime(event.occurred_at)
-    model.payload = dict(event.payload)
+    model.payload = dict(redact_sensitive_payload(event.payload))
     model.recorded_at = coerce_utc_datetime(recorded_at)
 
 

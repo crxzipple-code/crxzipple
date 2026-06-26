@@ -78,7 +78,7 @@ Largest hotspots observed in the initial audit baseline:
 - `tool/infrastructure/persistence/repositories.py`: 1553 lines baseline; now 33-line export surface after source/function/provider/surface/runtime repository split
 - `tool/domain/entities.py`: 1147 lines baseline; now 61-line export surface after catalog/runtime entity and normalization split
 - `tool/application/catalog_models.py`: 943 lines baseline; now 37-line export surface after catalog type/helper/function/source model split
-- `tool/application/worker_service.py`: 1713 lines baseline; now 762-line worker coordinator after run-loop, run-resolution, execution, completion, recovery, assignment, wakeup, heartbeat, tracking, artifact, validation, and error helpers were split out
+- `tool/application/worker_service.py`: 1713 lines baseline; now 659-line worker coordinator after run-loop, run-resolution, execution, completion, recovery, assignment, wakeup, heartbeat, tracking, artifact, validation, error, and ToolRun persistence helpers were split out; `app/assembly/tool.py` is now a 536-line composition surface after service-graph adapters moved to `app/assembly/tool_service_graph.py`
 - `tool/interfaces/http.py`: 1106 lines baseline; now 494-line route surface after Pydantic HTTP models and payload projection helpers were split to `http_models.py` and `http_payloads.py`
 
 ## Cross-Cutting Findings
@@ -177,7 +177,7 @@ Detailed review status:
 | ocr | Detailed pass 1 complete | OCR adapter errors, result-size budgets, and host/application capacity policy covered |
 | process | Detailed pass 1 complete | Bounded output/stale-session behavior documented |
 | delivery | Detailed pass 1 complete | Placeholder retired |
-| core config | Remediation pass in progress | Runtime guards, env coercion, browser profiles, mobile device config, Tool provider config, LLM profile config, Agent profile config, and Channel profile config split from global Settings entry |
+| core config | Remediation pass in progress | `config.py` is now a thin public export surface; Settings model, load orchestration, default paths, runtime guards, env coercion, Events backend config, Authorization policy config, browser profile/runtime config, mobile device config, Tool provider/runtime config, LLM profile config, Agent profile config, Channel profile config, Artifact budget config, Prompt budget config, Orchestration runtime config, OCR config, Memory retrieval/vector config, Sandbox config, and logging config are split into focused modules |
 
 Core runtime:
 

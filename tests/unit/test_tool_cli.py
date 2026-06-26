@@ -538,11 +538,11 @@ class ToolCliTestCase(CliModuleTestCase):
             shutil.copytree(fixture_path("local_tools"), tools_root / "tools")
             with (
                 patch(
-                    "crxzipple.core.config.DEFAULT_WORKSPACE_TOOL_DIR",
+                    "crxzipple.core.config_paths.DEFAULT_WORKSPACE_TOOL_DIR",
                     tools_root / ".crxzipple" / "tools",
                 ),
                 patch(
-                    "crxzipple.core.config.DEFAULT_BUNDLED_TOOL_DIR",
+                    "crxzipple.core.config_paths.DEFAULT_BUNDLED_TOOL_DIR",
                     tools_root / "tools",
                 ),
             ):

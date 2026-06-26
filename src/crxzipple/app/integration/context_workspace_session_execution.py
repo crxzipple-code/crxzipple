@@ -45,6 +45,32 @@ def execution_step_item_summaries(
     return tuple(summaries)
 
 
+def current_steps_root_seed(
+    *,
+    run_id: str,
+    session_key: str,
+    parent_id: str,
+) -> ContextNodeSeed:
+    summary = f"Runtime steps for current turn {run_id}."
+    return ContextNodeSeed(
+        node_id="session.steps.current",
+        parent_id=parent_id,
+        owner="session",
+        kind="session_steps_root",
+        title="Steps",
+        summary=summary,
+        state=ContextNodeState(collapsed=False, loaded=True),
+        actions=_BASIC_ACTIONS,
+        owner_ref={
+            "session_key": session_key,
+            "run_id": run_id,
+            "turn_id": run_id,
+        },
+        estimate=text_estimate(summary),
+        display_order=10,
+    )
+
+
 def execution_step_node_seeds(
     execution_query: Any,
     turn_id: str,

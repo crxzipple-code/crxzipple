@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from crxzipple.modules.settings.application.read_models.pages import (
-    audit_by_id,
-    audit_page,
-    audit_payload,
-    impact_payload,
     kind_payload,
-    overview_payload,
     resolution_payload,
     resource_by_kind,
     resource_detail_payload,
+)
+from crxzipple.modules.settings.application.read_models.pages_audits import (
+    audit_by_id,
+    audit_page,
+    audit_payload,
+)
+from crxzipple.modules.settings.application.read_models.pages_common import (
+    impact_payload,
     validation_payload,
+)
+from crxzipple.modules.settings.application.read_models.pages_overview import (
+    overview_payload,
 )
 from crxzipple.modules.settings.application.read_models.runtime_defaults import (
     RUNTIME_DEFAULT_APPLY_REQUIREMENTS,

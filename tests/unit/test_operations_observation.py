@@ -106,6 +106,33 @@ from crxzipple.shared.domain.events import Event, named_event_topic
 
 
 class OperationsObservationTestCase(unittest.TestCase):
+    def test_observed_event_projection_redacts_sensitive_payload(self) -> None:
+        event = Event(
+            name=ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+            payload={
+                "credential_binding_id": "openai-api-key",
+                "api_key": "sk-raw-event-secret",
+                "nested": {"refresh_token": "raw-refresh-token"},
+                "database_url": "postgresql://app:db-secret@localhost/app",
+                "usage": {"total_tokens": 42},
+                "message": "token=inline-token-value",
+            },
+            occurred_at=datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc),
+        )
+
+        observed = observed_event_from_record(
+            EventTopicRecord(cursor="access-secret-1", envelope=event),
+        )
+        payload_text = json.dumps(observed.payload, sort_keys=True)
+
+        self.assertNotIn("sk-raw-event-secret", payload_text)
+        self.assertNotIn("raw-refresh-token", payload_text)
+        self.assertNotIn("db-secret", payload_text)
+        self.assertNotIn("inline-token-value", payload_text)
+        self.assertEqual(observed.payload["api_key"], "***")
+        self.assertEqual(observed.payload["nested"]["refresh_token"], "***")
+        self.assertEqual(observed.payload["usage"]["total_tokens"], 42)
+
     def test_file_backed_store_records_orchestration_module_observation(self) -> None:
         timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tempdir:
@@ -623,6 +650,77 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated.payload["title"], "Tool Runtime Updated")
+
+    def test_sqlalchemy_projection_store_redacts_sensitive_payload(self) -> None:
+        timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
+        store = self._projection_store()
+
+        store.record_projection(
+            module="access",
+            kind="page",
+            payload={
+                "module": "access",
+                "api_key": "sk-projection-secret",
+                "nested": {"token": "projection-token"},
+                "database_url": "postgresql://app:projection-db-secret@localhost/app",
+                "usage": {"total_tokens": 99},
+            },
+            updated_at=timestamp,
+        )
+
+        projection = store.get_projection(module="access", kind="page")
+        self.assertIsNotNone(projection)
+        assert projection is not None
+        payload_text = json.dumps(projection.payload, sort_keys=True)
+        self.assertNotIn("sk-projection-secret", payload_text)
+        self.assertNotIn("projection-token", payload_text)
+        self.assertNotIn("projection-db-secret", payload_text)
+        self.assertEqual(projection.payload["api_key"], "***")
+        self.assertEqual(projection.payload["nested"]["token"], "***")
+        self.assertEqual(projection.payload["usage"]["total_tokens"], 99)
+
+    def test_sqlalchemy_observation_store_redacts_sensitive_event_payload(self) -> None:
+        timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
+        engine = create_engine("sqlite:///:memory:")
+        import_models()
+        Base.metadata.create_all(engine)
+        store = SqlAlchemyOperationsObservationStore(
+            sessionmaker(bind=engine, autoflush=False, expire_on_commit=False),
+        )
+
+        store.record_observed_event(
+            OperationsObservedEvent(
+                id="access-secret-1",
+                cursor="access-secret-1",
+                topic=f"events.named.{ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT}",
+                event_name=ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                module="access",
+                owner="access",
+                kind="fact",
+                level="info",
+                status="succeeded",
+                entity_id="openai-api-key",
+                run_id=None,
+                trace_id=None,
+                source_event_name=None,
+                occurred_at=timestamp,
+                payload={
+                    "credential_binding_id": "openai-api-key",
+                    "secret": "raw-observation-secret",
+                    "nested": {"access_token": "raw-observation-token"},
+                },
+            ),
+        )
+
+        observation = store.get_module_observation("access")
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        payload = observation.recent_events[0].payload
+        payload_text = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-observation-secret", payload_text)
+        self.assertNotIn("raw-observation-token", payload_text)
+        self.assertEqual(payload["secret"], "***")
+        self.assertEqual(payload["nested"]["access_token"], "***")
 
     def test_sqlalchemy_store_records_operations_action_audit_lifecycle(self) -> None:
         timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)

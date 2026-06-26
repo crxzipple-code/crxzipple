@@ -128,6 +128,51 @@ class ArtifactsHttpTestCase(unittest.TestCase):
         self.assertEqual(preview.status_code, 403)
         self.assertEqual(download.status_code, 403)
 
+    def test_artifact_read_authorization_uses_http_subject_headers(self) -> None:
+        response = self.client.post(
+            "/artifacts",
+            params={"name": "subject-private.txt", "mime_type": "text/plain"},
+            content=b"private for one subject",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        container = self.client.app.state.container
+        container.require(AppKey.AUTHORIZATION_SERVICE).create_policy(
+            AuthorizationPolicy(
+                id="deny_subject_artifact_read_test",
+                description="Deny artifact reads for one HTTP subject.",
+                effect=AuthorizationEffect.DENY,
+                actions=("artifact.read",),
+                subject_type="user",
+                subject_id="blocked-user",
+                resource_kind="artifact",
+                resource_id=payload["id"],
+                priority=100,
+            ),
+            actor_type="test",
+            actor_id="artifacts",
+            reason="subject authorization regression",
+        )
+
+        blocked = self.client.get(
+            payload["download_url"],
+            headers={
+                "x-crxzipple-subject-type": "user",
+                "x-crxzipple-subject-id": "blocked-user",
+            },
+        )
+        allowed = self.client.get(
+            payload["download_url"],
+            headers={
+                "x-crxzipple-subject-type": "user",
+                "x-crxzipple-subject-id": "allowed-user",
+            },
+        )
+
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.content, b"private for one subject")
+
     def test_missing_artifact_returns_not_found(self) -> None:
         response = self.client.get("/artifacts/missing")
         self.assertEqual(response.status_code, 404)

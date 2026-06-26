@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from threading import Event as ThreadEvent
 from typing import Any
@@ -17,14 +16,7 @@ from crxzipple.modules.tool.application.dispatch_events import ToolRuntimeEventS
 from crxzipple.modules.tool.application.worker_capabilities import (
     build_worker_capabilities_payload,
 )
-from crxzipple.modules.tool.application.worker_completion import (
-    apply_run_completion as _apply_run_completion,
-    apply_run_failure as _apply_run_failure,
-)
 from crxzipple.modules.tool.application.ports import ToolEventWaitPort
-from crxzipple.modules.tool.application.provider_backend_service import (
-    PROVIDER_BACKEND_METADATA_KEY,
-)
 from crxzipple.modules.tool.application.service_support import (
     PreparedToolRunCompletion,
     PreparedToolRunExecution,
@@ -34,10 +26,6 @@ from crxzipple.modules.tool.application.service_support import (
 from crxzipple.modules.tool.application.worker_errors import (
     exception_message as _exception_message,
     exception_run_error as _exception_run_error,
-)
-from crxzipple.modules.tool.application.worker_execution_context import (
-    execution_context_with_provider_backend as _execution_context_with_provider_backend,
-    execution_context_with_tool_run_id as _execution_context_with_tool_run_id,
 )
 from crxzipple.modules.tool.application.worker_recovery import (
     apply_recovered_dispatch_task as _apply_recovered_dispatch_task,
@@ -53,6 +41,15 @@ from crxzipple.modules.tool.application.worker_run_resolution import (
 )
 from crxzipple.modules.tool.application.worker_runtime_execution import (
     execute_tool_runtime_for_worker,
+)
+from crxzipple.modules.tool.application.worker_run_persistence import (
+    apply_run_failure_to_uow,
+    complete_run_results,
+    fail_run,
+    prepare_run_execution,
+)
+from crxzipple.modules.tool.application.worker_run_heartbeat import (
+    heartbeat_run_in_uow,
 )
 from crxzipple.modules.tool.application.worker_processing_heartbeat import (
     heartbeat_while_processing,
@@ -73,7 +70,6 @@ from crxzipple.modules.tool.domain.entities import (
     ToolWorkerRegistration,
 )
 from crxzipple.modules.tool.domain.exceptions import (
-    ToolNotFoundError,
     ToolRunNotFoundError,
 )
 from crxzipple.modules.tool.domain.value_objects import (
@@ -317,17 +313,17 @@ class ToolWorkerService(ToolServiceBase):
             runs_by_id = uow.tool_runs.get_many(
                 tuple(assignment.run_id for assignment in assignments),
             )
-        return select_runnable_assignment_run_ids(
-            assignments,
-            runs_by_id=runs_by_id,
-            active_counts=active_counts,
-            limit=limit,
-            concurrency_policy=self.concurrency_policy,
-            resolve_tool_for_run=lambda run: self._resolve_run_tool_for_concurrency(
-                uow,
-                run,
-            ),
-        )
+            return select_runnable_assignment_run_ids(
+                assignments,
+                runs_by_id=runs_by_id,
+                active_counts=active_counts,
+                limit=limit,
+                concurrency_policy=self.concurrency_policy,
+                resolve_tool_for_run=lambda run: self._resolve_run_tool_for_concurrency(
+                    uow,
+                    run,
+                ),
+            )
 
     def _wait_for_worker_wakeup(
         self,
@@ -345,52 +341,14 @@ class ToolWorkerService(ToolServiceBase):
         )
 
     def heartbeat_run(self, run_id: str, *, worker_id: str) -> ToolRun:
-        with self.uow_factory() as uow:
-            run = uow.tool_runs.get(run_id)
-            if run is None:
-                raise ToolRunNotFoundError(f"Tool run '{run_id}' was not found.")
-            if run.is_terminal():
-                return run
-            if run.worker_id != worker_id:
-                logger.warning(
-                    "skipping heartbeat for tool run owned by another worker",
-                    extra={
-                        "run_id": run.id,
-                        "expected_worker_id": worker_id,
-                        "actual_worker_id": run.worker_id,
-                    },
-                )
-                return run
-            run.heartbeat(lease_seconds=self.worker_lease_seconds)
-            assignment = uow.tool_run_assignments.get_latest_for_run_and_worker(
-                run.id,
-                worker_id,
-            )
-            if assignment is not None:
-                assignment.heartbeat(lease_seconds=self.worker_lease_seconds)
-                uow.tool_run_assignments.add(assignment)
-                uow.collect(assignment)
-            worker = uow.tool_workers.get(worker_id)
-            if worker is not None:
-                worker.refresh(
-                    lease_seconds=self.worker_lease_seconds,
-                    capabilities_payload=self._worker_capabilities_payload(
-                        worker.capabilities_payload,
-                    ),
-                )
-                uow.tool_workers.add(worker)
-                uow.collect(worker)
-            self.dispatch_port.heartbeat(
-                uow.dispatch_tasks,
-                uow,
-                run,
-                worker_id=worker_id,
-                lease_seconds=self.worker_lease_seconds,
-            )
-            uow.tool_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return heartbeat_run_in_uow(
+            uow_factory=self.uow_factory,
+            dispatch_port=self.dispatch_port,
+            run_id=run_id,
+            worker_id=worker_id,
+            lease_seconds=self.worker_lease_seconds,
+            capabilities_payload_resolver=self._worker_capabilities_payload,
+        )
 
     def cancel_tool_run(self, run_id: str) -> ToolRun:
         with self.uow_factory() as uow:
@@ -520,81 +478,13 @@ class ToolWorkerService(ToolServiceBase):
         run_id: str,
         execution_context: ToolExecutionContext | None,
     ) -> PreparedToolRunExecution | ToolRun:
-        with self.uow_factory() as uow:
-            run = uow.tool_runs.get(run_id)
-            if run is None:
-                raise ToolRunNotFoundError(f"Tool run '{run_id}' was not found.")
-
-            if run.is_terminal():
-                return run
-
-            if run.status is ToolRunStatus.CANCEL_REQUESTED:
-                run.cancel()
-                if run.target.mode is ToolMode.BACKGROUND:
-                    self._complete_background_tracking(
-                        uow,
-                        run,
-                        terminal_kind="cancelled",
-                    )
-                uow.tool_runs.add(run)
-                uow.collect(run)
-                uow.commit()
-                return run
-
-            tool = self._resolve_run_catalog_tool(uow, run)
-            if tool is None:
-                tool = self.catalog_service.resolve_tool(run.tool_id)
-            if tool is None:
-                raise ToolNotFoundError(f"Tool '{run.tool_id}' was not found.")
-
-            if run.status in {
-                ToolRunStatus.CREATED,
-                ToolRunStatus.QUEUED,
-                ToolRunStatus.DISPATCHING,
-            }:
-                run.start()
-                if run.target.mode is ToolMode.BACKGROUND and run.worker_id is not None:
-                    assignment = uow.tool_run_assignments.get_latest_for_run_and_worker(
-                        run.id,
-                        run.worker_id,
-                    )
-                    if assignment is not None:
-                        assignment.start()
-                        uow.tool_run_assignments.add(assignment)
-                        uow.collect(assignment)
-                uow.tool_runs.add(run)
-                uow.collect(run)
-                uow.commit()
-
-            arguments = dict(run.input_payload)
-            resolved_execution_context = (
-                execution_context
-                if execution_context is not None
-                else run.invocation_context
-            )
-            resolved_execution_context = _execution_context_with_tool_run_id(
-                resolved_execution_context,
-                run.id,
-            )
-            provider_backend_payload = run.metadata.get(
-                PROVIDER_BACKEND_METADATA_KEY,
-            )
-            resolved_execution_context = _execution_context_with_provider_backend(
-                resolved_execution_context,
-                (
-                    provider_backend_payload
-                    if isinstance(provider_backend_payload, Mapping)
-                    else None
-                ),
-            )
-            return PreparedToolRunExecution(
-                tool=tool,
-                arguments=arguments,
-                run_id=run.id,
-                target=run.target,
-                worker_id=run.worker_id,
-                execution_context=resolved_execution_context,
-            )
+        return prepare_run_execution(
+            uow_factory=self.uow_factory,
+            catalog_service=self.catalog_service,
+            complete_background_tracking=self._complete_background_tracking,
+            run_id=run_id,
+            execution_context=execution_context,
+        )
 
     def _resolve_run_tool_for_concurrency(self, uow, run: ToolRun) -> Tool | None:
         return resolve_run_tool_for_concurrency(
@@ -610,37 +500,13 @@ class ToolWorkerService(ToolServiceBase):
         self,
         completions: tuple[PreparedToolRunCompletion, ...],
     ) -> tuple[ToolRun, ...]:
-        with self.uow_factory() as uow:
-            with self.metrics.timed(
-                "tool.service.persistence_seconds",
-                labels={"operation": "complete_runs", "phase": "load"},
-            ):
-                runs_by_id = uow.tool_runs.get_many(
-                    tuple(completion.run_id for completion in completions),
-                )
-            completed_runs: list[ToolRun] = []
-            for completion in completions:
-                run = runs_by_id.get(completion.run_id)
-                if run is None:
-                    raise ToolRunNotFoundError(
-                        f"Tool run '{completion.run_id}' was not found after execution.",
-                    )
-                _apply_run_completion(
-                    uow,
-                    run,
-                    completion,
-                    dispatch_port=self.dispatch_port,
-                    complete_background_tracking=self._complete_background_tracking,
-                )
-                uow.tool_runs.add(run)
-                uow.collect(run)
-                completed_runs.append(run)
-            with self.metrics.timed(
-                "tool.service.persistence_seconds",
-                labels={"operation": "complete_runs", "phase": "commit"},
-            ):
-                uow.commit()
-            return tuple(completed_runs)
+        return complete_run_results(
+            uow_factory=self.uow_factory,
+            metrics=self.metrics,
+            dispatch_port=self.dispatch_port,
+            complete_background_tracking=self._complete_background_tracking,
+            completions=completions,
+        )
 
     async def _execute_with_heartbeat(
         self,
@@ -707,17 +573,13 @@ class ToolWorkerService(ToolServiceBase):
             return run
 
     def _fail_run(self, run_id: str, message: str) -> ToolRun:
-        with self.uow_factory() as uow:
-            failed_run = uow.tool_runs.get(run_id)
-            if failed_run is None:
-                raise ToolRunNotFoundError(
-                    f"Tool run '{run_id}' was not found after execution failure.",
-                )
-            self._apply_run_failure(uow, failed_run, message)
-            uow.tool_runs.add(failed_run)
-            uow.collect(failed_run)
-            uow.commit()
-            return failed_run
+        return fail_run(
+            uow_factory=self.uow_factory,
+            dispatch_port=self.dispatch_port,
+            complete_background_tracking=self._complete_background_tracking,
+            run_id=run_id,
+            message=message,
+        )
 
     def _apply_run_failure(
         self,
@@ -725,7 +587,7 @@ class ToolWorkerService(ToolServiceBase):
         failed_run: ToolRun,
         message: str | ToolRunError,
     ) -> None:
-        _apply_run_failure(
+        apply_run_failure_to_uow(
             uow,
             failed_run,
             message,

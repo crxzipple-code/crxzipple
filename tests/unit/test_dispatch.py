@@ -383,6 +383,94 @@ class DispatchTestCase(unittest.TestCase):
             ),
         )
 
+    def test_recover_abandoned_tasks_only_requeues_expired_leased_claims(self) -> None:
+        task_ids = {
+            "expired": "dispatch-recover-expired",
+            "live": "dispatch-recover-live",
+            "unleased": "dispatch-recover-unleased",
+            "queued": "dispatch-recover-queued",
+        }
+        for priority, task_id in enumerate(task_ids.values()):
+            task = self.dispatch_service.create_task(
+                CreateDispatchTaskInput(
+                    task_id=task_id,
+                    owner_kind="recovery_owner",
+                    owner_id=f"run-{task_id}",
+                    priority=priority,
+                ),
+            )
+            self.dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=task.id))
+
+        expired = self.dispatch_service.claim_next_queued_task(
+            owner_kind="recovery_owner",
+            worker_id="worker-expired",
+            claim_token="claim-expired",
+            lease_seconds=30,
+        )
+        live = self.dispatch_service.claim_next_queued_task(
+            owner_kind="recovery_owner",
+            worker_id="worker-live",
+            claim_token="claim-live",
+            lease_seconds=30,
+        )
+        unleased = self.dispatch_service.claim_next_queued_task(
+            owner_kind="recovery_owner",
+            worker_id="worker-unleased",
+            claim_token="claim-unleased",
+        )
+        self.assertIsNotNone(expired)
+        self.assertIsNotNone(live)
+        self.assertIsNotNone(unleased)
+        assert expired is not None
+        assert live is not None
+        assert unleased is not None
+
+        now = datetime.now(timezone.utc)
+        with self.uow_factory() as uow:
+            expired_task = uow.dispatch_tasks.get(expired.id)
+            live_task = uow.dispatch_tasks.get(live.id)
+            unleased_task = uow.dispatch_tasks.get(unleased.id)
+            assert expired_task is not None
+            assert live_task is not None
+            assert unleased_task is not None
+            expired_task.lease_expires_at = now - timedelta(seconds=1)
+            live_task.lease_expires_at = now + timedelta(seconds=30)
+            unleased_task.lease_expires_at = None
+            uow.dispatch_tasks.add(expired_task)
+            uow.dispatch_tasks.add(live_task)
+            uow.dispatch_tasks.add(unleased_task)
+            uow.commit()
+
+        recovered = self.dispatch_service.recover_abandoned_tasks(
+            RecoverAbandonedDispatchTasksInput(
+                owner_kind="recovery_owner",
+                reason="lease_expired",
+                now=now,
+            ),
+        )
+
+        self.assertEqual([task.id for task in recovered], [task_ids["expired"]])
+        latest_by_id = {
+            task.id: task
+            for task in self.dispatch_service.list_tasks(owner_kind="recovery_owner")
+        }
+        self.assertEqual(
+            latest_by_id[task_ids["expired"]].status,
+            DispatchTaskStatus.QUEUED,
+        )
+        self.assertEqual(
+            latest_by_id[task_ids["live"]].status,
+            DispatchTaskStatus.CLAIMED,
+        )
+        self.assertEqual(
+            latest_by_id[task_ids["unleased"]].status,
+            DispatchTaskStatus.CLAIMED,
+        )
+        self.assertEqual(
+            latest_by_id[task_ids["queued"]].status,
+            DispatchTaskStatus.QUEUED,
+        )
+
     def test_terminal_transitions_are_idempotent_and_cannot_be_overwritten(self) -> None:
         task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(

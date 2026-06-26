@@ -8,13 +8,16 @@ High importance, medium-high risk after the current split wave. Tool owns catalo
 
 - 133 Python files, about 27666 lines.
 - Cross-module import signal: very high.
-- Large files include `infrastructure/discovery/openapi.py` (814), `infrastructure/mcp_client.py` (767), `application/worker_service.py` (762), `infrastructure/runtimes/openapi_remote.py` (761), `domain/runtime_entities.py` (720), `infrastructure/cli_source_config.py` (620), `infrastructure/provider_catalog.py` (608), and `infrastructure/tool_packages.py` (589). `domain/entities.py` is now a 61-line public domain export surface after catalog/runtime entity split. `application/catalog_models.py` is now a 37-line application export surface after catalog type/helper/function/source model split. `interfaces/http.py` is now 494 lines after splitting Pydantic models and payload projection into focused HTTP helper modules.
+- Large files include `infrastructure/discovery/openapi.py` (814), `infrastructure/mcp_client.py` (767), `infrastructure/runtimes/openapi_remote.py` (761), `domain/runtime_entities.py` (720), `application/worker_service.py` (624), `infrastructure/cli_source_config.py` (620), `infrastructure/provider_catalog.py` (608), and `infrastructure/tool_packages.py` (589). `domain/entities.py` is now a 61-line public domain export surface after catalog/runtime entity split. `application/catalog_models.py` is now a 37-line application export surface after catalog type/helper/function/source model split. `interfaces/http.py` is now 494 lines after splitting Pydantic models and payload projection into focused HTTP helper modules. `app/assembly/tool.py` is now a 536-line composition surface after service-graph adapters moved to `app/assembly/tool_service_graph.py`.
 
 ## Findings
 
 - Tool ownership boundary is mostly correct: tool runs and catalog belong here; orchestration only coordinates.
 - Source/package discovery, runtime worker execution, catalog models, persistence repositories, domain entity groups, and HTTP DTO/payload projection have been split into focused helpers; several provider/runtime adapters remain large.
 - Worker service complexity is lower after execution/runtime/artifact/error/helper extraction, but worker concurrency and backpressure remain launch-critical.
+- Worker assignment selection now resolves candidate tool/function metadata inside the
+  same UoW that loaded assignments and runs, avoiding a closed-UoW lookup during
+  capacity/backpressure decisions.
 - Tool package/source adapters are the main external integration surface; they need stable contracts and clear failure modes.
 
 ## Launch Risks
@@ -48,13 +51,15 @@ High importance, medium-high risk after the current split wave. Tool owns catalo
 
 ### File-Level Assessment
 
-`application/worker_service.py` was 1713 lines and is now 762 lines after moving
+`application/worker_service.py` was 1713 lines and is now 624 lines after moving
 artifact externalization, result validation, runtime execution, error normalization,
 background tracking, capability payloads, execution context decoration, completion and
 failure application, recovered dispatch handling, registration/stale/prune helpers,
 assignment selection, wakeup waiting, processing heartbeat threading, worker run-loop
-control, and run catalog/function resolution into focused application helpers. It remains
-a real execution hot path and should keep gaining concurrency/backpressure tests.
+control, run catalog/function resolution, ToolRun persistence transitions, and
+run/assignment/worker/dispatch heartbeat persistence into focused application
+helpers. It remains a real execution hot path and should keep gaining
+concurrency/backpressure tests.
 
 `application/source_service.py` was 1667 lines and is now 188 lines after moving source
 runtime bundle construction, credential/runtime requirement parsing, entity/record
@@ -136,6 +141,9 @@ Worker concurrency now has regression coverage for multi-run async execution,
 image-like concurrent execution, scheduler slot filling, shared-state capability
 backpressure, blocked-head skipping, cross-worker capacity fallback, and direct
 worker `max_in_flight` over-assignment prevention.
+Runnable-assignment selection now keeps ToolRun, ToolFunction, and Tool catalog
+lookups inside the same UoW scope, so worker launch decisions do not depend on a
+repository handle after the transaction context has exited.
 
 Configured source validation now has golden-shape coverage for OpenAPI, MCP, and
 CLI sources through the owner command service. Existing package/provider suites
@@ -158,7 +166,7 @@ Tool packages are the main extension story. External systems need stable package
 
 ### Remediation Checklist
 
-- [x] Split `worker_service.py` into execution coordinator shell plus artifact externalizer, result validation/envelope, provider replay merger, runtime executor, tracking, completion/failure, recovery, assignment, wakeup, heartbeat, run-loop, run-resolution, and error mapper helpers.
+- [x] Split `worker_service.py` into execution coordinator shell plus artifact externalizer, result validation/envelope, provider replay merger, runtime executor, tracking, completion/failure, recovery, assignment, wakeup, processing heartbeat, run heartbeat persistence, run-loop, run-resolution, and error mapper helpers.
 - [x] Split `source_service.py` into source query facade plus source command, function command, runtime bundle builder, provider backend sync, requirement parser, mapping, state, events, validation, UoW, and command DTO helpers.
 - [x] Split `infrastructure/cli_source.py` into focused CLI source config, discovery, runtime, process observer, credential, envelope, redaction, and path helpers.
 - [x] Add worker concurrency/backpressure tests.
@@ -298,3 +306,5 @@ Result:
 - Tool worker run-loop/resolution ruff and compile checks: passed
 - Tool background suite excluding local process sandbox case: 23 passed, 1 deselected
 - Tool execution suite excluding local process sandbox case: 20 passed, 1 deselected
+- Tool worker UoW-boundary verification: ruff passed; worker/background/dispatch
+  subset excluding local process sandbox cases: 51 passed, 2 deselected

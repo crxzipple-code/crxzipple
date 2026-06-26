@@ -200,7 +200,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "build_tool_execution_capability_bindings",
     ),
     "build_tool_execution_services": (
-        "crxzipple.app.assembly.tool",
+        "crxzipple.app.assembly.tool_service_graph",
         "build_tool_execution_services",
     ),
     "channel_control_factories": (
