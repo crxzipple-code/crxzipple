@@ -321,6 +321,30 @@ on correctness and production readiness:
 - Security review: Access, Authorization, Browser, Tool, Skills, and Settings
   still deserve a separate security-focused pass.
 
+### Validation Pass 2026-06-27
+
+Local executable readiness checks passed in the restricted harness:
+
+- Orchestration/runtime invariant slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py tests/unit/test_orchestration_approval.py tests/unit/test_orchestration_tools.py tests/unit/test_orchestration_compaction_segment_rotation.py tests/unit/test_orchestration_queue.py tests/unit/test_orchestration_loop_regression_baseline.py tests/unit/test_orchestration_context_workspace_snapshot.py tests/unit/test_runtime_llm_request.py tests/unit/test_runtime_llm_request_draft_collector.py tests/unit/test_turn_submission_runtime_request_bootstrap.py --tb=short --maxfail=1`
+  passed once with 206 tests in 289.34 seconds, then passed three repeated
+  long-chain runs with 206 tests each in 284.87 seconds, 269.26 seconds, and
+  288.16 seconds.
+- Browser/Tool adapter cleanup and runtime-boundary slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_cdp_sessions.py tests/unit/test_browser_network_capture.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_tool_mcp_client.py tests/unit/test_tool_source_service.py tests/unit/test_tool_runtime_readiness.py tests/unit/test_tool_worker_inflight.py --tb=short --maxfail=1`
+  passed with 118 tests in 43.79 seconds.
+- Access/Authorization security-boundary slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_access.py tests/unit/test_access_oauth.py tests/unit/test_access_policies.py tests/unit/test_access_governance_contracts.py tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py tests/unit/test_access_tool_integration.py tests/unit/test_openapi_access.py --tb=short --maxfail=1`
+  passed with 72 tests in 22.44 seconds.
+
+The Docker/Postgres/Redis and daemon-managed worker smoke is still open in this
+harness. `docker info` can see the Docker client and Colima context, but cannot
+access `/Users/crxzy/.colima/default/docker.sock` from this process, so the
+socket-capable production smoke must be run from a host shell with Docker access.
+This validation pass increases confidence in the split boundaries and local
+runtime invariants. It satisfies the repeated local long-chain invariant item,
+but it does not satisfy real Postgres/Redis/daemon smoke readiness.
+
 ## Module-by-Module Assessment
 
 ### Operations
@@ -584,7 +608,7 @@ Next actions:
 
 ## Launch Readiness Checklist
 
-- [ ] Long-chain runtime invariant suite passes repeatedly.
+- [x] Long-chain runtime invariant suite passes repeatedly.
 - [x] Operations and Workbench page builders have query-budget and freshness tests.
 - [x] Provider render/response golden fixtures cover primary LLM adapters.
 - [ ] Browser/Tool runtime adapters have cleanup, timeout, and retention tests.
