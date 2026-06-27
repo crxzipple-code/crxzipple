@@ -333,14 +333,45 @@ Local executable readiness checks passed in the restricted harness:
 - Browser/Tool adapter cleanup and runtime-boundary slice:
   `PYTHONPATH=src pytest -q tests/unit/test_browser_cdp_sessions.py tests/unit/test_browser_network_capture.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_tool_mcp_client.py tests/unit/test_tool_source_service.py tests/unit/test_tool_runtime_readiness.py tests/unit/test_tool_worker_inflight.py --tb=short --maxfail=1`
   passed with 118 tests in 43.79 seconds.
+- Browser/Tool extended non-socket, non-process runtime slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_pool.py tests/unit/test_browser_profile_allocator.py tests/unit/test_browser_http_profile_egress.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_browser_cdp_sessions.py tests/unit/test_browser_network_capture.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_tool_background.py tests/unit/test_tool_execution.py tests/unit/test_tool_result_model_text.py tests/unit/test_tool_providers.py tests/unit/test_tool_mcp_client.py tests/unit/test_tool_source_service.py tests/unit/test_tool_runtime_readiness.py tests/unit/test_tool_worker_inflight.py tests/unit/test_openapi_access.py -k 'not process' --tb=short --maxfail=1`
+  passed with 238 tests in 66.80 seconds, with 8 process-strategy tests
+  intentionally deselected because this sandbox rejects `ProcessPoolExecutor`
+  startup with `PermissionError: [Errno 1] Operation not permitted`.
 - Access/Authorization security-boundary slice:
   `PYTHONPATH=src pytest -q tests/unit/test_access.py tests/unit/test_access_oauth.py tests/unit/test_access_policies.py tests/unit/test_access_governance_contracts.py tests/unit/test_authorization.py tests/unit/test_authorization_access_boundary.py tests/unit/test_access_tool_integration.py tests/unit/test_openapi_access.py --tb=short --maxfail=1`
   passed with 72 tests in 22.44 seconds.
+- Skills/Settings security and governance slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_skills_context.py tests/unit/test_skills_http.py tests/unit/test_skills_authoring_http.py tests/unit/test_skills_cli.py tests/unit/test_skills_tool_authoring.py tests/unit/test_skills_owner_catalog_persistence.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_contracts.py tests/unit/test_settings_materialization.py tests/unit/test_settings_http.py tests/unit/test_settings_persistence.py --tb=short --maxfail=1`
+  passed with 99 tests in 16.81 seconds.
+- Browser/Tool security and redaction slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_cdp_sessions.py tests/unit/test_browser_network_capture.py tests/unit/test_browser_http_profile_egress.py tests/unit/test_browser_access_requirements.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_result_facts.py tests/unit/test_browser_tool_http_advanced.py tests/unit/test_tool_access_architecture.py tests/unit/test_tool_display_safe_errors.py tests/unit/test_tool_provider_backend_service.py tests/unit/test_tool_settings_integration.py tests/unit/test_tool_source_service.py tests/unit/test_tool_mcp_client.py tests/unit/test_openapi_access.py --tb=short --maxfail=1`
+  passed with 118 tests in 49.14 seconds.
+- LLM provider/request-render golden slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_llm_runtime_request_factory.py tests/unit/test_llm_runtime_request_factory_builder.py tests/unit/test_runtime_llm_request.py tests/unit/test_runtime_llm_request_draft_collector.py tests/unit/test_provider_request_renderer_protocol.py tests/unit/test_provider_protocol_render_router.py tests/unit/test_provider_renderer_canonical_request_integration.py tests/unit/test_openai_codex_renderer.py tests/unit/test_openai_codex_transport_wire_contract.py tests/unit/test_provider_response_item_fixtures.py tests/unit/test_provider_request_trace_fixtures.py tests/unit/test_codex_trace_fixture.py tests/unit/test_runtime_response_projector.py tests/unit/test_llm_adapters.py --tb=short --maxfail=1`
+  passed with 206 tests in 1.69 seconds.
+- Operations/Workbench projection slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_operations_*.py tests/unit/test_workbench_*.py --tb=short --maxfail=1`
+  passed with 194 tests in 2.79 seconds.
+- Production persistence/backend gate slice:
+  `PYTHONPATH=src pytest -q tests/unit/test_config.py tests/unit/test_events.py tests/unit/test_events_http.py tests/unit/test_dispatch.py tests/unit/test_dispatch_http.py tests/unit/test_dispatch_cli.py tests/unit/test_daemon_manager.py tests/unit/test_session_persistence_contracts.py tests/unit/test_context_workspace_tree_service.py tests/unit/test_context_workspace_snapshot_boundary.py tests/unit/test_context_workspace_session_adapter.py tests/unit/test_tool_source_catalog_persistence.py tests/unit/test_access_persistence.py tests/unit/test_settings_persistence.py --tb=short --maxfail=1`
+  passed with 206 tests in 16.70 seconds.
+- Frontend type/build slice:
+  `cd frontend && npm run typecheck && npm run build` passed. Vite still warns
+  that `operations-access` is larger than the default 500 kB chunk warning
+  threshold, which is a follow-up optimization item rather than a type/build
+  failure.
 
-The Docker/Postgres/Redis and daemon-managed worker smoke is still open in this
-harness. `docker info` can see the Docker client and Colima context, but cannot
-access `/Users/crxzy/.colima/default/docker.sock` from this process, so the
-socket-capable production smoke must be run from a host shell with Docker access.
+The Docker/Postgres/Redis, daemon-managed worker smoke, live browser smoke, and
+local process-execution strategy remain open in this harness. `docker info` can
+see the Docker client and Colima context, but cannot access
+`/Users/crxzy/.colima/default/docker.sock` from this process. Browser live smoke
+and fake-CDP unit tests also cannot bind local `127.0.0.1` sockets in this
+environment, `frontend/scripts/audit_operations_layout.py` cannot launch
+Playwright Chromium because macOS rejects Chromium Mach port registration, and a
+minimal `ProcessPoolExecutor(spawn)` probe fails before CRXZipple code runs.
+These Docker/socket/browser/process-capable production smokes must be run from a
+host shell with Docker and local networking/browser/process permissions.
 This validation pass increases confidence in the split boundaries and local
 runtime invariants. It satisfies the repeated local long-chain invariant item,
 but it does not satisfy real Postgres/Redis/daemon smoke readiness.
@@ -613,7 +644,7 @@ Next actions:
 - [x] Provider render/response golden fixtures cover primary LLM adapters.
 - [ ] Browser/Tool runtime adapters have cleanup, timeout, and retention tests.
 - [x] Production mode rejects silent in-memory/file/SQLite fallback where unsafe.
-- [ ] Security pass covers Access, Authorization, Browser, Tool, Skills, Settings.
+- [x] Security pass covers Access, Authorization, Browser, Tool, Skills, Settings.
 - [x] Frontend consumes Operations/Workbench projection APIs only, not owner internals.
 - [ ] Docker/Postgres/Redis boot and daemon-managed workers pass a clean smoke run.
 
