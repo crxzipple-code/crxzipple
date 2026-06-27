@@ -5,17 +5,7 @@ from time import perf_counter
 
 from crxzipple.modules.skills.application.catalog_service import SkillCatalogService
 from crxzipple.modules.skills.application.events import (
-    SKILL_CREATE_SUCCEEDED_EVENT,
-    SKILL_DELETE_SUCCEEDED_EVENT,
-    SKILL_INSTALL_FAILED_EVENT,
-    SKILL_INSTALL_SUCCEEDED_EVENT,
-    SKILL_READ_FAILED_EVENT,
-    SKILL_READ_SUCCEEDED_EVENT,
-    SKILL_UPDATE_SUCCEEDED_EVENT,
-    SKILL_VALIDATE_FAILED_EVENT,
-    SKILL_VALIDATE_SUCCEEDED_EVENT,
     SkillEventEmitter,
-    emit_skill_event,
 )
 from crxzipple.modules.skills.application.exceptions import (
     SkillCapabilityUnavailableError,
@@ -29,6 +19,18 @@ from crxzipple.modules.skills.application.models import (
     SkillUpdateRequest,
 )
 from crxzipple.modules.skills.application.owner_state import SkillOwnerStateService
+from crxzipple.modules.skills.application.package_observation import (
+    emit_package_created,
+    emit_package_deleted,
+    emit_package_install_failed,
+    emit_package_install_succeeded,
+    emit_package_read_failed,
+    emit_package_read_succeeded,
+    emit_package_updated,
+    emit_package_validate_failed,
+    emit_package_validate_succeeded,
+    record_package_installation,
+)
 from crxzipple.modules.skills.application.ports import SkillRepositoryPort
 from crxzipple.modules.skills.application.source_service import SkillSourceService
 from crxzipple.modules.skills.domain import (
@@ -48,59 +50,35 @@ class SkillPackageService:
 
     def create(self, request: SkillCreateRequest) -> SkillMutationResult:
         result = self.repository.create(request)
-        self.source_service.sync(
-            workspace_dir=request.workspace_dir,
-            source_id=result.skill.source,
-            surface="",
-        )
-        emit_skill_event(
+        self._sync_package_source(result.skill, workspace_dir=request.workspace_dir)
+        emit_package_created(
             self.event_emitter,
-            SKILL_CREATE_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.skill.name,
-                "skill_name": result.skill.name,
-                "source": result.skill.source,
-                "workspace_dir": request.workspace_dir or "",
-                "path": result.skill.root_path,
-            },
+            result,
+            workspace_dir=request.workspace_dir,
         )
-        self._record_installation(
+        self._record_mutation_success(
             action="package_create",
-            status=SkillInstallationStatus.SUCCEEDED,
-            package=result.skill,
+            result=result,
             target_uri=result.skill.root_path,
             workspace_dir=request.workspace_dir,
-            message=result.message,
         )
         return result
 
     def update(self, request: SkillUpdateRequest) -> SkillMutationResult:
         result = self.repository.update(request)
-        self.source_service.sync(
-            workspace_dir=request.workspace_dir,
-            source_id=result.skill.source,
-            surface="",
-        )
-        emit_skill_event(
+        self._sync_package_source(result.skill, workspace_dir=request.workspace_dir)
+        emit_package_updated(
             self.event_emitter,
-            SKILL_UPDATE_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.skill.name,
-                "skill_name": result.skill.name,
-                "source": result.skill.source,
-                "workspace_dir": request.workspace_dir or "",
-                "path": result.skill.root_path,
-            },
+            result,
+            workspace_dir=request.workspace_dir,
+            update_kind="package",
+            path=result.skill.root_path,
         )
-        self._record_installation(
+        self._record_mutation_success(
             action="package_update",
-            status=SkillInstallationStatus.SUCCEEDED,
-            package=result.skill,
+            result=result,
             target_uri=result.skill.root_path,
             workspace_dir=request.workspace_dir,
-            message=result.message,
         )
         return result
 
@@ -116,24 +94,19 @@ class SkillPackageService:
             skill_name=skill_name,
             content=content,
         )
-        self.source_service.sync(
-            workspace_dir=workspace_dir,
-            source_id=result.skill.source,
-            surface="",
-        )
-        self._emit_package_updated(
+        self._sync_package_source(result.skill, workspace_dir=workspace_dir)
+        emit_package_updated(
+            self.event_emitter,
             result,
             workspace_dir=workspace_dir,
             update_kind="instructions",
             path=result.skill.instructions_path,
         )
-        self._record_installation(
+        self._record_mutation_success(
             action="package_update",
-            status=SkillInstallationStatus.SUCCEEDED,
-            package=result.skill,
+            result=result,
             target_uri=result.skill.instructions_path,
             workspace_dir=workspace_dir,
-            message=result.message,
             metadata={"update_kind": "instructions"},
         )
         return result
@@ -152,24 +125,19 @@ class SkillPackageService:
             path=path,
             content=content,
         )
-        self.source_service.sync(
-            workspace_dir=workspace_dir,
-            source_id=result.skill.source,
-            surface="",
-        )
-        self._emit_package_updated(
+        self._sync_package_source(result.skill, workspace_dir=workspace_dir)
+        emit_package_updated(
+            self.event_emitter,
             result,
             workspace_dir=workspace_dir,
             update_kind="file",
             path=path,
         )
-        self._record_installation(
+        self._record_mutation_success(
             action="package_update",
-            status=SkillInstallationStatus.SUCCEEDED,
-            package=result.skill,
+            result=result,
             target_uri=path,
             workspace_dir=workspace_dir,
-            message=result.message,
             metadata={"update_kind": "file"},
         )
         return result
@@ -186,24 +154,19 @@ class SkillPackageService:
             skill_name=skill_name,
             path=path,
         )
-        self.source_service.sync(
-            workspace_dir=workspace_dir,
-            source_id=result.skill.source,
-            surface="",
-        )
-        self._emit_package_updated(
+        self._sync_package_source(result.skill, workspace_dir=workspace_dir)
+        emit_package_updated(
+            self.event_emitter,
             result,
             workspace_dir=workspace_dir,
             update_kind="file_deleted",
             path=path,
         )
-        self._record_installation(
+        self._record_mutation_success(
             action="package_update",
-            status=SkillInstallationStatus.SUCCEEDED,
-            package=result.skill,
+            result=result,
             target_uri=path,
             workspace_dir=workspace_dir,
-            message=result.message,
             metadata={"update_kind": "file_deleted"},
         )
         return result
@@ -229,36 +192,22 @@ class SkillPackageService:
                 path=path,
             )
         except SkillError as exc:
-            emit_skill_event(
+            emit_package_read_failed(
                 self.event_emitter,
-                SKILL_READ_FAILED_EVENT,
-                status="failed",
-                level="error",
-                payload={
-                    "skill": skill_name,
-                    "skill_name": skill_name,
-                    "surface": surface,
-                    "workspace_dir": workspace_dir or "",
-                    "path": path or "",
-                    "duration_ms": _duration_ms(started_at),
-                    "error_message": str(exc),
-                },
+                skill_name=skill_name,
+                surface=surface,
+                workspace_dir=workspace_dir,
+                path=path,
+                started_at=started_at,
+                error=exc,
             )
             raise
-        emit_skill_event(
+        emit_package_read_succeeded(
             self.event_emitter,
-            SKILL_READ_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.package.name,
-                "skill_name": result.package.name,
-                "surface": surface,
-                "workspace_dir": workspace_dir or "",
-                "path": result.requested_path,
-                "resolved_path": result.resolved_path,
-                "source": result.package.source,
-                "duration_ms": _duration_ms(started_at),
-            },
+            result,
+            surface=surface,
+            workspace_dir=workspace_dir,
+            started_at=started_at,
         )
         return result
 
@@ -283,30 +232,17 @@ class SkillPackageService:
             workspace_dir=workspace_dir,
             skill_name=skill_name,
         )
-        self.source_service.sync(
-            workspace_dir=workspace_dir,
-            source_id=result.skill.source,
-            surface="",
-        )
-        emit_skill_event(
+        self._sync_package_source(result.skill, workspace_dir=workspace_dir)
+        emit_package_deleted(
             self.event_emitter,
-            SKILL_DELETE_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.skill.name,
-                "skill_name": result.skill.name,
-                "source": result.skill.source,
-                "workspace_dir": workspace_dir or "",
-                "path": result.skill.root_path,
-            },
+            result,
+            workspace_dir=workspace_dir,
         )
-        self._record_installation(
+        self._record_mutation_success(
             action="package_delete",
-            status=SkillInstallationStatus.SUCCEEDED,
-            package=result.skill,
+            result=result,
             target_uri=result.skill.root_path,
             workspace_dir=workspace_dir,
-            message=result.message,
         )
         return result
 
@@ -319,31 +255,18 @@ class SkillPackageService:
         try:
             package = self.repository.validate(path=path)
         except SkillError as exc:
-            emit_skill_event(
+            emit_package_validate_failed(
                 self.event_emitter,
-                SKILL_VALIDATE_FAILED_EVENT,
-                status="failed",
-                level="error",
-                payload={
-                    "path": path,
-                    "duration_ms": _duration_ms(started_at),
-                    "error_message": str(exc),
-                },
+                path=path,
+                started_at=started_at,
+                error=exc,
             )
             raise
-        emit_skill_event(
+        emit_package_validate_succeeded(
             self.event_emitter,
-            SKILL_VALIDATE_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": package.name,
-                "skill_name": package.name,
-                "path": path,
-                "source": package.source,
-                "root_path": package.root_path,
-                "required_tools": list(package.requirements.required_tools),
-                "duration_ms": _duration_ms(started_at),
-            },
+            package,
+            path=path,
+            started_at=started_at,
         )
         return package
 
@@ -362,20 +285,16 @@ class SkillPackageService:
                 workspace_dir=workspace_dir,
             )
         except SkillError as exc:
-            emit_skill_event(
+            emit_package_install_failed(
                 self.event_emitter,
-                SKILL_INSTALL_FAILED_EVENT,
-                status="failed",
-                level="error",
-                payload={
-                    "source_dir": source_dir,
-                    "scope": scope.value,
-                    "workspace_dir": workspace_dir or "",
-                    "duration_ms": _duration_ms(started_at),
-                    "error_message": str(exc),
-                },
+                source_dir=source_dir,
+                scope=scope.value,
+                workspace_dir=workspace_dir,
+                started_at=started_at,
+                error=exc,
             )
-            self._record_installation(
+            record_package_installation(
+                self.owner_state,
                 action="package_install",
                 status=SkillInstallationStatus.FAILED,
                 source_uri=source_dir,
@@ -385,29 +304,16 @@ class SkillPackageService:
                 metadata={"scope": scope.value},
             )
             raise
-        emit_skill_event(
+        emit_package_install_succeeded(
             self.event_emitter,
-            SKILL_INSTALL_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.package.name,
-                "skill_name": result.package.name,
-                "source": result.package.source,
-                "source_dir": source_dir,
-                "scope": result.scope.value,
-                "workspace_dir": workspace_dir or "",
-                "target_root": result.target_root,
-                "target_path": result.target_path,
-                "required_tools": list(result.package.requirements.required_tools),
-                "duration_ms": _duration_ms(started_at),
-            },
-        )
-        self.source_service.sync(
+            result,
+            source_dir=source_dir,
             workspace_dir=workspace_dir,
-            source_id=result.package.source,
-            surface="",
+            started_at=started_at,
         )
-        self._record_installation(
+        self._sync_package_source(result.package, workspace_dir=workspace_dir)
+        record_package_installation(
+            self.owner_state,
             action="package_install",
             status=SkillInstallationStatus.SUCCEEDED,
             package=result.package,
@@ -422,51 +328,34 @@ class SkillPackageService:
         )
         return result
 
-    def _emit_package_updated(
+    def _sync_package_source(
         self,
-        result: SkillMutationResult,
+        package: SkillPackage,
         *,
         workspace_dir: str | None,
-        update_kind: str,
-        path: str,
     ) -> None:
-        emit_skill_event(
-            self.event_emitter,
-            SKILL_UPDATE_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.skill.name,
-                "skill_name": result.skill.name,
-                "source": result.skill.source,
-                "workspace_dir": workspace_dir or "",
-                "path": path,
-                "update_kind": update_kind,
-            },
+        self.source_service.sync(
+            workspace_dir=workspace_dir,
+            source_id=package.source,
+            surface="",
         )
 
-    def _record_installation(
+    def _record_mutation_success(
         self,
         *,
         action: str,
-        status: SkillInstallationStatus,
-        package: SkillPackage | None = None,
-        source_uri: str | None = None,
-        target_uri: str | None = None,
-        workspace_dir: str | None = None,
-        message: str | None = None,
+        result: SkillMutationResult,
+        target_uri: str,
+        workspace_dir: str | None,
         metadata: dict[str, object] | None = None,
     ) -> None:
-        self.owner_state.record_installation(
+        record_package_installation(
+            self.owner_state,
             action=action,
-            status=status,
-            package=package,
-            source_uri=source_uri,
+            status=SkillInstallationStatus.SUCCEEDED,
+            package=result.skill,
             target_uri=target_uri,
             workspace_dir=workspace_dir,
-            message=message,
+            message=result.message,
             metadata=metadata,
         )
-
-
-def _duration_ms(started_at: float) -> int:
-    return max(0, round((perf_counter() - started_at) * 1000))

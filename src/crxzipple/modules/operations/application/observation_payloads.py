@@ -31,24 +31,21 @@ _SENSITIVE_ASSIGNMENT_RE = re.compile(
 
 
 def sanitize_payload(value: Any, *, depth: int = 0, key: str | None = None) -> Any:
-    if depth >= MAX_PAYLOAD_DEPTH:
-        return truncate(redact_sensitive_payload(value, key=key))
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
         return truncate(redact_sensitive_string(value, key=key))
     if isinstance(value, datetime):
         return format_datetime_utc(value)
+    if depth >= MAX_PAYLOAD_DEPTH:
+        return truncate(redact_sensitive_payload(value, key=key))
     if isinstance(value, dict):
         items = list(value.items())[:MAX_PAYLOAD_ITEMS]
         payload: dict[str, Any] = {}
         for item_key, item_value in items:
             if not isinstance(item_key, str) or not item_key.strip():
                 continue
-            if is_sensitive_key(item_key) and not is_safe_numeric_token_count_key(
-                item_key,
-                item_value,
-            ):
+            if should_redact_sensitive_field(item_key, item_value):
                 payload[str(item_key)] = REDACTED_VALUE
             else:
                 payload[str(item_key)] = sanitize_payload(
@@ -76,10 +73,7 @@ def redact_sensitive_payload(value: Any, *, key: str | None = None) -> Any:
         redacted: dict[str, Any] = {}
         for item_key, item_value in value.items():
             key_text = str(item_key)
-            if is_sensitive_key(key_text) and not is_safe_numeric_token_count_key(
-                key_text,
-                item_value,
-            ):
+            if should_redact_sensitive_field(key_text, item_value):
                 redacted[key_text] = REDACTED_VALUE
             else:
                 redacted[key_text] = redact_sensitive_payload(
@@ -112,12 +106,68 @@ def truncate(value: Any) -> str:
 
 def is_sensitive_key(key: str) -> bool:
     normalized = normalize_sensitive_key(key)
-    return any(normalize_sensitive_key(part) in normalized for part in _SENSITIVE_KEY_PARTS)
+    return any(
+        normalize_sensitive_key(part) in normalized
+        for part in _SENSITIVE_KEY_PARTS
+    )
+
+
+def should_redact_sensitive_field(key: str, value: Any) -> bool:
+    if not is_sensitive_key(key):
+        return False
+    if is_safe_token_metric_key(key, value):
+        return False
+    if is_operations_metric_section(value):
+        return False
+    return True
 
 
 def is_safe_numeric_token_count_key(key: str, value: Any) -> bool:
     normalized = normalize_sensitive_key(key)
-    return normalized.endswith("tokens") and isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        normalized.endswith("tokens")
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    )
+
+
+def is_safe_token_metric_key(key: str, value: Any) -> bool:
+    normalized = normalize_sensitive_key(key)
+    if any(
+        unsafe in normalized
+        for unsafe in ("accesstoken", "refreshtoken", "idtoken", "bearertoken")
+    ):
+        return False
+    if is_safe_numeric_token_count_key(key, value):
+        return True
+    if isinstance(value, str):
+        return False
+    return normalized in {
+        "tokenusage",
+        "tokenusages",
+        "tokencount",
+        "tokencounts",
+        "tokencost",
+        "tokencosts",
+        "tokenbudget",
+        "tokenbudgets",
+    }
+
+
+def is_operations_metric_section(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    section_id = value.get("id")
+    section_title = value.get("title")
+    section_kind = value.get("kind")
+    section_identity = (section_id, section_title, section_kind)
+    if not all(isinstance(item, str) and item.strip() for item in section_identity):
+        return False
+    if "segments" in value and isinstance(value["segments"], (list, tuple)):
+        return True
+    if "series" in value and isinstance(value["series"], (list, tuple)):
+        return True
+    return False
 
 
 def is_database_url_key(key: str | None) -> bool:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from crxzipple.modules.tool.application.ports import (
     ToolRuntimeReadiness,
@@ -9,6 +9,17 @@ from crxzipple.modules.tool.application.ports import (
     ToolRuntimeReadinessPort,
 )
 from crxzipple.modules.tool.domain.entities import Tool
+from crxzipple.modules.tool.infrastructure.adapters.daemon_proxy_readiness import (
+    browser_proxy_readiness,
+    proxy_blocker_reason,
+)
+from crxzipple.modules.tool.infrastructure.adapters.daemon_readiness_metadata import (
+    daemon_group_metadata,
+    daemon_metadata,
+    daemon_reason,
+    daemon_setup_available,
+    daemon_status,
+)
 
 
 @dataclass(slots=True)
@@ -146,22 +157,22 @@ class DaemonServiceToolRuntimeReadinessAdapter(ToolRuntimeReadinessPort):
                 status="ready",
                 ready=True,
                 reason=f"Daemon service group '{service_group}' has a ready instance.",
-                metadata=_daemon_group_metadata(
+                metadata=daemon_group_metadata(
                     service_group,
                     specs,
                     tuple(instances),
                 ),
             )
-        proxy_readiness = _browser_proxy_readiness(
+        proxy_readiness = browser_proxy_readiness(
             specs,
             access_service=self.access_service,
         )
         proxy_blockers = tuple(item for item in proxy_readiness if not item["ready"])
-        status = _daemon_status(tuple(instances)) if instances else "setup_needed"
+        status = daemon_status(tuple(instances)) if instances else "setup_needed"
         reason = f"Daemon service group '{service_group}' has no ready instance."
         if proxy_blockers:
-            reason = f"{reason} {_proxy_blocker_reason(proxy_blockers)}"
-        setup_available = any(_daemon_setup_available(spec) for spec in specs)
+            reason = f"{reason} {proxy_blocker_reason(proxy_blockers)}"
+        setup_available = any(daemon_setup_available(spec) for spec in specs)
         if (
             requirement == "browser-profile-runtime"
             and setup_available
@@ -177,7 +188,7 @@ class DaemonServiceToolRuntimeReadinessAdapter(ToolRuntimeReadinessPort):
                 ),
                 setup_available=True,
                 metadata={
-                    **_daemon_group_metadata(service_group, specs, tuple(instances)),
+                    **daemon_group_metadata(service_group, specs, tuple(instances)),
                     **(
                         {"proxy_readiness": proxy_readiness}
                         if proxy_readiness
@@ -192,7 +203,7 @@ class DaemonServiceToolRuntimeReadinessAdapter(ToolRuntimeReadinessPort):
             reason=reason,
             setup_available=setup_available,
             metadata={
-                **_daemon_group_metadata(service_group, specs, tuple(instances)),
+                **daemon_group_metadata(service_group, specs, tuple(instances)),
                 **(
                     {"proxy_readiness": proxy_readiness}
                     if proxy_readiness
@@ -234,25 +245,25 @@ class DaemonServiceToolRuntimeReadinessAdapter(ToolRuntimeReadinessPort):
                 status="ready",
                 ready=True,
                 reason=f"Daemon service '{service_key}' has a ready instance.",
-                metadata=_daemon_metadata(spec, ready_instances),
+                metadata=daemon_metadata(spec, ready_instances),
             )
         if not instances:
-            proxy_readiness = _browser_proxy_readiness(
+            proxy_readiness = browser_proxy_readiness(
                 (spec,),
                 access_service=self.access_service,
             )
             proxy_blockers = tuple(item for item in proxy_readiness if not item["ready"])
             reason = f"Daemon service '{service_key}' has no ready instance."
             if proxy_blockers:
-                reason = f"{reason} {_proxy_blocker_reason(proxy_blockers)}"
+                reason = f"{reason} {proxy_blocker_reason(proxy_blockers)}"
             return ToolRuntimeReadinessCheck(
                 requirement=requirement,
                 status="setup_needed",
                 ready=False,
                 reason=reason,
-                setup_available=_daemon_setup_available(spec),
+                setup_available=daemon_setup_available(spec),
                 metadata={
-                    **_daemon_metadata(spec, instances),
+                    **daemon_metadata(spec, instances),
                     **(
                         {"proxy_readiness": proxy_readiness}
                         if proxy_readiness
@@ -260,15 +271,15 @@ class DaemonServiceToolRuntimeReadinessAdapter(ToolRuntimeReadinessPort):
                     ),
                 },
             )
-        status = _daemon_status(instances)
-        reason = _daemon_reason(service_key, instances, status=status)
+        status = daemon_status(instances)
+        reason = daemon_reason(service_key, instances, status=status)
         return ToolRuntimeReadinessCheck(
             requirement=requirement,
             status=status,
             ready=False,
             reason=reason,
-            setup_available=_daemon_setup_available(spec),
-            metadata=_daemon_metadata(spec, instances),
+            setup_available=daemon_setup_available(spec),
+            metadata=daemon_metadata(spec, instances),
         )
 
 
@@ -295,198 +306,3 @@ def _blocked_readiness(
         reason="; ".join(reasons) or "Tool runtime setup is required.",
         checks=checks,
     )
-
-
-def _daemon_setup_available(spec: Any) -> bool:
-    return getattr(spec, "start_policy", None) in {"eager", "ensure", "lazy"}
-
-
-def _daemon_status(instances: tuple[Any, ...]) -> str:
-    statuses = {str(getattr(instance, "status", "")).strip().lower() for instance in instances}
-    if "degraded" in statuses:
-        return "degraded"
-    if statuses & {"starting", "stopping"}:
-        return "degraded"
-    if statuses & {"failed", "stopped"}:
-        return "setup_needed"
-    return "degraded"
-
-
-def _daemon_reason(service_key: str, instances: tuple[Any, ...], *, status: str) -> str:
-    errors = tuple(
-        str(getattr(instance, "last_error", "") or "").strip()
-        for instance in instances
-        if str(getattr(instance, "last_error", "") or "").strip()
-    )
-    if errors:
-        return f"Daemon service '{service_key}' is not ready: {'; '.join(errors)}"
-    statuses = ", ".join(
-        sorted({str(getattr(instance, "status", "unknown")) for instance in instances})
-    )
-    return f"Daemon service '{service_key}' is {status}: {statuses or 'unknown'}."
-
-
-def _browser_proxy_readiness(
-    specs: tuple[Any, ...],
-    *,
-    access_service: Any | None,
-) -> tuple[dict[str, Any], ...]:
-    rows: list[dict[str, Any]] = []
-    for spec in specs:
-        metadata = _mapping(getattr(spec, "metadata", None))
-        if str(metadata.get("proxy_mode") or "").strip().lower() != "access_binding":
-            continue
-        profile_name = str(metadata.get("profile_name") or "").strip()
-        binding_id = str(metadata.get("proxy_binding_id") or "").strip()
-        credential_kind = _normalize_proxy_credential_kind(
-            metadata.get("proxy_credential_kind"),
-        )
-        if not binding_id:
-            rows.append(
-                {
-                    "profile_name": profile_name,
-                    "binding_id": None,
-                    "expected_kind": credential_kind,
-                    "ready": False,
-                    "status": "setup_needed",
-                    "reason": "Browser proxy is configured as access_binding but no proxy_binding_id is set.",
-                }
-            )
-            continue
-        check = getattr(access_service, "check_credential_binding", None)
-        if not callable(check):
-            rows.append(
-                {
-                    "profile_name": profile_name,
-                    "binding_id": binding_id,
-                    "expected_kind": credential_kind,
-                    "ready": False,
-                    "status": "setup_needed",
-                    "reason": "Access credential readiness is unavailable for browser proxy binding.",
-                }
-            )
-            continue
-        try:
-            readiness = check(binding_id, expected_kind=credential_kind)
-        except TypeError:
-            try:
-                readiness = check(binding_id)
-            except Exception as exc:  # noqa: BLE001
-                rows.append(
-                    _proxy_readiness_error(
-                        profile_name,
-                        binding_id,
-                        exc,
-                        expected_kind=credential_kind,
-                    )
-                )
-                continue
-        except Exception as exc:  # noqa: BLE001
-            rows.append(
-                _proxy_readiness_error(
-                    profile_name,
-                    binding_id,
-                    exc,
-                    expected_kind=credential_kind,
-                )
-            )
-            continue
-        payload = _payload(readiness)
-        rows.append(
-            {
-                "profile_name": profile_name,
-                "binding_id": binding_id,
-                "expected_kind": credential_kind,
-                "ready": bool(payload.get("ready", getattr(readiness, "ready", False))),
-                "status": str(
-                    payload.get("status") or getattr(readiness, "status", "setup_needed"),
-                ),
-                "reason": str(
-                    payload.get("reason") or getattr(readiness, "reason", "") or "",
-                ),
-            }
-        )
-    return tuple(rows)
-
-
-def _proxy_readiness_error(
-    profile_name: str,
-    binding_id: str,
-    exc: Exception,
-    *,
-    expected_kind: str,
-) -> dict[str, Any]:
-    return {
-        "profile_name": profile_name,
-        "binding_id": binding_id,
-        "expected_kind": expected_kind,
-        "ready": False,
-        "status": "setup_needed",
-        "reason": f"Browser proxy credential readiness failed: {exc}",
-    }
-
-
-def _proxy_blocker_reason(blockers: tuple[dict[str, Any], ...]) -> str:
-    parts = []
-    for item in blockers[:3]:
-        binding = item.get("binding_id") or "<missing>"
-        status = item.get("status") or "setup_needed"
-        reason = item.get("reason") or "credential setup is required"
-        parts.append(f"Browser proxy credential '{binding}' is {status}: {reason}")
-    return " ".join(parts)
-
-
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _normalize_proxy_credential_kind(value: Any) -> str:
-    credential_kind = str(value or "basic").strip().lower()
-    if credential_kind == "bearer":
-        credential_kind = "bearer_token"
-    if credential_kind not in {"basic", "bearer_token"}:
-        return "basic"
-    return credential_kind
-
-
-def _payload(value: Any) -> dict[str, Any]:
-    to_payload = getattr(value, "to_payload", None)
-    if callable(to_payload):
-        payload = to_payload()
-        if isinstance(payload, dict):
-            return dict(payload)
-    return {}
-
-
-def _daemon_metadata(spec: Any, instances: tuple[Any, ...]) -> dict[str, Any]:
-    return {
-        "service_key": getattr(spec, "key", None),
-        "display_name": getattr(spec, "display_name", None),
-        "service_group": getattr(spec, "service_group", None),
-        "role": getattr(spec, "role", None),
-        "start_policy": getattr(spec, "start_policy", None),
-        "desired_replicas": getattr(spec, "desired_replicas", None),
-        "instance_count": len(instances),
-        "instance_statuses": [
-            str(getattr(instance, "status", "unknown")) for instance in instances
-        ],
-    }
-
-
-def _daemon_group_metadata(
-    service_group: str,
-    specs: tuple[Any, ...],
-    instances: tuple[Any, ...],
-) -> dict[str, Any]:
-    return {
-        "service_group": service_group,
-        "service_keys": [str(getattr(spec, "key", "")) for spec in specs],
-        "start_policies": [str(getattr(spec, "start_policy", "")) for spec in specs],
-        "desired_replicas": sum(
-            int(getattr(spec, "desired_replicas", 0) or 0) for spec in specs
-        ),
-        "instance_count": len(instances),
-        "instance_statuses": [
-            str(getattr(instance, "status", "unknown")) for instance in instances
-        ],
-    }

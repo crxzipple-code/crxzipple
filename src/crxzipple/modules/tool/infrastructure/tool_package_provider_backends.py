@@ -7,7 +7,7 @@ from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.infrastructure.tool_package_access import (
     parse_credential_requirement_sets,
 )
-from crxzipple.modules.tool.infrastructure.tool_package_manifest_values import (
+from crxzipple.modules.tool.infrastructure.tool_package_manifest_parsers import (
     mapping_payload,
     required_string,
 )

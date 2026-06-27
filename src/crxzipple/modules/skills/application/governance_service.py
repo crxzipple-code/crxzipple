@@ -15,9 +15,9 @@ from crxzipple.modules.skills.application.exceptions import (
 from crxzipple.modules.skills.application.models import SkillMutationResult
 from crxzipple.modules.skills.application.owner_state import (
     SkillOwnerStateService,
-    skill_policy_id,
     utc_now,
 )
+from crxzipple.modules.skills.application.owner_package_index import skill_policy_id
 from crxzipple.modules.skills.application.ports import (
     SkillOwnerCatalogRepositoryPort,
 )

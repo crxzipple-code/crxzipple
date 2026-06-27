@@ -115,6 +115,10 @@ class OperationsObservationTestCase(unittest.TestCase):
                 "nested": {"refresh_token": "raw-refresh-token"},
                 "database_url": "postgresql://app:db-secret@localhost/app",
                 "usage": {"total_tokens": 42},
+                "token_usage": {
+                    "id": "token_usage",
+                    "series": [{"label": "input", "value": 42}],
+                },
                 "message": "token=inline-token-value",
             },
             occurred_at=datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc),
@@ -132,6 +136,10 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(observed.payload["api_key"], "***")
         self.assertEqual(observed.payload["nested"]["refresh_token"], "***")
         self.assertEqual(observed.payload["usage"]["total_tokens"], 42)
+        self.assertEqual(
+            observed.payload["token_usage"]["series"][0]["value"],
+            42,
+        )
 
     def test_file_backed_store_records_orchestration_module_observation(self) -> None:
         timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
@@ -664,6 +672,24 @@ class OperationsObservationTestCase(unittest.TestCase):
                 "nested": {"token": "projection-token"},
                 "database_url": "postgresql://app:projection-db-secret@localhost/app",
                 "usage": {"total_tokens": 99},
+                "token_usage": {
+                    "id": "token_usage",
+                    "series": [{"label": "output", "value": 99}],
+                },
+                "credential_health": {
+                    "id": "credential_health",
+                    "title": "Credential Health",
+                    "kind": "donut",
+                    "total": 1,
+                    "segments": [
+                        {
+                            "id": "ready",
+                            "label": "Ready",
+                            "value": 1,
+                            "tone": "success",
+                        },
+                    ],
+                },
             },
             updated_at=timestamp,
         )
@@ -678,6 +704,15 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(projection.payload["api_key"], "***")
         self.assertEqual(projection.payload["nested"]["token"], "***")
         self.assertEqual(projection.payload["usage"]["total_tokens"], 99)
+        self.assertEqual(
+            projection.payload["token_usage"]["series"][0]["value"],
+            99,
+        )
+        self.assertEqual(projection.payload["credential_health"]["total"], 1)
+        self.assertEqual(
+            projection.payload["credential_health"]["segments"][0]["id"],
+            "ready",
+        )
 
     def test_sqlalchemy_observation_store_redacts_sensitive_event_payload(self) -> None:
         timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import sys
 import tempfile
 import time
@@ -37,7 +38,14 @@ from crxzipple.modules.tool.infrastructure.cli_source import (
     discover_cli_source,
     register_cli_guided_handlers,
 )
+from crxzipple.modules.tool.infrastructure.cli_source_config import CliToolSourceConfig
+from crxzipple.modules.tool.infrastructure.cli_source_runtime import CliGuidedRuntime
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
+from crxzipple.modules.process.domain import (
+    ProcessOutputWindow,
+    ProcessSession,
+    ProcessStatus,
+)
 from crxzipple.shared.access import (
     AccessConsumerRef,
     AccessCredentialKind,
@@ -684,6 +692,25 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             )
             self.assertNotIn("env-secret", cli_output_text)
             self.assertNotIn("file-secret", cli_output_text)
+            read_handler = registry.get_handler(
+                next(
+                    function.handler_ref
+                    for function in functions
+                    if function.function_id == function_ids["cli_read_output"]
+                ),
+            )
+            assert read_handler is not None
+            read_result = asyncio.run(read_handler({"process_id": process_id}))
+            self.assertIsInstance(read_result.details, dict)
+            self.assertIn("[credential:redacted]", read_result.details["stdout"])
+            self.assertNotIn("env-secret", read_result.details["stdout"])
+            self.assertNotIn("file-secret", read_result.details["stdout"])
+            envelope = read_result.metadata.get("tool_result_envelope")
+            self.assertIsInstance(envelope, dict)
+            provider_replay = envelope["provider_replay_payload"]
+            self.assertIn("[credential:redacted]", provider_replay["stdout"])
+            self.assertNotIn("env-secret", provider_replay["stdout"])
+            self.assertNotIn("file-secret", provider_replay["stdout"])
             metadata_text = str(result.details.get("credential_injections"))
             self.assertIn("cli-env-token", metadata_text)
             self.assertIn("CLI_TOKEN_FILE", metadata_text)
@@ -817,6 +844,48 @@ class ToolSourceServiceTestCase(unittest.TestCase):
                 process_id,
                 "Duration: 00:00:01.00",
             )
+
+    def test_cli_promoted_function_initial_output_limit_controls_first_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = ToolSourceCatalogRecord(
+                source_id="configured.cli.promoted.limit",
+                kind=ToolSourceCatalogKind.CLI,
+                display_name="Promoted CLI",
+                description="Promoted CLI output limit test.",
+                config={
+                    "source": "configured_tool_provider",
+                    "package_kind": "cli",
+                    "provider": {
+                        "name": "promoted",
+                        "executable": sys.executable,
+                        "allowed_subcommands": ["run"],
+                        "working_directory": str(root),
+                        "allowed_roots": [str(root)],
+                        "output_limit_bytes": 1000,
+                        "promoted_functions": [
+                            {
+                                "id": "probe",
+                                "name": "Probe",
+                                "description": "Probe.",
+                                "subcommand": "run",
+                                "args": [],
+                                "initial_output_limit": 17,
+                            },
+                        ],
+                    },
+                },
+            )
+            config = CliToolSourceConfig.from_source(source)
+            promoted = config.promoted_function("probe")
+            assert promoted is not None
+            process_service = _RecordingProcessService(root)
+            runtime = CliGuidedRuntime(config, process_service=process_service)
+
+            run = asyncio.run(runtime.cli_promoted_execute(promoted, {}))
+
+            self.assertIsInstance(run.details, dict)
+            self.assertEqual(process_service.read_limits, [17])
 
     def _wait_for_cli_output_event(
         self,
@@ -1457,6 +1526,64 @@ def _configured_ffmpeg_cli_source(*, root: Path) -> ToolSourceCatalogRecord:
         },
         runtime_requirements=("cli:configured.cli.ffmpeg",),
     )
+
+
+class _RecordingProcessService:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.read_limits: list[int | None] = []
+        self.session = ProcessSession(
+            id="process-promoted-limit",
+            command="run",
+            shell="/bin/zsh",
+            working_directory=str(root),
+            session_key=None,
+        )
+
+    def start_command(
+        self,
+        *,
+        command: str,
+        shell: str,
+        working_directory: str,
+        session_key: str | None = None,
+        env: dict[str, str] | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> ProcessSession:
+        self.session = ProcessSession(
+            id="process-promoted-limit",
+            command=command,
+            shell=shell,
+            working_directory=working_directory,
+            session_key=session_key,
+            metadata=dict(metadata or {}),
+        )
+        return self.session
+
+    def read_output(
+        self,
+        *,
+        process_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        limit: int | None = None,
+    ) -> ProcessOutputWindow:
+        self.read_limits.append(limit)
+        now = datetime.now(timezone.utc)
+        stdout = "x" * int(limit or 0)
+        return ProcessOutputWindow(
+            process_id=process_id,
+            status=ProcessStatus.RUNNING,
+            exit_code=None,
+            stdout=stdout,
+            stderr="",
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            next_stdout_offset=stdout_offset + len(stdout),
+            next_stderr_offset=stderr_offset,
+            started_at=now,
+            ended_at=None,
+        )
 
 
 @dataclass(frozen=True, slots=True)

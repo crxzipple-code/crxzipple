@@ -12,6 +12,9 @@ from crxzipple.modules.browser.domain.value_objects import BrowserNetworkBodyKin
 from crxzipple.modules.browser.infrastructure.network_capture import (
     InMemoryBrowserNetworkCaptureStore,
 )
+from crxzipple.modules.browser.infrastructure.network_cdp_capture import (
+    CdpNetworkCaptureController,
+)
 
 NOW = datetime(2026, 5, 28, 8, 0, tzinfo=timezone.utc)
 
@@ -174,6 +177,91 @@ class BrowserNetworkCaptureTestCase(unittest.TestCase):
             keyword="search",
         )
         self.assertEqual([item.request_id for item in records], ["req-1"])
+
+    def test_cdp_network_capture_start_errors_are_display_safe(self) -> None:
+        service = self._service()
+
+        class _Broker:
+            def open_subscription_session(self, _page, *, operation=None):  # noqa: ANN001, ANN201
+                del operation
+                raise RuntimeError(
+                    "subscription failed at https://example.test/cdp?token=secret#frag",
+                )
+
+        controller = CdpNetworkCaptureController(
+            capture_service=service,
+            cdp_session_broker=_Broker(),
+        )
+
+        errors = controller.start_capture(
+            profile_name="crxzipple",
+            target_id="tab-1",
+            capture_id="cap-1",
+            page=object(),
+        )
+
+        self.assertEqual(errors[0]["source"], "cdp_session")
+        self.assertIn(
+            "Browser CDP Network capture subscription failed",
+            errors[0]["message"],
+        )
+        self.assertIn("https://example.test/cdp?[redacted]", errors[0]["message"])
+        self.assertNotIn("token=secret", errors[0]["message"])
+
+    def test_cdp_network_capture_response_body_errors_are_display_safe(self) -> None:
+        service = self._service()
+        service.start_capture(
+            profile_name="crxzipple",
+            target_id="tab-1",
+            capture_id="cap-1",
+        )
+        service.record_request(
+            profile_name="crxzipple",
+            target_id="tab-1",
+            capture_id="cap-1",
+            request_id="req-1",
+            url="https://example.test/api",
+            method="GET",
+        )
+
+        class _Broker:
+            def __init__(self) -> None:
+                self.detached = False
+
+            def open_command_session(self, _page, *, operation=None):  # noqa: ANN001, ANN201
+                del operation
+                return object()
+
+            def send_command(self, _session, method, _params):  # noqa: ANN001, ANN201
+                raise BrowserValidationError(
+                    f"{method} failed at https://example.test/body?token=secret#frag",
+                )
+
+            def detach(self, _session) -> None:  # noqa: ANN001
+                self.detached = True
+
+        broker = _Broker()
+        controller = CdpNetworkCaptureController(
+            capture_service=service,
+            cdp_session_broker=broker,
+        )
+
+        errors = controller.fetch_response_body(
+            profile_name="crxzipple",
+            target_id="tab-1",
+            capture_id="cap-1",
+            request_id="req-1",
+            page=object(),
+        )
+
+        self.assertTrue(broker.detached)
+        self.assertEqual(errors[0]["source"], "Network.getResponseBody")
+        self.assertIn(
+            "Browser CDP Network.getResponseBody failed",
+            errors[0]["message"],
+        )
+        self.assertIn("https://example.test/body?[redacted]", errors[0]["message"])
+        self.assertNotIn("token=secret", errors[0]["message"])
 
     def test_body_size_limit_and_ring_buffer_evict_old_requests(self) -> None:
         service = self._service()

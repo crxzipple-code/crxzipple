@@ -61,6 +61,36 @@ def test_dependency_map_captures_current_two_phase_scanned_tool_loading() -> Non
         assert point in text
 
 
+def test_long_running_cli_entrypoints_use_runtime_persistence_guard() -> None:
+    required_runtime_guards = {
+        "interfaces/cli/crxzipple.py": ("HTTP API",),
+        "modules/daemon/interfaces/cli.py": ("daemon supervisor",),
+        "modules/operations/interfaces/worker_cli.py": (
+            "operations observer",
+            "operations observer rebuild",
+        ),
+        "modules/event_relay/interfaces/worker_cli.py": ("event relay",),
+        "modules/events/interfaces/worker_cli.py": ("event outbox publisher",),
+        "modules/channels/interfaces/cli.py": ("channel runtime",),
+        "modules/tool/interfaces/worker_cli.py": ("tool worker",),
+        "modules/tool/interfaces/scheduler_cli.py": ("tool scheduler",),
+        "modules/orchestration/interfaces/worker_cli_common.py": (
+            "orchestration executor",
+        ),
+        "modules/orchestration/interfaces/worker_cli_scheduler.py": (
+            "orchestration scheduler",
+        ),
+    }
+
+    for relative_path, runtime_names in required_runtime_guards.items():
+        source = (
+            REPO_ROOT / "src" / "crxzipple" / relative_path
+        ).read_text(encoding="utf-8")
+        assert "guard_runtime_database(" in source
+        for runtime_name in runtime_names:
+            assert f'runtime_name="{runtime_name}"' in source
+
+
 def test_container_uses_single_scanned_tool_package_apply_hook() -> None:
     plan = runtime_plan()
     tool_activation_tasks = [

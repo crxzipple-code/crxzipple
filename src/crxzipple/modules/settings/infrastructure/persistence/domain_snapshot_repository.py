@@ -4,18 +4,20 @@ from sqlalchemy import select
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.settings.domain.entities import SettingsEffectiveSnapshot
-from crxzipple.modules.settings.infrastructure.persistence.domain_repository_mappers import (
-    _snapshot_from_record,
-    _snapshot_record_from_domain,
+from crxzipple.modules.settings.infrastructure.persistence.domain_snapshot_mappers import (
+    snapshot_from_record,
+    snapshot_record_from_domain,
 )
 from crxzipple.modules.settings.infrastructure.persistence.models import (
     SettingsEffectiveSnapshotModel,
 )
-from crxzipple.modules.settings.infrastructure.persistence.repository_mappers import (
-    _optional_text,
-    _required_text,
+from crxzipple.modules.settings.infrastructure.persistence.repository_snapshot_mappers import (
     _snapshot_model,
     _snapshot_record,
+)
+from crxzipple.modules.settings.infrastructure.persistence.repository_values import (
+    _optional_text,
+    _required_text,
 )
 
 
@@ -24,7 +26,7 @@ class SqlAlchemySettingsEffectiveSnapshotRepository:
         self._session_factory = session_factory
 
     def add(self, snapshot: SettingsEffectiveSnapshot) -> None:
-        record = _snapshot_record_from_domain(snapshot)
+        record = snapshot_record_from_domain(snapshot)
         with self._session_factory() as session:
             if record.is_current:
                 previous = session.scalars(
@@ -48,7 +50,7 @@ class SqlAlchemySettingsEffectiveSnapshotRepository:
             )
             if model is None:
                 return None
-            return _snapshot_from_record(_snapshot_record(model))
+            return snapshot_from_record(_snapshot_record(model))
 
     def latest_for_resource(
         self,
@@ -74,4 +76,4 @@ class SqlAlchemySettingsEffectiveSnapshotRepository:
             ).first()
             if model is None:
                 return None
-            return _snapshot_from_record(_snapshot_record(model))
+            return snapshot_from_record(_snapshot_record(model))

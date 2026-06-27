@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlencode, urlparse
 
 from tools.browser.local import create_browser_manifest_handler
 from crxzipple.interfaces.runtime_container import AppKey
@@ -40,7 +42,6 @@ from tests.unit.tool_test_support import (
     McpProviderSettings,
     OpenApiCredentialBinding,
     OpenApiProviderSettings,
-    SampleApiServer,
     SqliteTestHarness,
     ToolEnvironment,
     ToolKind,
@@ -120,6 +121,69 @@ def _seed_sample_openapi_access_bindings(container) -> None:  # noqa: ANN001
             source="unit_test",
         ),
     )
+
+
+class _FakeOpenApiResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        url: str,
+        payload: dict[str, object],
+    ) -> None:
+        self.status_code = status_code
+        self.url = url
+        self.headers = {"Content-Type": "application/json"}
+        self.content = json.dumps(payload).encode("utf-8")
+        self.text = self.content.decode("utf-8")
+
+
+class _FakeOpenApiAsyncClient:
+    def __init__(self, requests: list[dict[str, object]]) -> None:
+        self.requests = requests
+
+    async def request(
+        self,
+        *,
+        method: str,
+        url: str,
+        params: list[tuple[str, str]] | None = None,
+        headers: dict[str, str] | None = None,
+        json: object = None,
+    ) -> _FakeOpenApiResponse:
+        query = urlencode(params or [], doseq=True)
+        final_url = f"{url}?{query}" if query else url
+        self.requests.append(
+            {
+                "method": method,
+                "url": final_url,
+                "headers": dict(headers or {}),
+                "json": json,
+            },
+        )
+        path = urlparse(url).path
+        if path == "/echo/hello":
+            uppercase = dict(params or {}).get("uppercase") == "true"
+            return _FakeOpenApiResponse(
+                status_code=200,
+                url=final_url,
+                payload={"message": "HELLO" if uppercase else "hello"},
+            )
+        if path == "/search":
+            body = json if isinstance(json, dict) else {}
+            return _FakeOpenApiResponse(
+                status_code=200,
+                url=final_url,
+                payload={
+                    "query": body.get("query"),
+                    "limit": body.get("limit"),
+                },
+            )
+        return _FakeOpenApiResponse(
+            status_code=404,
+            url=final_url,
+            payload={"error": "not found"},
+        )
 
 
 class ToolProvidersTestCase(ToolTestCaseBase):
@@ -1445,13 +1509,13 @@ local_tools:
             callback()
 
     def test_discovers_and_executes_openapi_remote_tools(self) -> None:
-        server = SampleApiServer()
-        server.start()
         harness = SqliteTestHarness()
         previous_api_key = os.environ.get("SAMPLE_API_KEY")
         previous_bearer_token = os.environ.get("SAMPLE_BEARER_TOKEN")
         os.environ["SAMPLE_API_KEY"] = "sample-api-key"
         os.environ["SAMPLE_BEARER_TOKEN"] = "sample-bearer-token"
+        openapi_requests: list[dict[str, object]] = []
+        fake_openapi_client = _FakeOpenApiAsyncClient(openapi_requests)
         settings = replace(
             load_settings(),
             database_url=harness.database_url,
@@ -1459,7 +1523,7 @@ local_tools:
                 OpenApiProviderSettings(
                     name="sample_api",
                     spec_location=openapi_fixture_path("sample_openapi.json"),
-                    base_url=server.base_url,
+                    base_url="http://sample-api.local",
                     description="Sample OpenAPI provider",
                     timeout_seconds=5,
                     max_concurrency=2,
@@ -1517,10 +1581,16 @@ local_tools:
             self.assertEqual(registration.concurrency_key, "openapi:sample_api")
             self.assertEqual(registration.max_concurrency, 2)
 
-            with patch(
-                "requests.request",
-                side_effect=AssertionError(
-                    "OpenAPI remote tools must use async HTTP transport",
+            with (
+                patch(
+                    "requests.request",
+                    side_effect=AssertionError(
+                        "OpenAPI remote tools must use async HTTP transport",
+                    ),
+                ),
+                patch(
+                    "crxzipple.modules.tool.infrastructure.runtimes.openapi_remote.get_async_http_client",
+                    return_value=fake_openapi_client,
                 ),
             ):
                 echo_run = asyncio.run(
@@ -1528,6 +1598,15 @@ local_tools:
                         ExecuteToolInput(
                             tool_id="sample_api.echo_message",
                             arguments={"message": "hello", "uppercase": True},
+                            environment=ToolEnvironment.REMOTE,
+                        ),
+                    ),
+                )
+                search_run = asyncio.run(
+                    tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="sample_api.search_docs",
+                            arguments={"body": {"query": "ddd", "limit": 2}},
                             environment=ToolEnvironment.REMOTE,
                         ),
                     ),
@@ -1543,25 +1622,15 @@ local_tools:
                 "sample-api-key",
                 echo_run.result.metadata["request"]["url"],
             )
-
-            with patch(
-                "requests.request",
-                side_effect=AssertionError(
-                    "OpenAPI remote tools must use async HTTP transport",
-                ),
-            ):
-                search_run = asyncio.run(
-                    tool_service.execute(
-                        ExecuteToolInput(
-                            tool_id="sample_api.search_docs",
-                            arguments={"body": {"query": "ddd", "limit": 2}},
-                            environment=ToolEnvironment.REMOTE,
-                        ),
-                    ),
-                )
             self.assertEqual(search_run.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(search_run.output_payload["query"], "ddd")
             self.assertEqual(search_run.output_payload["limit"], 2)
+            self.assertEqual(len(openapi_requests), 2)
+            self.assertIn("api_key=sample-api-key", openapi_requests[0]["url"])
+            self.assertEqual(
+                openapi_requests[1]["headers"]["Authorization"],
+                "Bearer sample-bearer-token",
+            )
         finally:
             if previous_api_key is None:
                 os.environ.pop("SAMPLE_API_KEY", None)

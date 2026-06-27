@@ -5,20 +5,22 @@ from sqlalchemy import select
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.settings.domain.entities import SettingsResourceVersion
 from crxzipple.modules.settings.domain.exceptions import SettingsAlreadyExistsError
-from crxzipple.modules.settings.infrastructure.persistence.domain_repository_mappers import (
-    _apply_version,
-    _apply_version_to_resource,
-    _version_from_record,
-    _version_record_from_domain,
+from crxzipple.modules.settings.infrastructure.persistence.domain_version_mappers import (
+    apply_version_model,
+    apply_version_to_resource,
+    version_from_record,
+    version_record_from_domain,
 )
 from crxzipple.modules.settings.infrastructure.persistence.models import (
     SettingsResourceModel,
     SettingsResourceVersionModel,
 )
-from crxzipple.modules.settings.infrastructure.persistence.repository_mappers import (
-    _required_text,
+from crxzipple.modules.settings.infrastructure.persistence.repository_version_mappers import (
     _version_model,
     _version_record,
+)
+from crxzipple.modules.settings.infrastructure.persistence.repository_values import (
+    _required_text,
 )
 
 
@@ -32,25 +34,25 @@ class SqlAlchemySettingsResourceVersionRepository:
                 f"settings version '{version.id}' already exists.",
             )
         with self._session_factory() as session:
-            model = _version_model(_version_record_from_domain(version))
+            model = _version_model(version_record_from_domain(version))
             session.add(model)
             resource = session.get(SettingsResourceModel, version.resource_id)
             if resource is not None:
-                _apply_version_to_resource(resource, model)
+                apply_version_to_resource(resource, model)
             session.commit()
 
     def save(self, version: SettingsResourceVersion) -> None:
         with self._session_factory() as session:
             model = session.get(SettingsResourceVersionModel, version.id)
-            stored = _version_model(_version_record_from_domain(version))
+            stored = _version_model(version_record_from_domain(version))
             if model is None:
                 session.add(stored)
                 model = stored
             else:
-                _apply_version(model, stored)
+                apply_version_model(model, stored)
             resource = session.get(SettingsResourceModel, version.resource_id)
             if resource is not None:
-                _apply_version_to_resource(resource, model)
+                apply_version_to_resource(resource, model)
             session.commit()
 
     def get(self, version_id: str) -> SettingsResourceVersion | None:
@@ -61,7 +63,7 @@ class SqlAlchemySettingsResourceVersionRepository:
             )
             if model is None:
                 return None
-            return _version_from_record(_version_record(model))
+            return version_from_record(_version_record(model))
 
     def list_for_resource(self, resource_id: str) -> tuple[SettingsResourceVersion, ...]:
         with self._session_factory() as session:
@@ -73,7 +75,7 @@ class SqlAlchemySettingsResourceVersionRepository:
                 )
                 .order_by(SettingsResourceVersionModel.version_number.asc()),
             ).all()
-            return tuple(_version_from_record(_version_record(model)) for model in models)
+            return tuple(version_from_record(_version_record(model)) for model in models)
 
     def latest_for_resource(self, resource_id: str) -> SettingsResourceVersion | None:
         versions = self.list_for_resource(resource_id)
@@ -99,7 +101,7 @@ class SqlAlchemySettingsResourceVersionRepository:
             ).first()
             if model is None:
                 return None
-            return _version_from_record(_version_record(model))
+            return version_from_record(_version_record(model))
 
     def latest_published_for_resources(
         self,
@@ -129,7 +131,7 @@ class SqlAlchemySettingsResourceVersionRepository:
             for model in models:
                 if model.resource_id in latest:
                     continue
-                latest[model.resource_id] = _version_from_record(
+                latest[model.resource_id] = version_from_record(
                     _version_record(model),
                 )
             return latest

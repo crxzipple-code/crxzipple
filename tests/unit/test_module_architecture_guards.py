@@ -399,6 +399,49 @@ def test_operations_frontend_uses_operations_daemon_projection_not_daemon_owner_
     assert violations == []
 
 
+def test_runtime_frontend_pages_do_not_bypass_projection_apis() -> None:
+    runtime_frontend_roots = (
+        FRONTEND_ROOT / "pages" / "operations",
+        FRONTEND_ROOT / "pages" / "workbench",
+    )
+    owner_api_prefixes = (
+        "/access",
+        "/agents",
+        "/browser",
+        "/channels",
+        "/context",
+        "/daemon",
+        "/llms",
+        "/memory",
+        "/orchestration",
+        "/sessions",
+        "/skills",
+        "/tools",
+    )
+    quote_prefixes = ('"', "'", "`")
+    forbidden_markers = tuple(
+        f"{quote}{prefix}"
+        for quote in quote_prefixes
+        for prefix in owner_api_prefixes
+    )
+    violations: list[str] = []
+
+    for path in (
+        source_file
+        for root in runtime_frontend_roots
+        for source_file in _source_files(root, (".ts", ".tsx", ".vue"))
+    ):
+        source = _source(path)
+        for marker in forbidden_markers:
+            if marker in source:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT)} references owner API "
+                    f"marker {marker}",
+                )
+
+    assert violations == []
+
+
 def test_workbench_and_operations_projectors_declare_owner_fact_sources() -> None:
     workbench_sources = workbench_run_owner_fact_sources()
     assert {source.module for source in workbench_sources} == {

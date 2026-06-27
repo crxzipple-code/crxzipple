@@ -14,8 +14,10 @@ from crxzipple.modules.settings.infrastructure.persistence.records import (
     SettingsResourceVersionRecord,
     SettingsValidationResultRecord,
 )
-from crxzipple.modules.settings.infrastructure.persistence.repositories import (
+from crxzipple.modules.settings.infrastructure.persistence.action_audit_repository import (
     SqlAlchemySettingsActionAuditRepository,
+)
+from crxzipple.modules.settings.infrastructure.persistence.governance_repository import (
     SqlAlchemySettingsGovernanceRepository,
 )
 from crxzipple.modules.settings.infrastructure.persistence.domain_repositories import (

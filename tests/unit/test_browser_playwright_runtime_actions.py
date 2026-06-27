@@ -244,6 +244,54 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
         self.assertEqual(clear_result.value["result"]["values"], {})
         self.assertEqual(page.local_storage, {})
 
+    def test_storage_action_redacts_sensitive_values_in_results(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        set_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "storage_kind": "session",
+                "storage_operation": "set",
+                "storage_key": "auth_token",
+                "storage_value": "secret-token-123",
+            },
+        )
+        set_result = self.engine.execute(
+            plan=self._plan(set_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=set_command,
+        )
+
+        self.assertEqual(
+            set_result.value["result"]["values"],
+            {"auth_token": "[redacted]"},
+        )
+        self.assertEqual(page.session_storage, {"auth_token": "secret-token-123"})
+
+        get_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "storage_kind": "session",
+                "storage_operation": "get",
+                "storage_key": "auth_token",
+            },
+        )
+        get_result = self.engine.execute(
+            plan=self._plan(get_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=get_command,
+        )
+        self.assertEqual(
+            get_result.value["result"]["values"],
+            {"auth_token": "[redacted]"},
+        )
+
     def test_deep_storage_read_tools_use_cdp_and_page_context(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
         page.indexeddb_databases = {
@@ -403,6 +451,99 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
         )
         self.assertIn(("cdp.send", "IndexedDB.requestDatabaseNames", {"securityOrigin": "https://example.com"}), page.operations)
         self.assertIn(("cdp.send", "CacheStorage.requestCacheNames", {"securityOrigin": "https://example.com"}), page.operations)
+
+    def test_deep_storage_partial_errors_redact_cdp_exception_details(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        class _FailingStorageSession:
+            def __init__(self, fail_method: str) -> None:
+                self.fail_method = fail_method
+
+            def send(self, method, params=None):  # noqa: ANN001, ANN201
+                payload = dict(params or {})
+                page.operations.append(("cdp.send", method, payload))
+                if method == self.fail_method:
+                    raise BrowserValidationError(
+                        "metadata failed at https://example.com/storage?token=secret#frag",
+                    )
+                if method == "IndexedDB.requestDatabaseNames":
+                    return {"databaseNames": ["app-db"]}
+                if method == "CacheStorage.requestCacheNames":
+                    return {
+                        "caches": [
+                            {
+                                "cacheId": "cache-1",
+                                "cacheName": "runtime-cache",
+                                "securityOrigin": "https://example.com",
+                            }
+                        ]
+                    }
+                if method == "CacheStorage.requestEntries":
+                    return {
+                        "cacheDataEntries": [
+                            {
+                                "requestURL": "https://example.com/api?token=secret",
+                                "requestMethod": "GET",
+                                "responseStatus": 200,
+                            }
+                        ],
+                        "returnCount": 1,
+                    }
+                return {}
+
+            def detach(self) -> None:
+                page.operations.append(("cdp.detach",))
+
+        def _new_cdp_session(fail_method: str):
+            def _factory(_page):  # noqa: ANN001, ANN202
+                page.operations.append(("context.new_cdp_session", _page.target_id))
+                return _FailingStorageSession(fail_method)
+
+            return _factory
+
+        page.browser_context.new_cdp_session = _new_cdp_session("IndexedDB.requestDatabase")
+        indexeddb_list_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage-indexeddb-list",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={},
+        )
+        indexeddb_list = self.engine.execute(
+            plan=self._plan(indexeddb_list_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=indexeddb_list_command,
+        )
+        indexeddb_error = indexeddb_list.value["result"]["databases"][0]["error"]
+        self.assertIn("Browser CDP IndexedDB.requestDatabase failed", indexeddb_error)
+        self.assertIn("https://example.com/storage?[redacted]", indexeddb_error)
+        self.assertNotIn("token=secret", indexeddb_error)
+
+        page.browser_context.new_cdp_session = _new_cdp_session(
+            "CacheStorage.requestCachedResponse",
+        )
+        cache_get_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage-cache-get",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "cache_name": "runtime-cache",
+                "request_url": "https://example.com/api?token=secret",
+            },
+        )
+        cache_get = self.engine.execute(
+            plan=self._plan(cache_get_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=cache_get_command,
+        )
+        cache_error = cache_get.value["result"]["response"]["error"]
+        self.assertIn(
+            "Browser CDP CacheStorage.requestCachedResponse failed",
+            cache_error,
+        )
+        self.assertIn("https://example.com/storage?[redacted]", cache_error)
+        self.assertNotIn("token=secret", cache_error)
 
     def test_cookies_supports_set_get_and_clear(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
@@ -720,6 +861,56 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
             ("cdp.send", "Debugger.getScriptSource", {"scriptId": "script-1"}),
             page.operations,
         )
+
+    def test_script_find_request_source_errors_are_display_safe(self) -> None:
+        class _FailingSourceAdapter:
+            def collect_debugger_scripts(self, page, *, wait_ms):  # noqa: ANN001, ANN202
+                del page, wait_ms
+                return [
+                    {
+                        "scriptId": "script-secret",
+                        "url": "https://example.com/assets/app.js",
+                        "startLine": 0,
+                        "endLine": 20,
+                    }
+                ]
+
+            def read_script_source(self, page, *, script_id):  # noqa: ANN001, ANN202
+                del page, script_id
+                raise BrowserValidationError(
+                    "Source failed at "
+                    "https://example.com/assets/app.js?token=secret-token#frag "
+                    "Authorization: Bearer secret-token"
+                )
+
+        assert self.engine.script_insight_service is not None
+        self.engine.script_insight_service.devtools_adapter = _FailingSourceAdapter()
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="script-find-request",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "query": "briefInfo",
+                "limit": 5,
+                "wait_ms": 0,
+            },
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        errors = result.value["result"]["errors"]
+        self.assertEqual(errors[0]["script_id"], "script-secret")
+        rendered_error = errors[0]["message"]
+        self.assertIn("https://example.com/assets/app.js?[redacted]", rendered_error)
+        self.assertIn("Authorization: [redacted]", rendered_error)
+        self.assertNotIn("secret-token", rendered_error)
+        self.assertNotIn("#frag", rendered_error)
 
     def test_code_search_reads_live_debugger_scripts_and_returns_snippets(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
@@ -1397,6 +1588,54 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
         self.assertEqual(len(broker.detached), 1)
         self.assertEqual(payload["errors"][0]["source"], "Performance.getMetrics")
 
+    def test_network_inspect_errors_are_display_safe(self) -> None:
+        class _Page:
+            url = "https://example.com/app"
+
+            def evaluate(self, _expression, _payload):  # noqa: ANN001, ANN201
+                raise RuntimeError(
+                    "performance failed at https://example.com/perf?token=secret#frag",
+                )
+
+        class _Broker:
+            def open_command_session(self, _page):  # noqa: ANN001, ANN201
+                return object()
+
+            def send_command(self, _session, method, _params):  # noqa: ANN001, ANN201
+                if method == "Performance.enable":
+                    return {}
+                raise RuntimeError(
+                    f"{method} failed at https://example.com/cdp?token=secret#frag",
+                )
+
+            def detach(self, _session):  # noqa: ANN001
+                return None
+
+        service = BrowserNetworkInsightService(cdp_session_broker=_Broker())
+        payload = service.execute(
+            page=_Page(),
+            payload={
+                "include_cdp_tree": True,
+                "include_performance_metrics": True,
+            },
+        )
+
+        messages = [item["message"] for item in payload["errors"]]
+        self.assertEqual(
+            [item["source"] for item in payload["errors"]],
+            ["performance_entries", "Performance.getMetrics", "Page.getResourceTree"],
+        )
+        self.assertTrue(all("token=secret" not in message for message in messages))
+        self.assertTrue(
+            any("https://example.com/perf?[redacted]" in message for message in messages),
+        )
+        self.assertTrue(
+            any("Browser CDP Performance.getMetrics failed" in message for message in messages),
+        )
+        self.assertTrue(
+            any("Browser CDP Page.getResourceTree failed" in message for message in messages),
+        )
+
     def test_emulation_set_applies_target_scoped_cdp_overrides(self) -> None:
         command = BrowserPageActionCommand(
             profile_name="crxzipple",
@@ -1624,6 +1863,67 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
         self.assertEqual(
             self.emitted_browser_events[-1][1]["diagnostic_kind"],
             "diagnostics-collect",
+        )
+
+    def test_diagnostics_partial_errors_are_display_safe(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        def _evaluate(_expression, _payload=None):  # noqa: ANN001, ANN202
+            raise RuntimeError(
+                "diagnostics failed at https://example.com/diag?token=secret#frag",
+            )
+
+        class _FailingDiagnosticsSession:
+            def send(self, method, params=None):  # noqa: ANN001, ANN201
+                page.operations.append(("cdp.send", method, dict(params or {})))
+                if method == "Performance.enable":
+                    return {}
+                raise BrowserValidationError(
+                    f"{method} failed at https://example.com/cdp?token=secret#frag",
+                )
+
+            def detach(self) -> None:
+                page.operations.append(("cdp.detach",))
+
+        def _new_cdp_session(_page):  # noqa: ANN001, ANN202
+            page.operations.append(("context.new_cdp_session", _page.target_id))
+            return _FailingDiagnosticsSession()
+
+        page.evaluate = _evaluate
+        page.browser_context.new_cdp_session = _new_cdp_session
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="diagnostics-collect",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"include_entries": True},
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        payload = result.value["result"]
+        messages = [
+            item["message"]
+            for item in (
+                payload["diagnostics"]["performance"]["errors"]
+                + payload["diagnostics"]["lifecycle"]["errors"]
+            )
+        ]
+        self.assertTrue(messages)
+        self.assertTrue(all("token=secret" not in message for message in messages))
+        self.assertTrue(
+            any("https://example.com/diag?[redacted]" in message for message in messages),
+        )
+        self.assertTrue(
+            any("Browser CDP Performance.getMetrics failed" in message for message in messages),
+        )
+        self.assertTrue(
+            any("Browser CDP Page.getNavigationHistory failed" in message for message in messages),
         )
 
     def test_trace_start_stop_and_export_returns_zip_payload(self) -> None:
@@ -2070,6 +2370,53 @@ class BrowserPlaywrightRuntimeActionsTestCase(BrowserPlaywrightActionEngineTestC
         replay_event = self.emitted_browser_events[2][1]
         self.assertEqual(replay_event["source_request_id"], "req-1")
         self.assertEqual(replay_event["source_capture_id"], "cap-1")
+
+    def test_network_list_fallback_errors_are_display_safe(self) -> None:
+        assert self.engine.network_action_service is not None
+        self.engine.network_action_service.network_capture_controller = None
+        start_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-start-capture",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"capture_id": "fallback-cap"},
+        )
+        start_result = self.engine.execute(
+            plan=self._plan(start_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=start_command,
+        )
+        self.assertTrue(start_result.ok)
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.evaluate_failures = [
+            RuntimeError(
+                "Performance failed at "
+                "https://example.com/perf?token=secret-token#frag "
+                "Authorization: Bearer secret-token"
+            )
+        ]
+
+        list_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-list-requests",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"capture_id": "fallback-cap", "limit": 10},
+        )
+        list_result = self.engine.execute(
+            plan=self._plan(list_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=list_command,
+        )
+
+        self.assertTrue(list_result.ok)
+        errors = list_result.value["result"]["errors"]
+        self.assertEqual(errors[0]["source"], "performance_entries")
+        rendered_error = errors[0]["message"]
+        self.assertIn("https://example.com/perf?[redacted]", rendered_error)
+        self.assertIn("Authorization: [redacted]", rendered_error)
+        self.assertNotIn("secret-token", rendered_error)
+        self.assertNotIn("#frag", rendered_error)
 
     def test_network_fetch_failure_emits_display_safe_event(self) -> None:
         command = BrowserPageActionCommand(

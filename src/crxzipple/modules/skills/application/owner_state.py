@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -16,12 +16,10 @@ from crxzipple.modules.skills.application.models import (
     SkillReadiness,
     SkillReadinessStatus,
 )
+from crxzipple.modules.skills.application.owner_catalog_snapshot import (
+    persist_catalog_snapshot,
+)
 from crxzipple.modules.skills.application.owner_package_index import (
-    DEFAULT_SOURCE_IDS,
-    domain_source_type,
-    package_id,
-    package_index,
-    package_root,
     source_policy_id,
     skill_policy_id,
 )
@@ -31,7 +29,6 @@ from crxzipple.modules.skills.application.owner_readiness_projection import (
     readiness_changed_payload,
     readiness_semantic,
     readiness_snapshot,
-    removed_readiness_changed_payload,
 )
 from crxzipple.modules.skills.application.ports import (
     SkillOwnerCatalogRepositoryPort,
@@ -43,11 +40,8 @@ from crxzipple.modules.skills.application.runtime_request_resolver import (
 from crxzipple.modules.skills.domain import (
     SkillInstallation,
     SkillInstallationStatus,
-    SkillPackageStatus,
-    SkillReadinessSnapshot,
     SkillRuntimeVisibility,
     SkillSourceStatus,
-    SkillSourceSyncStatus,
     SkillSource as DomainSkillSource,
     SkillReadinessStatus as DomainSkillReadinessStatus,
 )
@@ -139,68 +133,15 @@ class SkillOwnerStateService:
         if self.owner_catalog_repository is None:
             return
         now = utc_now()
-        grouped: dict[str, list[SkillPackage]] = {}
-        for package in packages:
-            grouped.setdefault(package.source, []).append(package)
-        for current_source_id, source_packages in grouped.items():
-            roots = sorted({str(package_root(package)) for package in source_packages})
-            existing_source = self.domain_source(current_source_id)
-            if existing_source is not None and current_source_id not in DEFAULT_SOURCE_IDS:
-                self.owner_catalog_repository.upsert_source(
-                    replace(
-                        existing_source,
-                        root_uri=existing_source.root_uri,
-                        status=SkillSourceStatus.ACTIVE,
-                        sync_status=SkillSourceSyncStatus.SUCCEEDED,
-                        metadata={
-                            **dict(existing_source.metadata),
-                            "root_paths": roots,
-                            "workspace_dir": workspace_dir or "",
-                        },
-                        last_synced_at=now,
-                        updated_at=now,
-                    ),
-                )
-                continue
-            self.owner_catalog_repository.upsert_source(
-                DomainSkillSource(
-                    source_id=current_source_id,
-                    source_type=domain_source_type(current_source_id),
-                    root_uri=roots[0] if len(roots) == 1 else "",
-                    status=SkillSourceStatus.ACTIVE,
-                    sync_status=SkillSourceSyncStatus.SUCCEEDED,
-                    scope=(
-                        current_source_id
-                        if current_source_id in DEFAULT_SOURCE_IDS
-                        else None
-                    ),
-                    enabled=self.source_enabled(current_source_id),
-                    readonly=current_source_id == "system",
-                    metadata={
-                        "root_paths": roots,
-                        "workspace_dir": workspace_dir or "",
-                    },
-                    last_synced_at=now,
-                    updated_at=now,
-                ),
-            )
-        for package in packages:
-            self.owner_catalog_repository.upsert_package(
-                package_index(package, updated_at=now),
-            )
-        reconcile_sources = set(grouped)
-        if source_id:
-            reconcile_sources.add(source_id)
-        for current_source_id in reconcile_sources:
-            active_package_ids = {
-                package_id(package)
-                for package in grouped.get(current_source_id, ())
-            }
-            self._mark_missing_packages_removed(
-                source_id=current_source_id,
-                active_package_ids=active_package_ids,
-                updated_at=now,
-            )
+        persist_catalog_snapshot(
+            repository=self.owner_catalog_repository,
+            event_emitter=self.event_emitter,
+            packages=packages,
+            workspace_dir=workspace_dir,
+            source_id=source_id,
+            source_enabled=self.source_enabled,
+            updated_at=now,
+        )
 
     def persist_readiness_snapshots(
         self,
@@ -356,67 +297,6 @@ class SkillOwnerStateService:
             ready=True,
             setup_hints=requirements.setup_hints,
         )
-
-    def _mark_missing_packages_removed(
-        self,
-        *,
-        source_id: str,
-        active_package_ids: set[str],
-        updated_at: datetime,
-    ) -> None:
-        if self.owner_catalog_repository is None:
-            return
-        for package in self.owner_catalog_repository.list_packages(
-            source_id=source_id,
-            include_removed=True,
-        ):
-            if package.package_id in active_package_ids:
-                continue
-            if package.status is SkillPackageStatus.REMOVED:
-                continue
-            self.owner_catalog_repository.upsert_package(
-                replace(
-                    package,
-                    status=SkillPackageStatus.REMOVED,
-                    metadata={
-                        **dict(package.metadata),
-                        "removed_at": updated_at.isoformat(),
-                    },
-                    updated_at=updated_at,
-                ),
-            )
-            previous = self.owner_catalog_repository.get_readiness(package.skill_id)
-            removed_snapshot = SkillReadinessSnapshot(
-                skill_id=package.skill_id,
-                status=DomainSkillReadinessStatus.INVALID,
-                source_id=source_id,
-                reason="removed",
-                checks=(
-                    {
-                        "kind": "package",
-                        "id": "skill_package_removed",
-                        "ok": False,
-                        "message": "Skill package is no longer present in its source.",
-                    },
-                ),
-                metadata={"package_id": package.package_id},
-                updated_at=updated_at,
-            )
-            self.owner_catalog_repository.upsert_readiness(removed_snapshot)
-            if readiness_semantic(previous) == readiness_semantic(removed_snapshot):
-                continue
-            emit_skill_event(
-                self.event_emitter,
-                SKILL_READINESS_CHANGED_EVENT,
-                payload=removed_readiness_changed_payload(
-                    package=package,
-                    previous=previous,
-                    current=removed_snapshot,
-                ),
-                status=removed_snapshot.status.value,
-                level="warning",
-            )
-
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)

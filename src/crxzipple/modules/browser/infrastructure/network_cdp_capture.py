@@ -9,7 +9,11 @@ from crxzipple.modules.browser.application.network_capture import (
 )
 from crxzipple.modules.browser.domain import BrowserValidationError
 
-from .cdp_sessions import BrowserCdpSessionBroker, BrowserCdpSessionLease
+from .cdp_sessions import (
+    BrowserCdpSessionBroker,
+    BrowserCdpSessionLease,
+    display_safe_cdp_error,
+)
 
 
 @dataclass(slots=True)
@@ -58,7 +62,15 @@ class CdpNetworkCaptureController:
                 operation="Network capture subscription",
             )
         except Exception as exc:  # noqa: BLE001
-            return [{"source": "cdp_session", "message": str(exc)}]
+            return [
+                {
+                    "source": "cdp_session",
+                    "message": display_safe_cdp_error(
+                        exc,
+                        operation="Network capture subscription",
+                    ),
+                }
+            ]
 
         subscription = _NetworkCaptureSubscription(
             profile_name=profile_name,
@@ -80,7 +92,15 @@ class CdpNetworkCaptureController:
         try:
             self.cdp_session_broker.send_command(session, "Network.enable", {})
         except Exception as exc:  # noqa: BLE001
-            errors.append({"source": "Network.enable", "message": str(exc)})
+            errors.append(
+                {
+                    "source": "Network.enable",
+                    "message": display_safe_cdp_error(
+                        exc,
+                        operation="Network.enable",
+                    ),
+                }
+            )
             self.cdp_session_broker.detach(session)
             return errors
         self._subscriptions[key] = subscription
@@ -161,7 +181,15 @@ class CdpNetworkCaptureController:
                     operation="Network.getResponseBody",
                 )
             except Exception as exc:  # noqa: BLE001
-                return [{"source": "cdp_session", "message": str(exc)}]
+                return [
+                    {
+                        "source": "cdp_session",
+                        "message": display_safe_cdp_error(
+                            exc,
+                            operation="Network.getResponseBody",
+                        ),
+                    }
+                ]
             detach_after = True
         try:
             self._store_response_body(
@@ -174,7 +202,15 @@ class CdpNetworkCaptureController:
                 request_id=request_id,
             )
         except Exception as exc:  # noqa: BLE001
-            return [{"source": "Network.getResponseBody", "message": str(exc)}]
+            return [
+                {
+                    "source": "Network.getResponseBody",
+                    "message": display_safe_cdp_error(
+                        exc,
+                        operation="Network.getResponseBody",
+                    ),
+                }
+            ]
         finally:
             if detach_after:
                 self.cdp_session_broker.detach(session)

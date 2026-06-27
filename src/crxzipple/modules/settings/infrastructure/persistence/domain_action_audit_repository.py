@@ -6,18 +6,23 @@ from sqlalchemy import select
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.settings.domain.entities import SettingsActionAudit
-from crxzipple.modules.settings.infrastructure.persistence.domain_repository_mappers import (
-    _apply_audit,
-    _audit_from_record,
-    _audit_model_from_domain,
-    _uuid_hex,
+from crxzipple.modules.settings.infrastructure.persistence.domain_action_audit_mappers import (
+    apply_audit_model,
+    audit_from_record,
+    audit_model_from_domain,
+    uuid_hex,
 )
 from crxzipple.modules.settings.infrastructure.persistence.models import (
     SettingsActionAuditModel,
 )
-from crxzipple.modules.settings.infrastructure.persistence.repository_mappers import (
+from crxzipple.modules.settings.infrastructure.persistence.repository_action_audit_mappers import (
     _action_audit_record,
+)
+from crxzipple.modules.settings.infrastructure.persistence.repository_values import (
     _required_text,
+)
+from crxzipple.modules.settings.infrastructure.persistence.redaction import (
+    redacted_json_object,
 )
 
 
@@ -38,17 +43,17 @@ class SqlAlchemySettingsActionAuditDomainRepository:
         request_metadata: dict[str, Any] | None = None,
     ) -> SettingsActionAudit:
         audit = SettingsActionAudit(
-            id=f"settings_audit_{_uuid_hex()}",
+            id=f"settings_audit_{uuid_hex()}",
             action_type=action_type,
             target_type=target_type,
             target_id=target_id,
             reason=reason,
             actor=actor,
             risk=risk,
-            request_metadata=dict(request_metadata or {}),
+            request_metadata=redacted_json_object(request_metadata) or {},
         )
         with self._session_factory() as session:
-            session.add(_audit_model_from_domain(audit))
+            session.add(audit_model_from_domain(audit))
             session.commit()
         self._live_audits[audit.id] = audit
         return audit
@@ -60,7 +65,7 @@ class SqlAlchemySettingsActionAuditDomainRepository:
         result: dict[str, Any] | None = None,
     ) -> SettingsActionAudit:
         audit = self._require(audit_id)
-        audit.mark_succeeded(result=result)
+        audit.mark_succeeded(result=redacted_json_object(result))
         self._save(audit)
         return audit
 
@@ -71,7 +76,7 @@ class SqlAlchemySettingsActionAuditDomainRepository:
         error: dict[str, Any],
     ) -> SettingsActionAudit:
         audit = self._require(audit_id)
-        audit.mark_failed(error=error)
+        audit.mark_failed(error=redacted_json_object(error) or {})
         self._save(audit)
         return audit
 
@@ -86,7 +91,7 @@ class SqlAlchemySettingsActionAuditDomainRepository:
             )
             if model is None:
                 return None
-            return _audit_from_record(_action_audit_record(model))
+            return audit_from_record(_action_audit_record(model))
 
     def list(self) -> tuple[SettingsActionAudit, ...]:
         with self._session_factory() as session:
@@ -96,7 +101,7 @@ class SqlAlchemySettingsActionAuditDomainRepository:
                     SettingsActionAuditModel.audit_id.asc(),
                 ),
             ).all()
-            return tuple(_audit_from_record(_action_audit_record(model)) for model in models)
+            return tuple(audit_from_record(_action_audit_record(model)) for model in models)
 
     def _require(self, audit_id: str) -> SettingsActionAudit:
         audit = self.get(audit_id)
@@ -107,10 +112,10 @@ class SqlAlchemySettingsActionAuditDomainRepository:
     def _save(self, audit: SettingsActionAudit) -> None:
         with self._session_factory() as session:
             model = session.get(SettingsActionAuditModel, audit.id)
-            stored = _audit_model_from_domain(audit)
+            stored = audit_model_from_domain(audit)
             if model is None:
                 session.add(stored)
             else:
-                _apply_audit(model, stored)
+                apply_audit_model(model, stored)
             session.commit()
         self._live_audits[audit.id] = audit

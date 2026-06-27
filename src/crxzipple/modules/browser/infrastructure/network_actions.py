@@ -21,6 +21,7 @@ from crxzipple.modules.browser.domain.value_objects import (
 )
 
 from .network_cdp_capture import CdpNetworkCaptureController
+from .error_projection import display_safe_exception_message
 from .network_insight import NETWORK_PERFORMANCE_EXPRESSION
 from .network_page_fetch import BrowserPageNetworkFetchService
 
@@ -459,7 +460,12 @@ class BrowserNetworkActionService:
                 },
             )
         except Exception as exc:  # pragma: no cover - live browser variance
-            return [{"source": "performance_entries", "message": str(exc)}]
+            return [
+                {
+                    "source": "performance_entries",
+                    "message": display_safe_exception_message(exc),
+                }
+            ]
         entries = raw_entries.get("entries") if isinstance(raw_entries, dict) else None
         if not isinstance(entries, list):
             return errors
@@ -508,7 +514,7 @@ class BrowserNetworkActionService:
                 errors.append(
                     {
                         "source": "performance_entry",
-                        "message": str(exc),
+                        "message": display_safe_exception_message(exc),
                     }
                 )
         return errors

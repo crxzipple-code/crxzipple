@@ -6,7 +6,7 @@ Medium-high risk. Settings is a governance surface, not owner of every module's 
 
 ## Evidence
 
-- 72 Python files, about 9384 lines.
+- 84 Python files, about 9600 lines.
 - Large files include `application/materialization.py` (205). `application/setup.py` is now a 35-line public setup entrypoint over focused resource collection, import, seed, result, database, Access seed, and core seed modules. `domain/entities.py` is now an 18-line export surface over focused resource/version/override/snapshot/audit aggregate modules. `application/materialization.py` now delegates warning DTOs and payload/profile/tool/access normalization to focused modules. `interfaces/http_actions.py` is now a 55-line HTTP boundary over focused execution/mutation/validation helpers. `application/services.py` is now a 192-line action-service facade, `application/resource_actions.py` is now a 126-line resource-action facade, and `interfaces/http.py` is now a 147-line router.
 
 ## Findings
@@ -39,7 +39,8 @@ Medium-high risk. Settings is a governance surface, not owner of every module's 
 - `application/in_memory.py`
 - `domain/entities.py`
 - `domain/value_objects.py`
-- `infrastructure/persistence/repositories.py`
+- `infrastructure/persistence/governance_repository.py`
+- `infrastructure/persistence/action_audit_repository.py`
 - `infrastructure/persistence/domain_repositories.py`
 - `infrastructure/persistence/domain_resource_repository.py`
 - `infrastructure/persistence/domain_version_repository.py`
@@ -129,13 +130,37 @@ payload projection live in `application/read_models/pages_audits.py`.
 projection surface rather than a mixed overview/audit/detail presenter.
 
 Settings governance persistence is now split between record DTOs, SQLAlchemy
-model/record mappers, domain/repository mappers, and repository query/transaction
-classes.
-`infrastructure/persistence/repositories.py` is reduced to 459 lines and no longer
-owns the mapping helpers used by the domain repository layer.
+model/record mappers, domain/repository mappers, and focused repository
+query/transaction classes. The former mixed
+`infrastructure/persistence/repositories.py` file is retired instead of kept as a
+compatibility surface. Record-level Settings persistence now uses
+`infrastructure/persistence/governance_repository.py` for resource, version,
+snapshot, override, and validation query/transaction behavior, and
+`infrastructure/persistence/action_audit_repository.py` for action-audit lifecycle.
+SQLAlchemy model/record mapping now lives in focused family modules:
+`repository_resource_mappers.py`, `repository_version_mappers.py`,
+`repository_snapshot_mappers.py`, `repository_override_mappers.py`,
+`repository_validation_mappers.py`, and `repository_action_audit_mappers.py`.
+Shared timestamp/text normalization lives in `repository_values.py`. The former
+mixed `repository_mappers.py` file is retired instead of kept as a compatibility
+surface.
+Domain aggregate conversion now lives in focused family mapper modules:
+`domain_resource_mappers.py`, `domain_version_mappers.py`,
+`domain_override_mappers.py`, `domain_snapshot_mappers.py`, and
+`domain_action_audit_mappers.py`. The former mixed
+`domain_repository_mappers.py` file is retired instead of kept as a compatibility
+surface.
 `domain_repositories.py` is reduced to a 74-line service assembly surface.
 Concrete domain repositories now live by family in resource, version, override,
 snapshot, and action-audit repository modules.
+Action-audit request metadata, trace context, result, and error JSON are redacted at
+the persistence boundary before storage. Safe references such as `access://...`,
+`settings://...`, and explicit `*_id` metadata remain visible for diagnosis, while
+raw API keys, bearer headers, database passwords, private keys, and inline token
+strings are removed before both SQL records and returned domain aggregates expose
+them. The shared persistence redaction helper now lives in
+`infrastructure/persistence/redaction.py`, so SQL record mappers and domain
+repositories no longer depend on a private helper from another mapper module.
 
 ### Boundary Cleanliness
 
@@ -234,9 +259,22 @@ should not call generic Settings actions for module-owned entity mutation.
 - `PYTHONPATH=src ruff check src/crxzipple/modules/settings/domain src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence src/crxzipple/modules/settings/interfaces tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py` -> passed.
 - `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/domain src/crxzipple/modules/settings/application src/crxzipple/modules/settings/infrastructure/persistence src/crxzipple/modules/settings/interfaces` -> passed.
 - `PYTHONPATH=src pytest -q tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py --tb=short --maxfail=1` -> 44 passed.
+- `PYTHONPATH=src ruff check src/crxzipple/modules/settings/infrastructure/persistence/domain_resource_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_version_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_override_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_snapshot_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_action_audit_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_resource_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_version_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_override_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_snapshot_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_action_audit_repository.py` -> passed.
+- `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/infrastructure/persistence/domain_resource_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_version_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_override_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_snapshot_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_action_audit_mappers.py src/crxzipple/modules/settings/infrastructure/persistence/domain_resource_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_version_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_override_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_snapshot_repository.py src/crxzipple/modules/settings/infrastructure/persistence/domain_action_audit_repository.py` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_settings_module.py tests/unit/test_settings_http.py tests/unit/test_settings_application_read_models.py tests/unit/test_settings_persistence.py tests/unit/test_settings_environment_setup.py tests/unit/test_settings_materialization.py --tb=short --maxfail=1` -> 47 passed.
+- `PYTHONPATH=src ruff check src/crxzipple/modules/settings/infrastructure/persistence tests/unit/test_settings_persistence.py tests/unit/test_settings_module.py` -> passed.
+- `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/infrastructure/persistence` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_settings_persistence.py tests/unit/test_settings_module.py --tb=short --maxfail=1` -> 11 passed.
+- `PYTHONPATH=src ruff check src/crxzipple/modules/settings/infrastructure/persistence/__init__.py src/crxzipple/modules/settings/infrastructure/persistence/governance_repository.py src/crxzipple/modules/settings/infrastructure/persistence/action_audit_repository.py tests/unit/test_settings_persistence.py` -> passed.
+- `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/settings/infrastructure/persistence/__init__.py src/crxzipple/modules/settings/infrastructure/persistence/governance_repository.py src/crxzipple/modules/settings/infrastructure/persistence/action_audit_repository.py` -> passed.
+- `PYTHONPATH=src pytest -q tests/unit/test_settings_persistence.py --tb=short --maxfail=1` -> 6 passed.
 
 ### Notes From Current Remediation
 
 - `skill-catalog` now follows the same module-owned boundary as Agent/LLM/Channel profiles: Settings may present governance/readiness information, but write operations must go through Skills owner APIs.
 - Settings write paths now accept `expected_active_version_id` for update/publish/rollback. Stale mutations fail with `SettingsConflictError`, return HTTP 409, record failed audit metadata, and do not create replacement versions.
-- Settings persistence record DTOs now live in `infrastructure/persistence/records.py`, SQLAlchemy model/record mapping plus timestamp/text normalization live in `infrastructure/persistence/repository_mappers.py`, and domain aggregate conversion lives in `infrastructure/persistence/domain_repository_mappers.py`. Domain repository classes are split by resource/version/override/snapshot/audit family and own only query and transaction behavior.
+- Settings persistence record DTOs now live in `infrastructure/persistence/records.py`, SQLAlchemy model/record mapping lives in focused resource/version/snapshot/override/validation/action-audit mapper modules, timestamp/text normalization lives in `repository_values.py`, and domain aggregate conversion lives in resource/version/override/snapshot/audit family mapper modules. The former mixed SQL and domain repository mapper files are retired. Domain repository classes are split by the same families and own only query and transaction behavior.
+- Settings action-audit persistence redacts request metadata, trace context,
+  terminal result, and terminal error JSON before storage. The domain audit
+  repository applies the same rule before returning mutated aggregates, so raw
+  secrets do not survive as a live in-memory persistence result either.

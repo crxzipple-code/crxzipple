@@ -705,6 +705,52 @@ class BrowserPlaywrightCoreActionsTestCase(BrowserPlaywrightActionEngineTestCase
         self.assertIn("flight_search", page.local_storage)
         self.assertIn("search_step", page.session_storage)
 
+    def test_action_trace_partial_snapshot_errors_are_display_safe(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.evaluate_failures = [
+            RuntimeError(
+                "Storage failed at "
+                "https://example.com/store?token=secret-token#session "
+                "Authorization: Bearer secret-token"
+            ),
+            RuntimeError(
+                "Lifecycle failed with api_key=secret-token and password=secret"
+            ),
+        ]
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="action-trace",
+            target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+            payload={
+                "action": "click",
+                "include_network": False,
+                "stabilize_ms": 0,
+            },
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        trace = result.value["result"]
+        storage_errors = trace["storage"]["errors"]
+        lifecycle_errors = trace["lifecycle"]["errors"]
+        self.assertEqual(storage_errors[0]["source"], "storage-snapshot")
+        self.assertEqual(lifecycle_errors[0]["source"], "lifecycle-snapshot")
+        rendered_errors = " ".join(
+            error["message"] for error in [*storage_errors, *lifecycle_errors]
+        )
+        self.assertIn("https://example.com/store?[redacted]", rendered_errors)
+        self.assertIn("Authorization: [redacted]", rendered_errors)
+        self.assertIn("api_key=[redacted]", rendered_errors)
+        self.assertIn("password=[redacted]", rendered_errors)
+        self.assertNotIn("secret-token", rendered_errors)
+        self.assertNotIn("#session", rendered_errors)
+
     def test_action_trace_reports_action_error_without_losing_after_state(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
         page.click_failures["#submit"] = [RuntimeError("detached")]

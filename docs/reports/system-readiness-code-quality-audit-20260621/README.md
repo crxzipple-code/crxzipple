@@ -33,13 +33,13 @@ Module scale from `src/crxzipple/modules`:
 | operations | 82 | 42698 | high |
 | browser | 118 | 33860 | high |
 | orchestration | 140 | 31602 | very high |
-| tool | 131 | 27614 | very high |
+| tool | 207 | 29598 | very high |
 | llm | 109 | 18519 | very high |
 | access | 72 | 13935 | medium |
-| skills | 52 | 11185 | medium-high |
+| skills | 74 | 11925 | medium-high |
 | context_workspace | 57 | 9446 | medium-high |
 | channels | 43 | 9150 | medium |
-| settings | 69 | 9322 | medium |
+| settings | 84 | 9600 | medium |
 | workbench | 27 | 7169 | high projection coupling |
 | memory | 35 | 6468 | medium |
 | session | 34 | 5151 | medium |
@@ -63,7 +63,8 @@ Largest hotspots observed in the initial audit baseline:
 - `operations/interfaces/http.py`: 2033 lines
 - `operations/interfaces/http_models.py`: 1999 lines
 - `operations/application/read_models/skills.py`: 1905 lines
-- `tool/infrastructure/tool_packages.py`: 1857 lines baseline; now 589 after OpenAPI/access, manifest value, tool declaration, provider backend, and activation helper split
+- `tool/infrastructure/tool_packages.py`: 1857 lines baseline; now 52-line export surface after OpenAPI/access parsing, manifest values, tool declarations, provider backend parsing, namespace compatibility models, manifest discovery/loading, and activation/apply policy were split out
+- `tool/infrastructure/tool_package_access.py`: now 18-line export surface after OpenAPI provider manifest parsing and local package credential requirement parsing were split out
 - `orchestration/domain/entities.py`: 1804 lines baseline; now 17-line export surface after execution, run, ingress, executor-lease, and payload-helper split
 - `browser/infrastructure/script_insight.py`: 1712 lines baseline; now 668 after runtime expression, payload coercion, and source-analysis helper split
 - `browser/infrastructure/action_engine_scripts.py`: 1603 lines baseline; now 59-line export surface after marker/expression-family split
@@ -75,10 +76,19 @@ Largest hotspots observed in the initial audit baseline:
 - `browser/interfaces/cli.py`: 929 lines baseline; now 36-line Typer composition root after command group/helper split
 - `browser/interfaces/profile_payloads.py`: 667 lines baseline; now 23-line export surface after diagnostics/entry/aggregate payload split
 - `operations/application/read_models/orchestration.py`: 1597 lines baseline; now 574 after status/failure/metric/action/runtime-fact split
-- `tool/infrastructure/persistence/repositories.py`: 1553 lines baseline; now 33-line export surface after source/function/provider/surface/runtime repository split
+- `tool/infrastructure/persistence/repositories.py`: 1553 lines baseline; now 39-line export surface after source/function/provider/surface/runtime repository split
 - `tool/domain/entities.py`: 1147 lines baseline; now 61-line export surface after catalog/runtime entity and normalization split
 - `tool/application/catalog_models.py`: 943 lines baseline; now 37-line export surface after catalog type/helper/function/source model split
-- `tool/application/worker_service.py`: 1713 lines baseline; now 659-line worker coordinator after run-loop, run-resolution, execution, completion, recovery, assignment, wakeup, heartbeat, tracking, artifact, validation, error, and ToolRun persistence helpers were split out; `app/assembly/tool.py` is now a 536-line composition surface after service-graph adapters moved to `app/assembly/tool_service_graph.py`
+- `tool/application/worker_service.py`: 1713 lines baseline; now 503-line worker coordinator after run-loop, run-resolution, execution, completion, recovery, assignment, in-flight management, wakeup, heartbeat, tracking, admin/control, artifact, validation, error, and ToolRun persistence helpers were split out; `app/assembly/tool.py` is now a 466-line composition surface after service-graph adapters moved to `app/assembly/tool_service_graph.py` and runtime infrastructure construction moved to `app/assembly/tool_runtime_infrastructure.py`
+- `tool/application/submission_service.py`: now 203-line submission entrypoint after catalog/access/runtime preparation, ToolRun/dispatch construction, and execution context/id helpers were split out
+- `tool/application/settings_integration.py`: now 76-line Settings bootstrap entrypoint after config value lookup, OpenAPI credential binding validation, and provider settings projection were split out
+- `tool/application/surface.py`: now 180-line ToolSurface query service/export surface after ToolSurface DTOs and source/function/group projection policy were split out
+- `tool/application/tool_result_artifacts.py`: now 117-line result artifact entrypoint after raw-output/large-text/inline attachment externalization and artifact envelope merge policy were split out
+- `tool/application/provider_backend_service.py`: now 28-line export surface after provider backend DTOs, policy parsing, resolution, readiness, and execution-context payload projection were split out
+- `tool/application/service_support.py`: now 39-line application support export surface after service contracts, ToolFunction projection, credential requirement payload restoration, and attachment decoding were split out
+- `tool/application/catalog_function_models.py`: now 19-line export surface after function candidates, provider-backend candidates, catalog record lifecycle, and schema hash construction were split out
+- `tool/infrastructure/discovery/openapi.py`: 814 lines baseline; now 57-line discovery provider entrypoint after operation models, document parser, schema projection, security parsing, and Access requirement projection were split out
+- `tool/infrastructure/mcp_client.py`: now 40-line builder/export surface after HTTP transport, protocol validation, stdio facade, and stdio sync/async process lifecycles were split out
 - `tool/interfaces/http.py`: 1106 lines baseline; now 494-line route surface after Pydantic HTTP models and payload projection helpers were split to `http_models.py` and `http_payloads.py`
 
 ## Cross-Cutting Findings
@@ -144,6 +154,7 @@ Recommendation:
 
 Backlog and execution planning:
 
+- [module audit summary 2026-06-26](module-audit-summary-20260626.md)
 - [remediation backlog](remediation-backlog.md)
 - [module boundary dependency matrix](module-boundary-dependency-matrix.md)
 - [hotspot file audit pass 2](hotspot-file-audit-pass2.md)
@@ -155,7 +166,7 @@ Detailed review status:
 | --- | --- | --- |
 | operations | Detailed pass 1 complete | Projection bloat and HTTP surface risk documented |
 | orchestration | Detailed pass 1 remediation in progress | Lifecycle coordinator, worker CLI, benchmark runtime, executor benchmark command registration, engine model/helper/outcome split, execution-chain repository, coordinator payload-helper split, waiting approval recovery split, engine session tool-result projection split, run queue/session/worker/terminal lifecycle mixins, maintenance context-budget/compaction/classification split, and runtime request draft model/session/payload split covered; remaining tool-wait recovery breadth and long-chain invariants remain the main hotspots |
-| tool | Detailed pass 1 remediation in progress | Worker/source/run-loop/run-resolution split covered; Tool package facade remediated; Tool persistence repository facade remediated; Tool domain entity, catalog model, and HTTP models/payload projection split |
+| tool | Detailed pass 1 remediation in progress | Worker/source/run-loop/run-resolution split covered; Tool package facade/access/manifest-loader/apply-policy helpers remediated; Tool submission preparation/run-creation split covered; Tool provider backend service split; Tool result artifact externalization/envelope split covered; ToolSurface DTO/projection split covered; Tool persistence repository facade remediated; Tool domain entity, catalog model, application service-support, HTTP models/payload projection, OpenAPI discovery/parser/schema/security/access, OpenAPI remote runtime, MCP protocol/HTTP/stdio-lifecycle, CLI source config, and configured-provider catalog splits covered |
 | llm | Detailed pass 1 complete | Provider adapter/request rendering risks documented |
 | session | Detailed pass 1 complete | Replay/window/service split risks documented; query/read window construction split into `SessionQueryReader` |
 | context_workspace | Detailed pass 1 complete | Context control/render snapshot risks documented; workspace/tree/snapshot/slice services split behind a thin export surface |
@@ -163,10 +174,10 @@ Detailed review status:
 | browser | Detailed pass 1 complete | Action engine/runtime split risks documented; execution lifecycle, primitive page actions, and locator/ref resolution are split from the action-engine dependency assembly |
 | channels | Detailed pass 1 complete | Runtime transport/submission split and delivery lifecycle risks documented; profile, interaction, and runtime-registry services split behind a thin export surface |
 | memory | Detailed pass 1 complete | Storage/index/runtime retrieval risks documented |
-| skills | Detailed pass 1 complete | Package/catalog/runtime resolution risks documented |
+| skills | Detailed pass 1 complete | Package/catalog/runtime resolution risks documented; HTTP DTO implementation is split by skill/readiness, draft, and source/install/sync concerns behind a 75-line export surface; HTTP routes are split by the same concerns behind a 20-line composition entrypoint; CLI source, draft query/authoring/lifecycle, and top-level query/mutation commands are split behind 21-line and 24-line composition entrypoints; filesystem package mutation helpers, authoring owner-state IO, owner catalog snapshot reconciliation, package/source observation, source projection, manager service graph construction, and persistence catalog/draft/payload mapper families are split from use-case coordination |
 | access | Detailed pass 1 complete | Credential/OAuth/readiness boundary risks documented |
 | authorization | Detailed pass 1 complete | Grant state-machine, audit redaction, HTTP DTO/payload/service/agent-grant/policy-handler/decision-route split, agent-managed policy helper split, tool execution authorization helper split, policy impact helper split, temporary grant helper/use-case split, decision use-case split, audit record helper split, audit redaction helper split, policy lifecycle split, public service facade split, agent grant/revoke coordinator split, and persistence mapper split covered |
-| settings | Detailed pass 1 remediation in progress | Governance truth-source and HTTP bulk risks documented; HTTP action models/helpers/responses/execution/mutation/validation helpers are split; setup resource collection/import/seed/result helpers, database URL summary, Access bootstrap resources, core bootstrap resource collectors, service bundle construction, action result helpers, resource definition/publication/action helpers, override action helper, action-audit helper, resource-versioning helper, effective resolution, query service, and shared service helpers are split; Settings domain aggregates are split behind an 18-line `domain/entities.py` export surface; materialization payload/profile/tool/access normalization is split from the effective config materializer; persistence record DTOs, SQLAlchemy model/record mappers, domain/repository mappers, and resource/version/override/snapshot/audit repository families are split from repository query classes; service-layer audit redaction now delegates to shared Settings redaction helper; application service/setup hotspots are reduced to facades |
+| settings | Detailed pass 1 remediation in progress | Governance truth-source and HTTP bulk risks documented; HTTP action models/helpers/responses/execution/mutation/validation helpers are split; setup resource collection/import/seed/result helpers, database URL summary, Access bootstrap resources, core bootstrap resource collectors, service bundle construction, action result helpers, resource definition/publication/action helpers, override action helper, action-audit helper, resource-versioning helper, effective resolution, query service, and shared service helpers are split; Settings domain aggregates are split behind an 18-line `domain/entities.py` export surface; materialization payload/profile/tool/access normalization is split from the effective config materializer; persistence record DTOs, SQLAlchemy model/record mappers, domain/repository mappers, resource/version/override/snapshot/audit domain repository families, and record-level governance/action-audit SQL repositories are split from mixed repository query classes; service-layer audit redaction now delegates to shared Settings redaction helper; application service/setup hotspots are reduced to facades |
 | agent | Detailed pass 1 complete | Profile/home/context handoff risks documented; HTTP profile/home route split, request model/request mapper/response/service/error helper split, CLI payload and command split, profile sync/state CLI command split, profile factory/update helper, profile lifecycle use-case split, resolution response, application DTO/event payload, home runtime rule, home registry/config/file operations helper, home use-case orchestration split, Settings import rule, resolution DTO/helper split, source-specific resolution split, domain value-object split, and home-config IO/payload split covered |
 | events | Detailed pass 1 complete | Backend mode and contract neutrality risks documented |
 | dispatch | Detailed pass 1 complete | Queue/claim/lease concurrency risks documented |

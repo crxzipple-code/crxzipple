@@ -67,8 +67,14 @@ class _ConflictingCdpControl(_DummyCdpControl):
 
 
 class _FailingCdpControl:
-    def __init__(self, message: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        executable_message: str = "No browser executable found.",
+    ) -> None:
         self._message = message
+        self._executable_message = executable_message
 
     def _request_cdp_json(self, **kwargs):  # noqa: ANN003, ANN201
         del kwargs
@@ -80,7 +86,7 @@ class _FailingCdpControl:
 
     def _resolve_executable_path(self, **kwargs):  # noqa: ANN003, ANN201
         del kwargs
-        raise BrowserValidationError("No browser executable found.")
+        raise BrowserValidationError(self._executable_message)
 
     def _find_matching_managed_process(self, **kwargs):  # noqa: ANN003, ANN201
         del kwargs
@@ -144,7 +150,10 @@ class BrowserProfileProbeTestCase(unittest.TestCase):
 
     def test_existing_session_probe_reports_unreachable_cdp(self) -> None:
         service = BrowserProfileProbeService(
-            cdp_control=_FailingCdpControl("CDP endpoint did not respond."),  # type: ignore[arg-type]
+            cdp_control=_FailingCdpControl(
+                "CDP endpoint did not respond at "
+                "https://example.com/cdp?token=secret-token#frag"
+            ),  # type: ignore[arg-type]
         )
 
         payload = service.probe(
@@ -157,10 +166,19 @@ class BrowserProfileProbeTestCase(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "cdp-unreachable")
         self.assertIn("CDP endpoint did not respond", payload["message"])
+        self.assertIn("https://example.com/cdp?[redacted]", payload["message"])
+        self.assertNotIn("secret-token", payload["message"])
+        self.assertNotIn("#frag", payload["message"])
 
     def test_managed_profile_probe_reports_launchable_when_cdp_is_down(self) -> None:
         service = BrowserProfileProbeService(
-            cdp_control=_FailingCdpControl("CDP endpoint did not respond."),  # type: ignore[arg-type]
+            cdp_control=_FailingCdpControl(
+                "CDP endpoint did not respond.",
+                executable_message=(
+                    "No browser executable found at "
+                    "https://example.com/download?token=secret-token#frag"
+                ),
+            ),  # type: ignore[arg-type]
         )
 
         payload = service.probe(
@@ -173,12 +191,19 @@ class BrowserProfileProbeTestCase(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "unlaunchable")
         self.assertIn("No browser executable found", payload["message"])
+        self.assertIn("https://example.com/download?[redacted]", payload["message"])
+        self.assertNotIn("secret-token", payload["message"])
+        self.assertNotIn("#frag", payload["message"])
 
     def test_cdp_probe_reports_when_playwright_attach_fails(self) -> None:
         service = BrowserProfileProbeService(
             cdp_control=_DummyCdpControl(),  # type: ignore[arg-type]
             playwright_probe=lambda **kwargs: (_ for _ in ()).throw(
-                BrowserValidationError("Playwright could not connect over CDP to 'http://127.0.0.1:18800'"),
+                BrowserValidationError(
+                    "Playwright could not connect over CDP to "
+                    "'https://example.com/cdp?token=secret-token#frag' "
+                    "Authorization: Bearer secret-token"
+                ),
             ),
         )
 
@@ -193,6 +218,10 @@ class BrowserProfileProbeTestCase(unittest.TestCase):
         self.assertEqual(payload["status"], "cdp-playwright-unreachable")
         self.assertIn("Retry or reset this managed profile", payload["message"])
         self.assertIn("Playwright could not connect over CDP", payload["raw_message"])
+        self.assertIn("https://example.com/cdp?[redacted]", payload["raw_message"])
+        self.assertIn("Authorization: [redacted]", payload["raw_message"])
+        self.assertNotIn("secret-token", payload["raw_message"])
+        self.assertNotIn("#frag", payload["raw_message"])
 
     def test_managed_profile_probe_reports_cdp_profile_mismatch(self) -> None:
         service = BrowserProfileProbeService(

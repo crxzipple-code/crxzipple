@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from crxzipple.modules.browser.domain import BrowserValidationError
 
 from .devtools import BrowserDevToolsAdapter
+from .error_projection import display_safe_exception_message
 from .script_insight_payloads import (
     json_safe_payload as _json_safe_payload,
     payload_bool_any as _payload_bool_any,
@@ -263,7 +264,12 @@ def _script_find_request_action(
                     )
                 )
         except BrowserValidationError as exc:
-            errors.append({"script_id": script_id, "message": str(exc)})
+            errors.append(
+                {
+                    "script_id": script_id,
+                    "message": display_safe_exception_message(exc),
+                }
+            )
         if not matches:
             continue
         total_matches += len(matches)
@@ -388,7 +394,12 @@ def _code_search_action(
                     )
                 )
         except BrowserValidationError as exc:
-            errors.append({"script_id": script_id, "message": str(exc)})
+            errors.append(
+                {
+                    "script_id": script_id,
+                    "message": display_safe_exception_message(exc),
+                }
+            )
         if not matches:
             continue
         total_matches += len(matches)

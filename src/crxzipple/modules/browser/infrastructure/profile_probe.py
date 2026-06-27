@@ -16,6 +16,7 @@ from crxzipple.modules.browser.domain import (
 
 from .engines import CdpControlEngine
 from .engines_cdp_io import has_expected_remote_allow_origins
+from .error_projection import display_safe_exception_message
 
 
 def _probe_launch_policy(
@@ -117,7 +118,7 @@ class BrowserProfileProbeService:
                             "CDP endpoint responded, but Playwright could not attach. "
                             "Retry or reset this managed profile."
                         ),
-                        "raw_message": str(exc),
+                        "raw_message": display_safe_exception_message(exc),
                         "cdp_base_url": base_url,
                         "browser_ref": browser_ref,
                         "tab_count": len(tabs),
@@ -146,7 +147,7 @@ class BrowserProfileProbeService:
                         if "requires a configured CDP URL or port" in message
                         else "cdp-unreachable"
                     ),
-                    "message": message,
+                    "message": display_safe_exception_message(exc),
                 }
 
         executable_path = None
@@ -154,7 +155,7 @@ class BrowserProfileProbeService:
         try:
             executable_path = self.cdp_control._resolve_executable_path(plan=plan)  # noqa: SLF001
         except BrowserValidationError as exc:
-            executable_error = str(exc)
+            executable_error = display_safe_exception_message(exc)
         matching_process = self.cdp_control._find_matching_managed_process(plan=plan)  # noqa: SLF001
         port_process = self.cdp_control._find_process_for_cdp_port(plan=plan)  # noqa: SLF001
         user_data_dir = self.cdp_control._try_resolve_user_data_dir(plan=plan)  # noqa: SLF001

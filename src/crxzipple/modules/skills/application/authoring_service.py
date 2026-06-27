@@ -27,10 +27,15 @@ from crxzipple.modules.skills.application.exceptions import (
     SkillCapabilityUnavailableError,
 )
 from crxzipple.modules.skills.application.authoring_conversions import (
-    create_request_from_draft,
     merged_requirements,
     resolve_draft_skill_name,
-    update_request_from_draft,
+)
+from crxzipple.modules.skills.application.authoring_owner_state import (
+    apply_draft_to_owner,
+    current_fingerprint,
+    current_instructions,
+    current_package,
+    current_support_file,
 )
 from crxzipple.modules.skills.application.authoring_readiness import (
     draft_requirement_readiness,
@@ -52,8 +57,6 @@ from crxzipple.modules.skills.application.models import (
     SkillDraftStatus,
     SkillDraftUpdateRequest,
     SkillDraftValidation,
-    SkillMutationResult,
-    SkillPackage,
 )
 from crxzipple.modules.skills.application.package_service import SkillPackageService
 from crxzipple.modules.skills.application.ports import (
@@ -84,7 +87,8 @@ class SkillAuthoringService:
         repository = self._repository()
         now = utc_now()
         skill_name = resolve_draft_skill_name(request.skill_name, request.manifest)
-        base_fingerprint = request.base_fingerprint or self._current_fingerprint(
+        base_fingerprint = request.base_fingerprint or current_fingerprint(
+            self.package_service,
             workspace_dir=request.workspace_dir,
             skill_name=skill_name,
         )
@@ -359,7 +363,8 @@ class SkillAuthoringService:
             assert_apply_target(
                 draft,
                 current_package=(
-                    self._current_package(
+                    current_package(
+                        self.package_service,
                         workspace_dir=draft.workspace_dir,
                         skill_name=draft.skill_name,
                     )
@@ -367,7 +372,7 @@ class SkillAuthoringService:
                     else None
                 ),
             )
-            result = self._apply_to_owner(draft)
+            result = apply_draft_to_owner(self.package_service, draft)
             applied = applied_draft(
                 draft,
                 validation=validation,
@@ -408,27 +413,9 @@ class SkillAuthoringService:
         )
         return saved
 
-    def _apply_to_owner(self, draft: SkillDraft) -> SkillMutationResult:
-        if draft.intent is SkillDraftIntent.CREATE:
-            result = self.package_service.create(create_request_from_draft(draft))
-        else:
-            result = self.package_service.update(update_request_from_draft(draft))
-            result = self.package_service.write_instructions(
-                workspace_dir=draft.workspace_dir,
-                skill_name=draft.skill_name,
-                content=draft.instructions_body,
-            )
-        for item in draft.support_files:
-            result = self.package_service.write_file(
-                workspace_dir=draft.workspace_dir,
-                skill_name=draft.skill_name,
-                path=item.path,
-                content=item.content,
-            )
-        return result
-
     def _validate(self, draft: SkillDraft) -> SkillDraftValidation:
-        existing = self._current_package(
+        existing = current_package(
+            self.package_service,
             workspace_dir=draft.workspace_dir,
             skill_name=draft.skill_name,
         )
@@ -446,14 +433,19 @@ class SkillAuthoringService:
         current = (
             None
             if draft.intent is SkillDraftIntent.CREATE
-            else self._current_package(
+            else current_package(
+                self.package_service,
                 workspace_dir=draft.workspace_dir,
                 skill_name=draft.skill_name,
             )
         )
         current_support_files = (
             {
-                item.path: self._current_support_file(draft, item.path)
+                item.path: current_support_file(
+                    self.package_service,
+                    draft,
+                    item.path,
+                )
                 for item in draft.support_files
             }
             if current is not None
@@ -463,62 +455,12 @@ class SkillAuthoringService:
             draft,
             current=current,
             current_instructions=(
-                self._current_instructions(draft) if current is not None else ""
+                current_instructions(self.package_service, draft)
+                if current is not None
+                else ""
             ),
             current_support_files=current_support_files,
         )
-
-    def _current_package(
-        self,
-        *,
-        workspace_dir: str | None,
-        skill_name: str,
-    ) -> SkillPackage | None:
-        try:
-            return self.package_service.catalog_service.get(
-                workspace_dir=workspace_dir,
-                skill_name=skill_name,
-                surface="",
-                include_disabled=True,
-            )
-        except SkillNotFoundError:
-            return None
-
-    def _current_fingerprint(
-        self,
-        *,
-        workspace_dir: str | None,
-        skill_name: str,
-    ) -> str | None:
-        current = self._current_package(
-            workspace_dir=workspace_dir,
-            skill_name=skill_name,
-        )
-        return current.fingerprint if current is not None else None
-
-    def _current_instructions(self, draft: SkillDraft) -> str:
-        try:
-            return self.package_service.read(
-                workspace_dir=draft.workspace_dir,
-                skill_name=draft.skill_name,
-                path=None,
-                surface="",
-            ).content
-        except SkillNotFoundError:
-            return ""
-
-    def _current_support_file(self, draft: SkillDraft, path: str) -> str:
-        try:
-            return self.package_service.read(
-                workspace_dir=draft.workspace_dir,
-                skill_name=draft.skill_name,
-                path=path,
-                surface="",
-            ).content
-        except SkillValidationError:
-            return ""
-        except SkillNotFoundError:
-            return ""
 
     def _repository(self) -> SkillAuthoringDraftRepositoryPort:
         if self.draft_repository is None:

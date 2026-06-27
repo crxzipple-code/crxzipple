@@ -18,7 +18,7 @@ from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.infrastructure.tool_package_access import (
     parse_credential_requirement_sets,
 )
-from crxzipple.modules.tool.infrastructure.tool_package_manifest_values import (
+from crxzipple.modules.tool.infrastructure.tool_package_manifest_parsers import (
     optional_manifest_text,
     optional_mapping_payload,
     parse_enum,
@@ -26,6 +26,8 @@ from crxzipple.modules.tool.infrastructure.tool_package_manifest_values import (
     parse_string_list,
     parse_string_sets,
     required_string,
+)
+from crxzipple.modules.tool.infrastructure.tool_package_manifest_values import (
     runtime_requirement_sets,
 )
 

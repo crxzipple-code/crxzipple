@@ -17,7 +17,8 @@ from crxzipple.modules.browser.application.events import (
 from crxzipple.modules.browser.domain import BrowserValidationError
 from crxzipple.modules.browser.domain.value_objects import _normalize_optional_text
 
-from .cdp_sessions import BrowserCdpSessionBroker
+from .cdp_sessions import BrowserCdpSessionBroker, display_safe_cdp_error
+from .error_projection import display_safe_exception_message
 
 _DIAGNOSTIC_KINDS = frozenset(
     {
@@ -233,7 +234,15 @@ class BrowserDiagnosticsService:
                 raw_metrics = _send_cdp_session_command(session, "Performance.getMetrics", {})
                 metrics = _json_safe(raw_metrics) if isinstance(raw_metrics, dict) else {}
             except Exception as exc:  # noqa: BLE001
-                errors.append({"source": "Performance.getMetrics", "message": str(exc)})
+                errors.append(
+                    {
+                        "source": "Performance.getMetrics",
+                        "message": display_safe_cdp_error(
+                            exc,
+                            operation="Performance.getMetrics",
+                        ),
+                    }
+                )
         finally:
             _detach_cdp_session(session)
         if include_entries:
@@ -241,7 +250,12 @@ class BrowserDiagnosticsService:
                 raw_entries = page.evaluate(_PERFORMANCE_ENTRY_EXPRESSION)
                 entries = _json_safe(raw_entries) if isinstance(raw_entries, dict) else {}
             except Exception as exc:  # noqa: BLE001
-                errors.append({"source": "performance.entries", "message": str(exc)})
+                errors.append(
+                    {
+                        "source": "performance.entries",
+                        "message": display_safe_exception_message(exc, limit=512),
+                    }
+                )
         return {
             "metrics": metrics,
             "entries": entries,
@@ -255,7 +269,12 @@ class BrowserDiagnosticsService:
             raw_lifecycle = page.evaluate(_PAGE_LIFECYCLE_EXPRESSION)
             lifecycle = _json_safe(raw_lifecycle) if isinstance(raw_lifecycle, dict) else {}
         except Exception as exc:  # noqa: BLE001
-            errors.append({"source": "page.lifecycle", "message": str(exc)})
+            errors.append(
+                {
+                    "source": "page.lifecycle",
+                    "message": display_safe_exception_message(exc, limit=512),
+                }
+            )
         session = _new_page_cdp_session(page)
         try:
             try:
@@ -263,7 +282,15 @@ class BrowserDiagnosticsService:
                 if isinstance(history, dict):
                     lifecycle["navigation_history"] = _json_safe(history)
             except Exception as exc:  # noqa: BLE001
-                errors.append({"source": "Page.getNavigationHistory", "message": str(exc)})
+                errors.append(
+                    {
+                        "source": "Page.getNavigationHistory",
+                        "message": display_safe_cdp_error(
+                            exc,
+                            operation="Page.getNavigationHistory",
+                        ),
+                    }
+                )
         finally:
             _detach_cdp_session(session)
         return {

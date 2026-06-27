@@ -5,7 +5,8 @@ from typing import Any, Mapping
 
 from crxzipple.modules.browser.domain import BrowserValidationError
 
-from .cdp_sessions import BrowserCdpSessionBroker
+from .cdp_sessions import BrowserCdpSessionBroker, display_safe_cdp_error
+from .error_projection import display_safe_exception_message
 
 CDP_RESOURCE_SAMPLE_LIMIT = 25
 CDP_FRAME_SAMPLE_LIMIT = 8
@@ -114,7 +115,7 @@ class BrowserNetworkInsightService:
             errors.append(
                 {
                     "source": "performance_entries",
-                    "message": str(exc),
+                    "message": display_safe_exception_message(exc, limit=512),
                 }
             )
 
@@ -141,7 +142,10 @@ class BrowserNetworkInsightService:
                         errors.append(
                             {
                                 "source": "Performance.getMetrics",
-                                "message": str(exc),
+                                "message": display_safe_cdp_error(
+                                    exc,
+                                    operation="Performance.getMetrics",
+                                ),
                             }
                         )
                 if include_cdp_tree:
@@ -158,14 +162,20 @@ class BrowserNetworkInsightService:
                         errors.append(
                             {
                                 "source": "Page.getResourceTree",
-                                "message": str(exc),
+                                "message": display_safe_cdp_error(
+                                    exc,
+                                    operation="Page.getResourceTree",
+                                ),
                             }
                         )
             except Exception as exc:  # pragma: no cover - CDP support varies by target
                 errors.append(
                     {
                         "source": "cdp_session",
-                        "message": str(exc),
+                        "message": display_safe_cdp_error(
+                            exc,
+                            operation="open session",
+                        ),
                     }
                 )
             finally:

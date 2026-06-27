@@ -5,18 +5,20 @@ from sqlalchemy import select
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.settings.domain.entities import SettingsResource
 from crxzipple.modules.settings.domain.exceptions import SettingsAlreadyExistsError
-from crxzipple.modules.settings.infrastructure.persistence.domain_repository_mappers import (
-    _resource_from_record,
-    _resource_record_from_domain,
+from crxzipple.modules.settings.infrastructure.persistence.domain_resource_mappers import (
+    resource_from_record,
+    resource_record_from_domain,
 )
 from crxzipple.modules.settings.infrastructure.persistence.models import (
     SettingsResourceModel,
 )
-from crxzipple.modules.settings.infrastructure.persistence.repository_mappers import (
+from crxzipple.modules.settings.infrastructure.persistence.repository_resource_mappers import (
     _apply_resource,
-    _required_text,
     _resource_model,
     _resource_record,
+)
+from crxzipple.modules.settings.infrastructure.persistence.repository_values import (
+    _required_text,
 )
 
 
@@ -30,16 +32,16 @@ class SqlAlchemySettingsResourceRepository:
                 f"settings resource '{resource.id}' already exists.",
             )
         with self._session_factory() as session:
-            session.add(_resource_model(_resource_record_from_domain(resource)))
+            session.add(_resource_model(resource_record_from_domain(resource)))
             session.commit()
 
     def save(self, resource: SettingsResource) -> None:
         with self._session_factory() as session:
             model = session.get(SettingsResourceModel, resource.id)
             if model is None:
-                session.add(_resource_model(_resource_record_from_domain(resource)))
+                session.add(_resource_model(resource_record_from_domain(resource)))
             else:
-                _apply_resource(model, _resource_record_from_domain(resource))
+                _apply_resource(model, resource_record_from_domain(resource))
             session.commit()
 
     def get(self, resource_id: str) -> SettingsResource | None:
@@ -50,7 +52,7 @@ class SqlAlchemySettingsResourceRepository:
             )
             if model is None:
                 return None
-            return _resource_from_record(_resource_record(model))
+            return resource_from_record(_resource_record(model))
 
     def list(
         self,
@@ -69,7 +71,7 @@ class SqlAlchemySettingsResourceRepository:
                     == _required_text(resource_kind, "resource kind"),
                 )
             resources = tuple(
-                _resource_from_record(_resource_record(model))
+                resource_from_record(_resource_record(model))
                 for model in session.scalars(statement)
             )
         if owner_module is not None:

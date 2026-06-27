@@ -18,7 +18,7 @@ This pass drills into the largest and highest-risk files identified by the modul
 | `operations/application/read_models/browser.py` | 251 | remediated | Thin Browser Operations facade after page models, shared runtime/proxy helpers, event row projection, profile/pool/allocation/page/daemon row projection, table sections, and health/metric/action sections split |
 | `operations/application/read_models/memory.py` | 203 | remediated | Thin Memory Operations facade after page models, shared status/format helpers, event collection/projection, context record/query helpers, health/chart/actions, table projection, and file detail projection split |
 | `operations/application/read_models/access.py` | 211 | remediated | Thin Access Operations facade after page models, shared target/status helpers, inventory collection/filtering, access event collection, health/chart/actions, table projection, and target detail projection split |
-| `tool/infrastructure/tool_packages.py` | 589 | remediated | Thin package facade after OpenAPI/access parsing, common manifest value parsing, local tool declaration mapping, provider backend parsing, and activation helper split |
+| `tool/infrastructure/tool_packages.py` | 52 | remediated | Thin package export surface after OpenAPI/access parsing, manifest values, local tool declaration mapping, provider backend parsing, namespace model, manifest loader, and activation/apply policy split |
 | `orchestration/domain/entities.py` | 17 | remediated | Thin entity export surface after execution, run, ingress, executor-lease, and payload-helper split |
 | `browser/infrastructure/script_insight.py` | 668 | remediated | Browser script insight action facade after runtime expression, payload coercion, and source-analysis split |
 | `browser/infrastructure/action_engine_scripts.py` | 59 | remediated | Thin expression export surface after marker, snapshot, bulk-selection, overlay/picker, target/text script split |
@@ -31,7 +31,7 @@ This pass drills into the largest and highest-risk files identified by the modul
 | `browser/interfaces/cli.py` | 36 | remediated | Thin Typer composition root after profile, pool, allocation, host, action, and helper command split |
 | `browser/application/observation.py` | 354 | remediated | Browser observation service entrypoint after value, page/snapshot, runtime/code/network, interaction/guidance, and final projection split |
 | `operations/application/read_models/orchestration.py` | 574 | remediated | Public facade after Orchestration Operations status/failure/metric/action/runtime-fact split |
-| `tool/infrastructure/persistence/repositories.py` | 33 | remediated | Thin export surface after source, function/catalog, provider backend, surface, runtime, and payload mapper split |
+| `tool/infrastructure/persistence/repositories.py` | 39 | remediated | Thin export surface after source, function/catalog, provider backend, surface, runtime, and payload mapper split |
 | `channels/interfaces/http.py` | 322 | remediated | Thin route composition surface after DTO/helper/Lark/Webhook/Web/dead-letter route split |
 | `channels/application/lark_runtime_submission.py` | 317 | remediated | Focused Lark message-to-run submission service |
 | `operations/application/read_models/llm.py` | 460 | remediated | Public facade after LLM Operations model/run-context/detail split |
@@ -194,17 +194,21 @@ Files:
 
 Current `worker_service.py` clusters:
 
-- worker registration/staleness
 - assignment reconciliation
-- worker loop and async scheduling
-- assignment launching/reaping
-- run heartbeat
+- worker loop callback facade
 - prepared runtime execution
 - result completion
-- artifact externalization
-- validation
 - recovery/failure/retry
 - runtime registry snapshot
+
+Recently extracted worker clusters:
+
+- worker registration/staleness/list/prune administration lives in
+  `tool/application/worker_admin.py`
+- cancellation and recovered-dispatch control live in
+  `tool/application/worker_run_control.py`
+- in-flight launch/reap/failover/heartbeat and runnable-run selection live in
+  `tool/application/worker_inflight.py`
 
 Current `source_service.py` clusters:
 
@@ -231,9 +235,7 @@ Current `cli_source.py` clusters:
 
 Current `tool_packages.py` clusters:
 
-- namespace/package manifest orchestration
-- local/runtime/openapi binding selection
-- activation registration dispatch
+- public package exports only
 
 Current remediation status:
 
@@ -249,16 +251,28 @@ Current remediation status:
 - Provider backend plan parsing now lives in `tool_package_provider_backends.py`.
 - Handler/runtime entrypoint resolution, typed dependency injection, and activation
   construction now live in `tool_package_activation.py`.
-- `tool_packages.py` is now a package-load/apply facade; remaining Tool hotspots
-  are persistence repositories and any future package facade growth.
+- Namespace compatibility properties now live in `tool_package_models.py`.
+- Package manifest discovery/loading now lives in
+  `tool_package_manifest_loader.py`.
+- Package activation resolution, duplicate validation, and registry application now
+  live in `tool_package_apply.py`.
+- `tool_packages.py` is now a package export surface; the next package-area hotspot
+  is `tool_package_apply.py` if activation policy grows further.
+- `catalog_function_models.py` is now a function-catalog export surface; candidate
+  normalization, provider-backend candidate normalization, catalog record lifecycle,
+  and schema-hash construction live in focused application modules.
 - Tool persistence generic payload mapping now lives in
   `persistence/repository_payloads.py`; Tool Surface payload restoration now lives in
   `persistence/repository_surface_payloads.py`; Tool Surface persistence now lives in
   `persistence/surface_repository.py`; Tool source and discovery-run persistence now
   lives in `persistence/source_repositories.py`; Tool function and catalog-record
-  persistence now lives in `persistence/function_repositories.py`; provider backend
-  persistence now lives in `persistence/provider_backend_repository.py`; Tool run,
-  assignment, and worker repositories now live in `persistence/runtime_repositories.py`.
+  persistence now lives in `persistence/function_repository.py` and
+  `persistence/function_catalog_repository.py`; provider backend persistence now
+  lives in `persistence/provider_backend_repository.py`; Tool run,
+  assignment, and worker repositories now live in
+  `persistence/runtime_run_repository.py`,
+  `persistence/runtime_assignment_repository.py`, and
+  `persistence/runtime_worker_repository.py`.
   The public
   `persistence.repositories` module remains the narrow import surface for the
   SQLAlchemy unit of work while the implementation is split by lifecycle cluster.
@@ -687,11 +701,12 @@ Current Access persistence split:
 
 Current Skills filesystem split:
 
-- `skills/infrastructure/filesystem/repository.py` (548 lines): public filesystem repository orchestration, install/create/update/delete/read entrypoints, source root selection.
+- `skills/infrastructure/filesystem/repository.py` (444 lines): public filesystem repository entrypoints, source root selection, and package reload coordination.
 - `skills/infrastructure/filesystem/path_safety.py`: skill root normalization, package path resolution, support-file path normalization, traversal prevention.
 - `skills/infrastructure/filesystem/manifest_parser.py`: SKILL.md frontmatter parsing, legacy manifest parsing, requirement normalization, markdown/frontmatter rendering.
 - `skills/infrastructure/filesystem/package_files.py`: bounded file reads, legacy manifest file reads, resource discovery, fingerprinting.
 - `skills/infrastructure/filesystem/package_loader.py`: root discovery and directory-to-`SkillPackage` loading.
+- `skills/infrastructure/filesystem/package_mutations.py`: writable-package guard, create/update manifest construction, instruction body restoration, and legacy manifest materialization.
 
 Architectural risk:
 
@@ -703,7 +718,7 @@ Target split:
 - `access/application/oauth_account_binding.py`
 - `access/application/oauth_payloads.py`
 - `access/application/oauth_refresh_policy.py`
-- Skills filesystem repository split is complete for this audit wave. Authoring payload/conversion/validation/readiness/apply helpers and draft diff building have also been split out of `application/authoring_service.py`, and draft audit/event side effects have moved to `authoring_observation.py`, reducing it to lifecycle, repository, and package-service coordination. Owner package/source index and readiness projection helpers have been split out of `application/owner_state.py`, reducing it to a coordination service. SQLAlchemy/application record mapping has been split out of `infrastructure/persistence/repositories.py` into `repository_mappers.py`, reducing the repository to a transaction/query shell. HTTP request/response DTOs have moved to `interfaces/http_models.py`, reducing `interfaces/http.py` to a moderate route layer. CLI option parsing and CLI payload projection have moved to `interfaces/cli_options.py` and `interfaces/cli_payloads.py`; Source and Draft command groups have moved to `interfaces/cli_source_commands.py` and `interfaces/cli_draft_commands.py`, reducing `interfaces/cli.py` to a moderate root command layer. Source/skill runtime visibility, Context Workspace runtime-resolution golden coverage, and install/create race normalization are covered. Remaining Skills hardening is no longer a large-file split issue; it is trusted source/provenance policy before broader external installation.
+- Skills filesystem repository split is complete for this audit wave. Filesystem mutation helper rules have moved to `package_mutations.py`, reducing `repository.py` to public entrypoints, root selection, and package reload coordination. Authoring payload/conversion/validation/readiness/apply helpers and draft diff building have also been split out of `application/authoring_service.py`, draft audit/event side effects have moved to `authoring_observation.py`, and current owner reads plus draft-to-owner writes have moved to `authoring_owner_state.py`, reducing it to lifecycle and repository coordination. Package event payloads, install/read/validate observation, installation record writes, and duration measurement have moved to `application/package_observation.py`, while repeated source-sync and successful mutation record calls are private helpers in `application/package_service.py`, reducing that service to package use-case coordination. Source list/app DTO projection has moved to `application/source_projection.py`, source event/install-record observation has moved to `application/source_observation.py`, and source id/root/custom-source validation has moved to `application/source_validation.py`, reducing `application/source_service.py` to source lifecycle coordination. Manager service graph construction and authoring-draft repository capability detection have moved to `application/manager_services.py`, keeping `application/manager.py` as the public facade. Owner package/source index, readiness projection, and catalog snapshot reconciliation helpers have been split out of `application/owner_state.py`, reducing it to a coordination service. SQLAlchemy/application record mapping has been split out of `infrastructure/persistence/repositories.py` into `repository_catalog_mappers.py`, `repository_draft_mappers.py`, and `repository_payloads.py`, retiring the former mixed mapper file and reducing the repository to a transaction/query shell. HTTP request/response DTO implementation is split into `interfaces/http_skill_models.py`, `interfaces/http_draft_models.py`, and `interfaces/http_source_models.py`; `interfaces/http_models.py` remains the 75-line public export surface. HTTP routes are split into `interfaces/http_skill_routes.py`, `interfaces/http_draft_routes.py`, and `interfaces/http_source_routes.py`; `interfaces/http.py` is now a small composition entrypoint. CLI option parsing and CLI payload projection have moved to `interfaces/cli_options.py` and `interfaces/cli_payloads.py`; Source, Draft query, Draft authoring, Draft lifecycle, top-level query, and top-level mutation command groups live in `interfaces/cli_source_commands.py`, `interfaces/cli_draft_query_commands.py`, `interfaces/cli_draft_authoring_commands.py`, `interfaces/cli_draft_lifecycle_commands.py`, `interfaces/cli_skill_query_commands.py`, and `interfaces/cli_skill_mutation_commands.py`; `interfaces/cli.py` and `interfaces/cli_draft_commands.py` are now small composition entrypoints. Source/skill runtime visibility, Context Workspace runtime-resolution golden coverage, and install/create race normalization are covered. Remaining Skills hardening is no longer a large-file split issue; it is trusted source/provenance policy before broader external installation.
 
 Required tests:
 

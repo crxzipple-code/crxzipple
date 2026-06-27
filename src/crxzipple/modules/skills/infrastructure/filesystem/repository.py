@@ -15,30 +15,31 @@ from crxzipple.modules.skills.application.models import (
 )
 from crxzipple.modules.skills.domain import (
     SkillInstallScope,
-    SkillManifest,
     SkillNotFoundError,
     SkillValidationError,
 )
 from crxzipple.modules.skills.infrastructure.filesystem.manifest_parser import (
-    normalize_access_requirement_sequence,
-    normalize_string_sequence,
-    normalize_tool_function_ids,
     render_skill_markdown,
     strip_markdown_frontmatter,
 )
 from crxzipple.modules.skills.infrastructure.filesystem.package_loader import (
     SkillPackageLoader,
 )
+from crxzipple.modules.skills.infrastructure.filesystem.package_mutations import (
+    create_manifest,
+    ensure_writable_package,
+    materialize_current_manifest,
+    read_existing_instruction_body,
+    updated_manifest,
+)
 from crxzipple.modules.skills.infrastructure.filesystem.package_files import (
     DEFAULT_SKILL_RESOURCE_DIRS,
     read_text_file,
 )
 from crxzipple.modules.skills.infrastructure.filesystem.path_safety import (
-    is_within_root,
     normalize_skill_name,
     normalize_skill_root,
     normalize_support_file_path,
-    resolve_instructions_path,
     resolve_package_file_path,
     resolve_skill_directory,
     resolve_workspace_root,
@@ -174,7 +175,11 @@ class FilesystemSkillRepository:
             raise SkillValidationError(
                 f"Target skill '{target_path}' already exists.",
             ) from exc
-        self._materialize_current_manifest(target_path=target_path, manifest=package.manifest)
+        materialize_current_manifest(
+            target_path=target_path,
+            manifest=package.manifest,
+            legacy_manifest_filename=DEFAULT_SKILL_MANIFEST_FILENAME,
+        )
         installed_package = self._loader.load_explicit_skill_dir(
             skill_dir=target_path,
             source=scope.value,
@@ -203,27 +208,7 @@ class FilesystemSkillRepository:
             raise SkillValidationError(
                 f"Target skill '{target_path}' already exists.",
             )
-        manifest = SkillManifest(
-            api_version="skills.crxzipple/v1alpha1",
-            kind="Skill",
-            name=name,
-            description=request.description,
-            version=request.version,
-            tags=request.tags,
-            required_tools=normalize_tool_function_ids(request.required_tools),
-            optional_tools=normalize_tool_function_ids(request.optional_tools),
-            suggested_tools=normalize_tool_function_ids(request.suggested_tools),
-            allowed_tools=normalize_tool_function_ids(request.suggested_tools),
-            required_effects=request.required_effects,
-            required_access=normalize_access_requirement_sequence(
-                request.required_access,
-            ),
-            surfaces=request.surfaces,
-            supported_platforms=normalize_string_sequence(
-                request.supported_platforms,
-            ),
-            setup_hints=request.setup_hints,
-        )
+        manifest = create_manifest(request=request, name=name)
         try:
             target_path.mkdir(parents=True)
         except FileExistsError as exc:
@@ -257,9 +242,9 @@ class FilesystemSkillRepository:
             workspace_dir=request.workspace_dir,
             skill_name=request.skill_name,
         )
-        self._ensure_writable_package(package)
-        manifest = self._updated_manifest(package.manifest, request)
-        body = self._read_existing_instruction_body(package)
+        ensure_writable_package(package)
+        manifest = updated_manifest(package.manifest, request)
+        body = read_existing_instruction_body(package)
         Path(package.instructions_path).write_text(
             render_skill_markdown(manifest=manifest, body=body),
             encoding="utf-8",
@@ -286,7 +271,7 @@ class FilesystemSkillRepository:
             workspace_dir=workspace_dir,
             skill_name=skill_name,
         )
-        self._ensure_writable_package(package)
+        ensure_writable_package(package)
         Path(package.instructions_path).write_text(
             render_skill_markdown(
                 manifest=package.manifest,
@@ -317,7 +302,7 @@ class FilesystemSkillRepository:
             workspace_dir=workspace_dir,
             skill_name=skill_name,
         )
-        self._ensure_writable_package(package)
+        ensure_writable_package(package)
         relative_path = normalize_support_file_path(
             package=package,
             path=path,
@@ -348,7 +333,7 @@ class FilesystemSkillRepository:
             workspace_dir=workspace_dir,
             skill_name=skill_name,
         )
-        self._ensure_writable_package(package)
+        ensure_writable_package(package)
         relative_path = normalize_support_file_path(
             package=package,
             path=path,
@@ -457,102 +442,3 @@ class FilesystemSkillRepository:
                 )
             return workspace_root / DEFAULT_MANAGED_WORKSPACE_SKILL_ROOT
         return normalize_skill_root(self._global_root)
-
-    @staticmethod
-    def _ensure_writable_package(package: SkillPackage) -> None:
-        if package.source == "system":
-            raise SkillValidationError(
-                f"Skill '{package.name}' is from a readonly system source and cannot be changed.",
-            )
-
-    def _read_existing_instruction_body(self, package: SkillPackage) -> str:
-        content = read_text_file(
-            Path(package.instructions_path),
-            label=f"Skill '{package.name}' instructions",
-        )
-        return strip_markdown_frontmatter(content).strip()
-
-    def _materialize_current_manifest(self, *, target_path: Path, manifest: SkillManifest) -> None:
-        instructions_path = resolve_instructions_path(
-            root=target_path,
-            relative_path=manifest.instructions_path,
-        )
-        if instructions_path is None:
-            raise SkillValidationError(
-                f"Installed skill '{target_path}' is missing '{manifest.instructions_path}'.",
-            )
-        body = strip_markdown_frontmatter(
-            read_text_file(
-                instructions_path,
-                label=f"Skill '{manifest.name}' instructions",
-            ),
-        ).strip()
-        instructions_path.write_text(
-            render_skill_markdown(manifest=manifest, body=body),
-            encoding="utf-8",
-        )
-        legacy_manifest_path = target_path / DEFAULT_SKILL_MANIFEST_FILENAME
-        try:
-            resolved_legacy_manifest = legacy_manifest_path.resolve(strict=True)
-        except OSError:
-            return
-        if is_within_root(root=target_path, target=resolved_legacy_manifest):
-            resolved_legacy_manifest.unlink()
-
-    def _updated_manifest(
-        self,
-        manifest: SkillManifest,
-        request: SkillUpdateRequest,
-    ) -> SkillManifest:
-        return SkillManifest(
-            api_version=manifest.api_version,
-            kind=manifest.kind,
-            name=manifest.name,
-            description=request.description if request.description is not None else manifest.description,
-            version=request.version if request.version is not None else manifest.version,
-            tags=request.tags if request.tags is not None else manifest.tags,
-            when_to_use=manifest.when_to_use,
-            anti_patterns=manifest.anti_patterns,
-            instructions_path=manifest.instructions_path,
-            required_tools=(
-                normalize_tool_function_ids(request.required_tools)
-                if request.required_tools is not None
-                else manifest.required_tools
-            ),
-            optional_tools=(
-                normalize_tool_function_ids(request.optional_tools)
-                if request.optional_tools is not None
-                else manifest.optional_tools
-            ),
-            suggested_tools=(
-                normalize_tool_function_ids(request.suggested_tools)
-                if request.suggested_tools is not None
-                else manifest.suggested_tools
-            ),
-            allowed_tools=(
-                normalize_tool_function_ids(request.suggested_tools)
-                if request.suggested_tools is not None
-                else manifest.allowed_tools
-            ),
-            required_effects=(
-                request.required_effects
-                if request.required_effects is not None
-                else manifest.required_effects
-            ),
-            required_access=(
-                normalize_access_requirement_sequence(request.required_access)
-                if request.required_access is not None
-                else manifest.required_access
-            ),
-            surfaces=request.surfaces if request.surfaces is not None else manifest.surfaces,
-            supported_platforms=(
-                normalize_string_sequence(request.supported_platforms)
-                if request.supported_platforms is not None
-                else manifest.supported_platforms
-            ),
-            setup_hints=(
-                request.setup_hints
-                if request.setup_hints is not None
-                else manifest.setup_hints
-            ),
-        )

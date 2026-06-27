@@ -1,0 +1,142 @@
+{
+  "anthropic_messages": [
+    {
+      "kind": "assistant_message",
+      "phase": "final_answer",
+      "provider_item_id": "msg_anthropic_fixture:text",
+      "provider_item_type": "message.text",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 1,
+      "text": "I will use a shell command.",
+      "user_timeline_candidate": true
+    },
+    {
+      "arguments": {
+        "cmd": "curl https://example.test"
+      },
+      "call_id": "toolu_1",
+      "kind": "tool_call",
+      "phase": "unknown",
+      "provider_item_id": "toolu_1",
+      "provider_item_type": "tool_use",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 2,
+      "tool_name": "command.exec",
+      "user_timeline_candidate": false
+    }
+  ],
+  "gemini_generate_content": [
+    {
+      "kind": "assistant_message",
+      "phase": "final_answer",
+      "provider_item_id": "gemini_fixture:text",
+      "provider_item_type": "candidate.text",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 1,
+      "text": "I will query the docs.",
+      "user_timeline_candidate": true
+    },
+    {
+      "arguments": {
+        "cmd": "curl https://example.test"
+      },
+      "call_id": "12345678123456781234567812345678",
+      "kind": "tool_call",
+      "phase": "unknown",
+      "provider_item_id": "12345678123456781234567812345678",
+      "provider_item_type": "functionCall",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 2,
+      "tool_name": "command.exec",
+      "user_timeline_candidate": false
+    }
+  ],
+  "openai_chat_compatible": [
+    {
+      "kind": "assistant_message",
+      "phase": "final_answer",
+      "provider_item_id": "chatcmpl_fixture:message",
+      "provider_item_type": "chat.completion.message",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 1,
+      "text": "I will query the API.",
+      "user_timeline_candidate": true
+    },
+    {
+      "arguments": {
+        "cmd": "curl https://example.test"
+      },
+      "call_id": "call_chat_1",
+      "kind": "tool_call",
+      "phase": "unknown",
+      "provider_item_id": "call_chat_1",
+      "provider_item_type": "chat.completion.tool_call",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 2,
+      "tool_name": "command.exec",
+      "user_timeline_candidate": false
+    }
+  ],
+  "openai_codex_responses": [
+    {
+      "kind": "assistant_message",
+      "phase": "commentary",
+      "provider_item_id": "msg_codex_1",
+      "provider_item_type": "message",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 1,
+      "text": "I will inspect the official site.",
+      "user_timeline_candidate": true
+    },
+    {
+      "arguments": {
+        "cmd": "python scrape.py"
+      },
+      "call_id": "call_codex_1",
+      "kind": "tool_call",
+      "phase": "unknown",
+      "provider_item_id": "fc_codex_1",
+      "provider_item_type": "function_call",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 2,
+      "tool_name": "command.exec",
+      "user_timeline_candidate": false
+    }
+  ],
+  "openai_responses": [
+    {
+      "kind": "assistant_message",
+      "phase": "final_answer",
+      "provider_item_id": "msg_openai_1",
+      "provider_item_type": "message",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 1,
+      "text": "I will check the official source.",
+      "user_timeline_candidate": true
+    },
+    {
+      "arguments": {
+        "cmd": "curl https://example.test"
+      },
+      "call_id": "call_openai_1",
+      "kind": "tool_call",
+      "phase": "unknown",
+      "provider_item_id": "fc_openai_1",
+      "provider_item_type": "function_call",
+      "provider_replay_candidate": true,
+      "role": "assistant",
+      "sequence_no": 2,
+      "tool_name": "command.exec",
+      "user_timeline_candidate": false
+    }
+  ]
+}

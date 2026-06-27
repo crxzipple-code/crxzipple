@@ -5,17 +5,19 @@ from sqlalchemy import select
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.settings.domain.entities import SettingsOverride
 from crxzipple.modules.settings.domain.exceptions import SettingsAlreadyExistsError
-from crxzipple.modules.settings.infrastructure.persistence.domain_repository_mappers import (
-    _apply_override,
-    _override_from_record,
-    _override_record_from_domain,
+from crxzipple.modules.settings.infrastructure.persistence.domain_override_mappers import (
+    apply_override_model,
+    override_from_record,
+    override_record_from_domain,
 )
 from crxzipple.modules.settings.infrastructure.persistence.models import (
     SettingsOverrideModel,
 )
-from crxzipple.modules.settings.infrastructure.persistence.repository_mappers import (
+from crxzipple.modules.settings.infrastructure.persistence.repository_override_mappers import (
     _override_model,
     _override_record,
+)
+from crxzipple.modules.settings.infrastructure.persistence.repository_values import (
     _required_text,
 )
 
@@ -30,17 +32,17 @@ class SqlAlchemySettingsOverrideRepository:
                 f"settings override '{override.id}' already exists.",
             )
         with self._session_factory() as session:
-            session.add(_override_model(_override_record_from_domain(override)))
+            session.add(_override_model(override_record_from_domain(override)))
             session.commit()
 
     def save(self, override: SettingsOverride) -> None:
         with self._session_factory() as session:
             model = session.get(SettingsOverrideModel, override.id)
-            stored = _override_model(_override_record_from_domain(override))
+            stored = _override_model(override_record_from_domain(override))
             if model is None:
                 session.add(stored)
             else:
-                _apply_override(model, stored)
+                apply_override_model(model, stored)
             session.commit()
 
     def get(self, override_id: str) -> SettingsOverride | None:
@@ -51,7 +53,7 @@ class SqlAlchemySettingsOverrideRepository:
             )
             if model is None:
                 return None
-            return _override_from_record(_override_record(model))
+            return override_from_record(_override_record(model))
 
     def list_for_resource(
         self,
@@ -80,7 +82,7 @@ class SqlAlchemySettingsOverrideRepository:
             if enabled_only:
                 statement = statement.where(SettingsOverrideModel.status == "active")
             return tuple(
-                _override_from_record(_override_record(model))
+                override_from_record(_override_record(model))
                 for model in session.scalars(statement)
             )
 
@@ -120,7 +122,7 @@ class SqlAlchemySettingsOverrideRepository:
             }
             for model in session.scalars(statement):
                 grouped.setdefault(model.resource_id, []).append(
-                    _override_from_record(_override_record(model)),
+                    override_from_record(_override_record(model)),
                 )
             return {
                 resource_id: tuple(items)

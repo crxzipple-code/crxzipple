@@ -195,6 +195,29 @@ Browser can become a powerful external capability if exposed through stable tool
 - [x] Split Browser page-network fetch into request normalization, browser-page runtime execution, safety/diff analysis, event payload, and common result helpers.
 - [x] Split Browser control-engine tab operations, tab/runtime-state, CDP IO, host/process lifecycle helpers, and in-memory engines out of `engines.py`.
 - [x] Split Browser profile allocation selection strategy, target recycle policy, and target tracking/reconciliation projection out of the allocation lifecycle service.
+- [x] Split Browser storage inspection into payload coercion, cookie payloads,
+      CDP origin/session helpers, IndexedDB inspector, CacheStorage inspector,
+      and result projection/redaction helpers.
+- [x] Route local/session storage action result values through the shared storage
+      projector/redactor instead of echoing sensitive page state directly.
+- [x] Project partial IndexedDB/CacheStorage CDP errors through display-safe
+      messages before returning storage action results.
+- [x] Share Browser display-safe exception projection across CDP sessions and
+      network inspection partial errors.
+- [x] Use the same display-safe exception projection for Browser diagnostics and
+      CDP network-capture subscription/body fallback errors.
+- [x] Use the same display-safe exception projection for Browser action-trace
+      partial snapshot, network capture, stabilize, and action failure errors.
+- [x] Use the same display-safe exception projection for Browser network-list
+      performance fallback harvest errors.
+- [x] Use the same display-safe exception projection for Browser script-insight
+      source-read errors.
+- [x] Use the same display-safe exception projection for Browser profile-probe
+      diagnostics errors.
+- [x] Use the same display-safe exception projection for Browser DevTools
+      adapter errors.
+- [x] Use the same display-safe exception projection for Browser profile proxy
+      egress test failures.
 - [x] Add profile lease/isolation guard tests for current Browser allocation cleanup scope.
 - [x] Add CDP/action cleanup guard tests for current command-session, `cdp-raw`, network-inspect, and action-trace preview paths.
 - [x] Add trace/snapshot retention and size budgets.
@@ -314,6 +337,83 @@ Result:
   -> 14 passed.
   `PYTHONPATH=src pytest -q tests/unit/test_browser_profile_allocator.py tests/unit/test_browser_interfaces.py tests/unit/test_browser_domain.py tests/unit/test_operations_browser_read_model.py --tb=short --maxfail=1`
   -> 62 passed.
+- 2026-06-26 Browser storage inspection split:
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/storage_inspection.py src/crxzipple/modules/browser/infrastructure/storage_payloads.py src/crxzipple/modules/browser/infrastructure/storage_cookie_payloads.py src/crxzipple/modules/browser/infrastructure/storage_result_projection.py src/crxzipple/modules/browser/infrastructure/storage_cdp.py src/crxzipple/modules/browser/infrastructure/storage_indexeddb.py src/crxzipple/modules/browser/infrastructure/storage_cache.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_tool_http.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/storage_inspection.py src/crxzipple/modules/browser/infrastructure/storage_payloads.py src/crxzipple/modules/browser/infrastructure/storage_cookie_payloads.py src/crxzipple/modules/browser/infrastructure/storage_result_projection.py src/crxzipple/modules/browser/infrastructure/storage_cdp.py src/crxzipple/modules/browser/infrastructure/storage_indexeddb.py src/crxzipple/modules/browser/infrastructure/storage_cache.py`
+  -> passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py --tb=short --maxfail=1`
+  -> 38 passed.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_tool_http.py -k 'storage or cookies or routes_supported_action_kinds' --tb=short --maxfail=1`
+  -> 3 passed, 35 deselected.
+- 2026-06-27 Browser storage action result redaction:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py -q`
+  -> 38 passed.
+  `python -m compileall -q src/crxzipple/modules/browser/infrastructure/storage_inspection.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `ruff check src/crxzipple/modules/browser/infrastructure/storage_inspection.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+- 2026-06-27 Browser storage partial-error redaction:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py -q`
+  -> 38 passed.
+  `ruff check src/crxzipple/modules/browser/infrastructure/storage_cache.py src/crxzipple/modules/browser/infrastructure/storage_indexeddb.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `python -m compileall -q src/crxzipple/modules/browser/infrastructure/storage_cache.py src/crxzipple/modules/browser/infrastructure/storage_indexeddb.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+- 2026-06-27 Browser network inspection error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_cdp_sessions.py tests/unit/test_browser_playwright_runtime_actions.py -q`
+  -> 43 passed.
+  `ruff check src/crxzipple/modules/browser/infrastructure/error_projection.py src/crxzipple/modules/browser/infrastructure/cdp_sessions.py src/crxzipple/modules/browser/infrastructure/network_insight.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_cdp_sessions.py`
+  -> passed.
+  `python -m compileall -q src/crxzipple/modules/browser/infrastructure/error_projection.py src/crxzipple/modules/browser/infrastructure/cdp_sessions.py src/crxzipple/modules/browser/infrastructure/network_insight.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_cdp_sessions.py`
+  -> passed.
+- 2026-06-27 Browser diagnostics/network-capture error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_network_capture.py -k 'diagnostics or network_capture or network_inspect or cdp_network_capture' --tb=short --maxfail=1`
+  -> 15 passed, 33 deselected.
+  `ruff check src/crxzipple/modules/browser/infrastructure/diagnostics.py src/crxzipple/modules/browser/infrastructure/network_cdp_capture.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_network_capture.py`
+  -> passed.
+  `python -m compileall -q src/crxzipple/modules/browser/infrastructure/diagnostics.py src/crxzipple/modules/browser/infrastructure/network_cdp_capture.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_playwright_runtime_actions.py tests/unit/test_browser_network_capture.py`
+  -> passed.
+- 2026-06-27 Browser action-trace error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_actions.py -k 'action_trace' --tb=short --maxfail=1`
+  -> 13 passed, 2 deselected.
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_cdp_sessions.py tests/unit/test_browser_network_capture.py tests/unit/test_browser_playwright_runtime_actions.py -k 'cdp or diagnostics or network_capture or network_inspect or storage or cookies' --tb=short --maxfail=1`
+  -> 27 passed, 25 deselected.
+- 2026-06-27 Browser network-list fallback error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py -k 'network_list_fallback_errors_are_display_safe or network_capture_actions_record_and_list_requests or network_fetch_failure_emits_display_safe_event' --tb=short --maxfail=1`
+  -> 3 passed, 38 deselected.
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+- 2026-06-27 Browser script-insight source-read error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_playwright_runtime_actions.py -k 'script_find_request_source_errors_are_display_safe or script_find_request_locates_candidate_script_references or code_search_reads_live_debugger_scripts_and_returns_snippets' --tb=short --maxfail=1`
+  -> 3 passed, 39 deselected.
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+- 2026-06-27 Browser profile-probe diagnostics error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_profile_probe.py --tb=short --maxfail=1`
+  -> 5 passed.
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/profile_probe.py src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/profile_probe.py src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+- 2026-06-27 Browser DevTools adapter error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py --tb=short --maxfail=1`
+  -> 14 passed.
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/infrastructure/devtools.py src/crxzipple/modules/browser/infrastructure/profile_probe.py src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/infrastructure/devtools.py src/crxzipple/modules/browser/infrastructure/profile_probe.py src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+- 2026-06-27 Browser profile proxy egress error projection:
+  `PYTHONPATH=src pytest -q tests/unit/test_browser_http_profile_egress.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py --tb=short --maxfail=1`
+  -> 15 passed.
+  `PYTHONPATH=src ruff check src/crxzipple/modules/browser/interfaces/http_profile_egress.py src/crxzipple/modules/browser/infrastructure/devtools.py src/crxzipple/modules/browser/infrastructure/profile_probe.py src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_http_profile_egress.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
+  `PYTHONPATH=src python -m compileall -q src/crxzipple/modules/browser/interfaces/http_profile_egress.py src/crxzipple/modules/browser/infrastructure/devtools.py src/crxzipple/modules/browser/infrastructure/profile_probe.py src/crxzipple/modules/browser/infrastructure/script_insight.py src/crxzipple/modules/browser/infrastructure/network_actions.py src/crxzipple/modules/browser/infrastructure/action_trace_payloads.py src/crxzipple/modules/browser/infrastructure/error_projection.py tests/unit/test_browser_http_profile_egress.py tests/unit/test_browser_devtools_adapter.py tests/unit/test_browser_profile_probe.py tests/unit/test_browser_playwright_actions.py tests/unit/test_browser_playwright_runtime_actions.py`
+  -> passed.
 - `tests/unit/test_browser_cdp_control.py` and
   `tests/unit/test_browser_cdp_host_daemon.py` remain socket-bound in this
   sandbox for the same `ThreadingHTTPServer(("127.0.0.1", 0))` reason.

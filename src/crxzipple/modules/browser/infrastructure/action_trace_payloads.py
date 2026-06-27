@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 from crxzipple.modules.browser.domain import BrowserValidationError
 
+from .error_projection import display_safe_exception_message
+
 
 def _snapshot_result(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
@@ -31,12 +33,7 @@ def _trace_capture_id(trace_id: str) -> str:
 
 
 def _trace_error_message(exc: Exception) -> str:
-    message = " ".join(str(exc).split())
-    if not message:
-        message = exc.__class__.__name__
-    if len(message) > 500:
-        return f"{message[:497].rstrip()}..."
-    return message
+    return display_safe_exception_message(exc, limit=500)
 
 
 def _trace_error_list(value: Any) -> list[dict[str, Any]]:

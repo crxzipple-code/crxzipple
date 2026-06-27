@@ -51,7 +51,23 @@ class _FakeSession:
 class _FailingSession(_FakeSession):
     def send(self, method: str, params: dict[str, object] | None = None) -> object:
         del method, params
-        raise RuntimeError("Protocol error: target closed at https://example.test/a?token=secret")
+        raise RuntimeError(
+            "Protocol error: target closed at "
+            "https://example.test/a?token=secret-token#frag "
+            "Authorization: Bearer secret-token",
+        )
+
+
+class _UrlFailingSession(_FakeSession):
+    def send(self, method: str, params: dict[str, object] | None = None) -> object:
+        del params
+        if method == "Debugger.enable":
+            return {}
+        raise RuntimeError(
+            "Protocol error: failed at "
+            "https://example.test/a?token=secret-token#frag "
+            "Authorization: Bearer secret-token",
+        )
 
 
 class _FakeContext:
@@ -313,7 +329,22 @@ class BrowserDevToolsAdapterTestCase(unittest.TestCase):
         message = str(exc_info.exception)
         self.assertIn("Browser target is no longer available", message)
         self.assertIn("Next: reconcile the browser context lease", message)
-        self.assertNotIn("token=secret", message)
+        self.assertNotIn("secret-token", message)
+        self.assertNotIn("#frag", message)
+
+    def test_generic_devtools_errors_remain_display_safe(self) -> None:
+        with self.assertRaises(BrowserValidationError) as exc_info:
+            BrowserDevToolsAdapter().read_script_source(
+                _FakePage(_UrlFailingSession()),
+                script_id="script-1",
+        )
+
+        message = str(exc_info.exception)
+        self.assertIn("Browser CDP Debugger.getScriptSource failed", message)
+        self.assertIn("https://example.test/a?[redacted]", message)
+        self.assertIn("Authorization: [redacted]", message)
+        self.assertNotIn("secret-token", message)
+        self.assertNotIn("#frag", message)
 
 
 if __name__ == "__main__":

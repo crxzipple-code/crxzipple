@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import re
 from typing import Any, Iterator, Mapping
-from urllib.parse import urlsplit, urlunsplit
 
 from crxzipple.modules.browser.domain import BrowserValidationError
+
+from .error_projection import display_safe_exception_message
 
 
 BrowserCdpSessionMode = str
@@ -150,7 +150,7 @@ class BrowserCdpSessionBroker:
 
 def display_safe_cdp_error(exc: Exception, *, operation: str | None = None) -> str:
     operation_label = str(operation or "operation").strip() or "operation"
-    message = _sanitize_exception_message(exc)
+    message = display_safe_exception_message(exc, limit=600)
     normalized = message.lower()
     if any(marker in normalized for marker in _TARGET_LOST_MARKERS):
         return (
@@ -194,30 +194,6 @@ def _raw_session(session_or_lease: Any) -> Any:
     if isinstance(session_or_lease, BrowserCdpSessionLease):
         return session_or_lease.session
     return session_or_lease
-
-
-def _sanitize_exception_message(exc: Exception) -> str:
-    message = " ".join(str(exc).split())
-    if not message:
-        message = exc.__class__.__name__
-    message = _redact_urls(message)
-    if len(message) > 600:
-        message = f"{message[:597].rstrip()}..."
-    return message
-
-
-def _redact_urls(message: str) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        raw_url = match.group(0)
-        try:
-            parsed = urlsplit(raw_url)
-        except ValueError:
-            return raw_url
-        if parsed.query or parsed.fragment:
-            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "[redacted]", ""))
-        return raw_url
-
-    return re.sub(r"https?://[^\s'\"<>]+", _replace, message)
 
 
 __all__ = [

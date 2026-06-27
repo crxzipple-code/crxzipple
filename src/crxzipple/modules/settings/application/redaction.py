@@ -19,6 +19,8 @@ _SECRET_KEY_PARTS = (
     "credential",
     "private_key",
     "privatekey",
+    "authorization",
+    "bearer",
 )
 _DATABASE_URL_KEY_PARTS = (
     "database_url",
@@ -41,7 +43,11 @@ def redact_value(value: Any, *, _key: str | None = None) -> Any:
                 key_text,
                 item,
             ):
-                redacted[key] = REDACTED_VALUE
+                redacted[key] = (
+                    redact_value(item, _key=key_text)
+                    if is_safe_sensitive_reference(key_text, item)
+                    else REDACTED_VALUE
+                )
             else:
                 redacted[key] = redact_value(item, _key=key_text)
         return redacted
@@ -81,6 +87,18 @@ def is_safe_numeric_token_count_key(key: str, value: Any) -> bool:
     if not normalized.endswith("tokens"):
         return False
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def is_safe_sensitive_reference(key: str, value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    normalized_key = normalize_secret_key(key)
+    if normalized_key.endswith(("id", "ids")):
+        return True
+    return stripped.startswith(("access://", "settings://"))
 
 
 def is_database_url_key(key: str | None) -> bool:

@@ -40,23 +40,23 @@ def test_builtin_tool_manifests_do_not_embed_direct_credential_sources() -> None
 
 
 def test_tool_submission_requires_catalog_function_without_runtime_fallback() -> None:
-    submission_service = (
+    submission_preparation = (
         ROOT
         / "src"
         / "crxzipple"
         / "modules"
         / "tool"
         / "application"
-        / "submission_service.py"
+        / "submission_preparation.py"
     ).read_text(encoding="utf-8")
 
     catalog_lookup = "function = uow.tool_functions.get(data.tool_id)"
     function_build = "tool = build_tool_from_function(function)"
 
-    assert catalog_lookup in submission_service
-    assert function_build in submission_service
-    assert "self.catalog_service.resolve_tool" not in submission_service
-    assert "runtime_gateway.list_registered_tools()" not in submission_service
+    assert catalog_lookup in submission_preparation
+    assert function_build in submission_preparation
+    assert "catalog_service.resolve_tool" not in submission_preparation
+    assert "runtime_gateway.list_registered_tools()" not in submission_preparation
 
 
 def test_tool_catalog_does_not_discover_sources_during_runtime_resolution() -> None:
@@ -116,21 +116,21 @@ def test_tool_package_activation_filters_local_handlers_by_function_catalog() ->
     app_tool_package_assembly = (
         ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_packages.py"
     ).read_text(encoding="utf-8")
-    tool_packages = (
+    tool_package_activation_resolution = (
         ROOT
         / "src"
         / "crxzipple"
         / "modules"
         / "tool"
         / "infrastructure"
-        / "tool_packages.py"
+        / "tool_package_activation_resolution.py"
     ).read_text(encoding="utf-8")
 
     assert "AppKey.TOOL_SOURCE_QUERY_SERVICE" in app_tool_assembly
     assert "def active_local_function_refs_by_namespace(" in app_tool_package_assembly
     assert "local_function_refs_by_namespace=" in app_tool_package_assembly
-    assert "def _local_handler_enabled_by_catalog(" in tool_packages
-    assert "context.local_function_refs_for_namespace(" in tool_packages
+    assert "def _local_handler_enabled_by_catalog(" in tool_package_activation_resolution
+    assert "context.local_function_refs_for_namespace(" in tool_package_activation_resolution
 
 
 def test_process_local_tool_registration_api_is_removed() -> None:
@@ -165,6 +165,9 @@ def test_orchestration_tool_port_uses_runtime_pool_service() -> None:
     app_tool_assembly = (
         ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool.py"
     ).read_text(encoding="utf-8")
+    app_tool_service_graph = (
+        ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_service_graph.py"
+    ).read_text(encoding="utf-8")
     runtime_pool_service = (
         ROOT
         / "src"
@@ -176,9 +179,10 @@ def test_orchestration_tool_port_uses_runtime_pool_service() -> None:
     ).read_text(encoding="utf-8")
 
     assert "AppKey.TOOL_RUNTIME_POOL_SERVICE" in app_tool_assembly
-    assert "runtime_pool_service.list_enabled_tools(" in app_tool_assembly
-    assert "runtime_context=runtime_context" in app_tool_assembly
+    assert "runtime_pool_service.list_enabled_tools(" in app_tool_service_graph
+    assert "runtime_context=runtime_context" in app_tool_service_graph
     assert "include_process_local_overlay" not in app_tool_assembly
+    assert "include_process_local_overlay" not in app_tool_service_graph
     assert "runtime_context=runtime_context" in (
         ROOT
         / "src"

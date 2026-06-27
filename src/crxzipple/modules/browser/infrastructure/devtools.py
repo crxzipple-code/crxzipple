@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from crxzipple.modules.browser.domain import BrowserValidationError
 
 from .cdp_sessions import BrowserCdpSessionBroker
+from .error_projection import display_safe_exception_message
 
 
 JsonObject = dict[str, Any]
@@ -356,12 +357,7 @@ def _required_text(label: str, value: str) -> str:
 
 
 def _display_safe_message(exc: Exception) -> str:
-    message = " ".join(str(exc).split())
-    if not message:
-        message = exc.__class__.__name__
-    if len(message) > 300:
-        message = f"{message[:297].rstrip()}..."
-    return message
+    return display_safe_exception_message(exc, limit=300)
 
 
 def _add_cdp_listener(session: Any, event_name: str, callback: Any) -> None:

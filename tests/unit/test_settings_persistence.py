@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import unittest
 
 from sqlalchemy import create_engine, inspect
@@ -21,6 +22,7 @@ from crxzipple.modules.settings.infrastructure.persistence import (
     SettingsValidationResultModel,
     SettingsValidationResultRecord,
     SqlAlchemySettingsActionAuditRepository,
+    SqlAlchemySettingsActionAuditDomainRepository,
     SqlAlchemySettingsGovernanceRepository,
     create_sqlalchemy_settings_services,
 )
@@ -274,6 +276,115 @@ class SettingsPersistenceTestCase(unittest.TestCase):
 
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.error, {"code": "validation_failed"})
+
+    def test_action_audit_repository_redacts_sensitive_json_before_storage(self) -> None:
+        attempt = self.audit_repository.record_attempt(
+            action_type="publish",
+            target_type="settings_resource",
+            target_id="runtime.defaults",
+            reason="verify audit redaction",
+            request_metadata={
+                "api_key": "sk-raw-request-key",
+                "client_token": "raw-client-token",
+                "credential": "access://credential/openai",
+                "credential_binding_id": "openai-api-key",
+                "database_url": "postgresql://app:db-password@db.example.test/app?token=query-token",
+            },
+            trace_context={
+                "request_id": "trace-1",
+                "authorization": "Bearer raw-trace-token",
+            },
+        )
+        succeeded = self.audit_repository.mark_succeeded(
+            attempt.audit_id,
+            result={
+                "token": "raw-result-token",
+                "total_tokens": 42,
+                "credential_ref": "access://credential/openai",
+            },
+        )
+
+        with self.session_factory() as session:
+            stored = session.get(SettingsActionAuditModel, succeeded.audit_id)
+            assert stored is not None
+            stored_text = json.dumps(
+                {
+                    "request_metadata": stored.request_metadata,
+                    "result": stored.result,
+                    "trace_context": stored.trace_context,
+                },
+                sort_keys=True,
+            )
+
+        for secret in (
+            "sk-raw-request-key",
+            "raw-client-token",
+            "db-password",
+            "query-token",
+            "raw-trace-token",
+            "raw-result-token",
+        ):
+            self.assertNotIn(secret, stored_text)
+        self.assertEqual(succeeded.request_metadata["api_key"], "***")
+        self.assertEqual(succeeded.request_metadata["client_token"], "***")
+        self.assertEqual(
+            succeeded.request_metadata["credential"],
+            "access://credential/openai",
+        )
+        self.assertEqual(
+            succeeded.request_metadata["credential_binding_id"],
+            "openai-api-key",
+        )
+        self.assertEqual(succeeded.result["token"], "***")
+        self.assertEqual(succeeded.result["total_tokens"], 42)
+
+    def test_domain_action_audit_repository_redacts_terminal_payloads_before_storage(
+        self,
+    ) -> None:
+        repository = SqlAlchemySettingsActionAuditDomainRepository(
+            self.session_factory,
+        )
+        attempt = repository.record_attempt(
+            action_type="settings.update",
+            target_type="runtime-defaults",
+            target_id="runtime.defaults",
+            reason="verify domain audit redaction",
+            request_metadata={
+                "password": "raw-domain-password",
+                "credential": "access://credential/runtime",
+            },
+        )
+        failed = repository.mark_failed(
+            attempt.id,
+            error={
+                "message": "failed with token=raw-domain-token",
+                "private_key": "raw-domain-private-key",
+            },
+        )
+
+        with self.session_factory() as session:
+            stored = session.get(SettingsActionAuditModel, failed.id)
+            assert stored is not None
+            stored_text = json.dumps(
+                {
+                    "request_metadata": stored.request_metadata,
+                    "error": stored.error,
+                },
+                sort_keys=True,
+            )
+
+        for secret in (
+            "raw-domain-password",
+            "raw-domain-token",
+            "raw-domain-private-key",
+        ):
+            self.assertNotIn(secret, stored_text)
+        self.assertEqual(failed.request_metadata["password"], "***")
+        self.assertEqual(
+            failed.request_metadata["credential"],
+            "access://credential/runtime",
+        )
+        self.assertEqual(failed.error["private_key"], "***")
 
     def test_schema_has_settings_tables_without_raw_secret_columns(self) -> None:
         inspector = inspect(self.engine)

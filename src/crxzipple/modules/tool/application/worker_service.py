@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
-from datetime import datetime, timezone
 from threading import Event as ThreadEvent
 from typing import Any
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.tool.application.worker_assignment_selection import (
-    select_runnable_assignment_run_ids,
-)
 from crxzipple.modules.tool.application.catalog_service import ToolCatalogService
 from crxzipple.modules.tool.application.concurrency import ToolRunConcurrencyPolicy
 from crxzipple.modules.tool.application.dispatch_events import ToolRuntimeEventService
 from crxzipple.modules.tool.application.worker_capabilities import (
     build_worker_capabilities_payload,
+)
+from crxzipple.modules.tool.application.worker_admin import (
+    list_assignments as list_worker_assignments,
+    list_workers as list_registered_workers,
+    mark_worker_stale as mark_registered_worker_stale,
+    prune_expired_workers as prune_expired_worker_registrations,
+    register_worker as register_worker_record,
 )
 from crxzipple.modules.tool.application.ports import ToolEventWaitPort
 from crxzipple.modules.tool.application.service_support import (
@@ -24,16 +26,18 @@ from crxzipple.modules.tool.application.service_support import (
     ToolServiceDependencies,
 )
 from crxzipple.modules.tool.application.worker_errors import (
-    exception_message as _exception_message,
     exception_run_error as _exception_run_error,
 )
-from crxzipple.modules.tool.application.worker_recovery import (
-    apply_recovered_dispatch_task as _apply_recovered_dispatch_task,
+from crxzipple.modules.tool.application.worker_inflight import (
+    heartbeat_inflight_loop,
+    launch_assignments,
+    perform_assigned_run,
+    reap_inflight_tasks,
+    select_runnable_run_ids,
 )
-from crxzipple.modules.tool.application.worker_registration import (
-    mark_worker_stale_in_uow,
-    prune_expired_workers_in_uow,
-    register_or_refresh_worker,
+from crxzipple.modules.tool.application.worker_run_control import (
+    cancel_tool_run as cancel_run_in_uow,
+    handle_recovered_dispatch_task as handle_recovered_dispatch_task_in_uow,
 )
 from crxzipple.modules.tool.application.worker_run_resolution import (
     resolve_run_catalog_tool,
@@ -69,17 +73,11 @@ from crxzipple.modules.tool.domain.entities import (
     ToolRunAssignment,
     ToolWorkerRegistration,
 )
-from crxzipple.modules.tool.domain.exceptions import (
-    ToolRunNotFoundError,
-)
 from crxzipple.modules.tool.domain.value_objects import (
     ToolExecutionContext,
     ToolExecutionTarget,
-    ToolMode,
-    ToolRunAssignmentStatus,
     ToolRunError,
     ToolRunResult,
-    ToolRunStatus,
 )
 
 logger = get_logger(__name__)
@@ -103,50 +101,32 @@ class ToolWorkerService(ToolServiceBase):
         max_in_flight: int = 1,
         capabilities_payload: dict[str, Any] | None = None,
     ):
-        resolved_capabilities_payload = self._worker_capabilities_payload(
-            capabilities_payload,
+        return register_worker_record(
+            uow_factory=self.uow_factory,
+            worker_id=worker_id,
+            lease_seconds=self.worker_lease_seconds,
+            max_in_flight=max_in_flight,
+            capabilities_payload=capabilities_payload,
+            capabilities_payload_resolver=self._worker_capabilities_payload,
         )
-        with self.uow_factory() as uow:
-            worker = register_or_refresh_worker(
-                uow,
-                worker_id=worker_id,
-                lease_seconds=self.worker_lease_seconds,
-                max_in_flight=max_in_flight,
-                capabilities_payload=resolved_capabilities_payload,
-            )
-            uow.commit()
-            return worker
 
     def mark_worker_stale(self, *, worker_id: str):
-        with self.uow_factory() as uow:
-            worker = mark_worker_stale_in_uow(uow, worker_id=worker_id)
-            if worker is None:
-                return None
-            uow.commit()
-            return worker
+        return mark_registered_worker_stale(
+            uow_factory=self.uow_factory,
+            worker_id=worker_id,
+        )
 
     def list_workers(self) -> list[ToolWorkerRegistration]:
-        with self.uow_factory() as uow:
-            return uow.tool_workers.list()
+        return list_registered_workers(uow_factory=self.uow_factory)
 
     def prune_expired_workers(self, *, retention_seconds: int) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
-        with self.uow_factory() as uow:
-            result = prune_expired_workers_in_uow(
-                uow,
-                retention_seconds=retention_seconds,
-                now=now,
-            )
-            uow.commit()
-        return {
-            "pruned_count": result.pruned_count,
-            "worker_ids": result.pruned_worker_ids,
-            "cutoff": result.cutoff,
-        }
+        return prune_expired_worker_registrations(
+            uow_factory=self.uow_factory,
+            retention_seconds=retention_seconds,
+        )
 
     def list_assignments(self) -> list[ToolRunAssignment]:
-        with self.uow_factory() as uow:
-            return uow.tool_run_assignments.list()
+        return list_worker_assignments(uow_factory=self.uow_factory)
 
     def process_next_assigned_run(self, *, worker_id: str) -> ToolRun | None:
         with self.uow_factory() as uow:
@@ -195,57 +175,30 @@ class ToolWorkerService(ToolServiceBase):
         inflight_tasks: dict[str, asyncio.Task[ToolRun]],
         max_new_assignments: int,
     ) -> int:
-        if max_new_assignments <= 0:
-            return 0
-        run_ids = await asyncio.to_thread(
-            self._select_runnable_run_ids,
-            worker_id,
-            tuple(inflight_tasks.keys()),
-            max_new_assignments,
+        return await launch_assignments(
+            worker_id=worker_id,
+            inflight_tasks=inflight_tasks,
+            max_new_assignments=max_new_assignments,
+            select_runnable_run_ids=self._select_runnable_run_ids,
+            perform_assigned_run=self._perform_assigned_run,
         )
-        for run_id in run_ids:
-            inflight_tasks[run_id] = asyncio.create_task(
-                self._perform_assigned_run(run_id),
-                name=f"tool-run-{run_id}",
-            )
-        return len(run_ids)
 
     async def _reap_inflight_tasks(
         self,
         inflight_tasks: dict[str, asyncio.Task[ToolRun]],
     ) -> int:
-        completed = 0
-        for run_id, task in list(inflight_tasks.items()):
-            if not task.done():
-                continue
-            try:
-                await task
-            except Exception:
-                logger.exception(
-                    "tool worker task failed during reap",
-                    extra={"run_id": run_id},
-                )
-            finally:
-                inflight_tasks.pop(run_id, None)
-            completed += 1
-        return completed
+        return await reap_inflight_tasks(inflight_tasks, logger=logger)
 
     async def _perform_assigned_run(self, run_id: str) -> ToolRun:
-        try:
-            return await self._perform_run(
-                run_id,
+        return await perform_assigned_run(
+            run_id=run_id,
+            perform_run=lambda current_run_id: self._perform_run(
+                current_run_id,
                 manage_heartbeat=False,
-            )
-        except Exception as exc:
-            logger.exception(
-                "tool worker failed while executing assigned run",
-                extra={"run_id": run_id},
-            )
-            return await asyncio.to_thread(
-                self._fail_run,
-                run_id,
-                _exception_message(exc),
-            )
+            ),
+            fail_run=self._fail_run,
+            logger=logger,
+        )
 
     async def _heartbeat_inflight_loop(
         self,
@@ -254,31 +207,17 @@ class ToolWorkerService(ToolServiceBase):
         stop_event: ThreadEvent,
         inflight_tasks: dict[str, asyncio.Task[ToolRun]],
     ) -> None:
-        if self.worker_heartbeat_seconds <= 0:
-            return
-        while not stop_event.is_set():
-            await asyncio.sleep(self.worker_heartbeat_seconds)
-            run_ids = tuple(inflight_tasks.keys())
-            if not run_ids:
-                continue
-            results = await asyncio.gather(
-                *(
-                    asyncio.to_thread(
-                        self.heartbeat_run,
-                        run_id,
-                        worker_id=worker_id,
-                    )
-                    for run_id in run_ids
-                ),
-                return_exceptions=True,
-            )
-            for run_id, result in zip(run_ids, results, strict=False):
-                if isinstance(result, Exception):
-                    logger.error(
-                        "failed to heartbeat inflight tool run",
-                        extra={"run_id": run_id, "worker_id": worker_id},
-                        exc_info=(type(result), result, result.__traceback__),
-                    )
+        await heartbeat_inflight_loop(
+            worker_id=worker_id,
+            stop_event=stop_event,
+            inflight_tasks=inflight_tasks,
+            worker_heartbeat_seconds=self.worker_heartbeat_seconds,
+            heartbeat_run=lambda current_run_id, current_worker_id: self.heartbeat_run(
+                current_run_id,
+                worker_id=current_worker_id,
+            ),
+            logger=logger,
+        )
 
     def _select_runnable_run_ids(
         self,
@@ -286,44 +225,14 @@ class ToolWorkerService(ToolServiceBase):
         exclude_run_ids: tuple[str, ...],
         limit: int,
     ) -> tuple[str, ...]:
-        excluded = set(exclude_run_ids)
-        with self.uow_factory() as uow:
-            assignments = [
-                assignment
-                for assignment in uow.tool_run_assignments.list_for_worker(worker_id)
-                if assignment.status in {
-                    ToolRunAssignmentStatus.ASSIGNED,
-                    ToolRunAssignmentStatus.RUNNING,
-                }
-                and assignment.run_id not in excluded
-            ]
-            excluded_runs = uow.tool_runs.get_many(tuple(excluded))
-            active_counts: Counter[str] = Counter()
-            for run in excluded_runs.values():
-                if run.is_terminal():
-                    continue
-                tool = self._resolve_run_tool_for_concurrency(uow, run)
-                if tool is None:
-                    continue
-                self.concurrency_policy.reserve(
-                    run=run,
-                    tool=tool,
-                    active_counts=active_counts,
-                )
-            runs_by_id = uow.tool_runs.get_many(
-                tuple(assignment.run_id for assignment in assignments),
-            )
-            return select_runnable_assignment_run_ids(
-                assignments,
-                runs_by_id=runs_by_id,
-                active_counts=active_counts,
-                limit=limit,
-                concurrency_policy=self.concurrency_policy,
-                resolve_tool_for_run=lambda run: self._resolve_run_tool_for_concurrency(
-                    uow,
-                    run,
-                ),
-            )
+        return select_runnable_run_ids(
+            uow_factory=self.uow_factory,
+            concurrency_policy=self.concurrency_policy,
+            resolve_tool_for_run=self._resolve_run_tool_for_concurrency,
+            worker_id=worker_id,
+            exclude_run_ids=exclude_run_ids,
+            limit=limit,
+        )
 
     def _wait_for_worker_wakeup(
         self,
@@ -351,34 +260,12 @@ class ToolWorkerService(ToolServiceBase):
         )
 
     def cancel_tool_run(self, run_id: str) -> ToolRun:
-        with self.uow_factory() as uow:
-            run = uow.tool_runs.get(run_id)
-            if run is None:
-                raise ToolRunNotFoundError(f"Tool run '{run_id}' was not found.")
-            if run.is_terminal():
-                return run
-
-            if run.status in {
-                ToolRunStatus.CREATED,
-                ToolRunStatus.QUEUED,
-                ToolRunStatus.DISPATCHING,
-            }:
-                run.request_cancel()
-                run.cancel()
-                if run.target.mode is ToolMode.BACKGROUND:
-                    self.dispatch_port.cancel(uow.dispatch_tasks, uow, run)
-                    self._complete_background_tracking(
-                        uow,
-                        run,
-                        terminal_kind="cancelled",
-                    )
-            elif run.status is ToolRunStatus.RUNNING:
-                run.request_cancel()
-
-            uow.tool_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return cancel_run_in_uow(
+            uow_factory=self.uow_factory,
+            dispatch_port=self.dispatch_port,
+            complete_background_tracking=self._complete_background_tracking,
+            run_id=run_id,
+        )
 
     async def execute_prepared_runs(
         self,
@@ -556,21 +443,13 @@ class ToolWorkerService(ToolServiceBase):
         tool_run_id: str,
         reason: str,
     ) -> ToolRun | None:
-        with self.uow_factory() as uow:
-            run = uow.tool_runs.get(tool_run_id)
-            if run is None:
-                return None
-            _apply_recovered_dispatch_task(
-                uow,
-                run,
-                reason=reason,
-                dispatch_port=self.dispatch_port,
-                complete_background_tracking=self._complete_background_tracking,
-            )
-            uow.tool_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return handle_recovered_dispatch_task_in_uow(
+            uow_factory=self.uow_factory,
+            dispatch_port=self.dispatch_port,
+            complete_background_tracking=self._complete_background_tracking,
+            tool_run_id=tool_run_id,
+            reason=reason,
+        )
 
     def _fail_run(self, run_id: str, message: str) -> ToolRun:
         return fail_run(

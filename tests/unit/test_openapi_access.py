@@ -15,11 +15,15 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
     OpenApiSecurityRequirement,
     OpenApiSecurityScheme,
 )
-from crxzipple.modules.tool.infrastructure.runtimes.openapi_remote import (
-    _build_request,
-    _openapi_result_details,
-    _openapi_result_text,
-    _resolve_credential_binding,
+from crxzipple.modules.tool.infrastructure.runtimes.openapi_remote_requests import (
+    build_request as _build_request,
+)
+from crxzipple.modules.tool.infrastructure.runtimes.openapi_remote_results import (
+    openapi_result_details as _openapi_result_details,
+    openapi_result_text as _openapi_result_text,
+)
+from crxzipple.modules.tool.infrastructure.runtimes.openapi_remote_security import (
+    resolve_credential_binding as _resolve_credential_binding,
 )
 from crxzipple.shared.access import AccessCredentialKind
 from tests.unit.support import openapi_fixture_path

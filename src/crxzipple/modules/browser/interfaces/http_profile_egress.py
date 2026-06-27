@@ -7,6 +7,9 @@ import requests
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.modules.browser.domain import BrowserValidationError
 from crxzipple.modules.browser.infrastructure import BrowserLocalProxyAdapter
+from crxzipple.modules.browser.infrastructure.error_projection import (
+    display_safe_exception_message,
+)
 from crxzipple.shared.access import AccessConsumerRef
 
 from .http_profile_helpers import _profile_by_name, _system_config
@@ -48,7 +51,11 @@ def _test_static_proxy_egress(
             "http_status": response.status_code,
         }
     except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "reason": str(exc), "url": url}
+        return {
+            "status": "failed",
+            "reason": display_safe_exception_message(exc),
+            "url": display_safe_exception_message(url),
+        }
     finally:
         session.close()
 

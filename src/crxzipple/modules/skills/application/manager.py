@@ -30,7 +30,6 @@ from crxzipple.modules.skills.application.models import (
 from crxzipple.modules.skills.application.ports import (
     SkillCatalogPort,
     SkillGovernancePort,
-    SkillAuthoringDraftRepositoryPort,
     SkillInspectionPort,
     SkillInstallationPort,
     SkillReadPort,
@@ -41,6 +40,9 @@ from crxzipple.modules.skills.application.owner_state import (
     SkillOwnerStateService,
 )
 from crxzipple.modules.skills.application.package_service import SkillPackageService
+from crxzipple.modules.skills.application.manager_services import (
+    build_skill_manager_service_graph,
+)
 from crxzipple.modules.skills.application.runtime_request_resolver import (
     SkillRuntimeRequestResolution,
     SkillRuntimeRequestResolver,
@@ -76,64 +78,28 @@ class SkillManager(
     authoring_service: SkillAuthoringService | None = None
 
     def __post_init__(self) -> None:
-        if self.owner_state is None:
-            self.owner_state = SkillOwnerStateService(
-                owner_catalog_repository=self.owner_catalog_repository,
-                event_emitter=self.event_emitter,
-            )
-        assert self.owner_state is not None
-        if self.catalog_service is None:
-            self.catalog_service = SkillCatalogService(
-                repository=self.repository,
-                owner_state=self.owner_state,
-                runtime_request_resolver=self.runtime_request_resolver,
-                persist_runtime_request_readiness=(
-                    self.persist_runtime_request_readiness
-                ),
-            )
-        assert self.catalog_service is not None
-        if self.source_service is None:
-            self.source_service = SkillSourceService(
-                catalog_service=self.catalog_service,
-                owner_state=self.owner_state,
-                owner_catalog_repository=self.owner_catalog_repository,
-                event_emitter=self.event_emitter,
-            )
-        assert self.source_service is not None
-        if self.package_service is None:
-            self.package_service = SkillPackageService(
-                repository=self.repository,
-                catalog_service=self.catalog_service,
-                source_service=self.source_service,
-                owner_state=self.owner_state,
-                event_emitter=self.event_emitter,
-            )
-        if self.governance_service is None:
-            self.governance_service = SkillGovernanceService(
-                catalog_service=self.catalog_service,
-                owner_state=self.owner_state,
-                owner_catalog_repository=self.owner_catalog_repository,
-                event_emitter=self.event_emitter,
-            )
-        if self.readiness_service is None:
-            self.readiness_service = SkillReadinessService(
-                catalog_service=self.catalog_service,
-                owner_state=self.owner_state,
-                runtime_request_resolver=self.runtime_request_resolver,
-                tool_readiness_port=self.tool_readiness_port,
-            )
-        if self.authoring_service is None:
-            self.authoring_service = SkillAuthoringService(
-                draft_repository=(
-                    self.owner_catalog_repository
-                    if _supports_authoring_drafts(self.owner_catalog_repository)
-                    else None
-                ),
-                package_service=self.package_service,
-                runtime_request_resolver=self.runtime_request_resolver,
-                tool_readiness_port=self.tool_readiness_port,
-                event_emitter=self.event_emitter,
-            )
+        graph = build_skill_manager_service_graph(
+            repository=self.repository,
+            owner_catalog_repository=self.owner_catalog_repository,
+            event_emitter=self.event_emitter,
+            runtime_request_resolver=self.runtime_request_resolver,
+            persist_runtime_request_readiness=self.persist_runtime_request_readiness,
+            tool_readiness_port=self.tool_readiness_port,
+            owner_state=self.owner_state,
+            catalog_service=self.catalog_service,
+            source_service=self.source_service,
+            package_service=self.package_service,
+            governance_service=self.governance_service,
+            readiness_service=self.readiness_service,
+            authoring_service=self.authoring_service,
+        )
+        self.owner_state = graph.owner_state
+        self.catalog_service = graph.catalog_service
+        self.source_service = graph.source_service
+        self.package_service = graph.package_service
+        self.governance_service = graph.governance_service
+        self.readiness_service = graph.readiness_service
+        self.authoring_service = graph.authoring_service
 
     def configure_runtime_readiness(
         self,
@@ -246,18 +212,6 @@ class SkillManager(
             workspace_dir=workspace_dir,
             surface=surface,
             include_disabled=include_disabled,
-        )
-
-    def _discover_packages(
-        self,
-        *,
-        workspace_dir: str | None,
-        surface: str,
-    ) -> tuple[SkillPackage, ...]:
-        assert self.catalog_service is not None
-        return self.catalog_service.discover_packages(
-            workspace_dir=workspace_dir,
-            surface=surface,
         )
 
     def get(
@@ -523,21 +477,3 @@ class SkillManager(
             draft_id=draft_id,
             limit=limit,
         )
-
-
-def _supports_authoring_drafts(
-    repository: object | None,
-) -> SkillAuthoringDraftRepositoryPort | None:
-    if repository is None:
-        return None
-    required = (
-        "save_draft",
-        "get_draft",
-        "list_drafts",
-        "delete_draft",
-        "append_draft_audit",
-        "list_draft_audit",
-    )
-    if all(hasattr(repository, name) for name in required):
-        return repository  # type: ignore[return-value]
-    return None
